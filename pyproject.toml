@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mi-fitness-sync"
+version = "0.1.0"
+description = "Unofficial Python CLI for accessing Mi Fitness workout data and manually syncing activities that failed to reach Strava"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+]
+
+[project.scripts]
+mi-fitness-sync = "mi_fitness_sync.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["mi_fitness_sync"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
