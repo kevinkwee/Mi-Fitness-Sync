@@ -156,3 +156,6 @@ You can override that location with:
 3. The auth state file contains sensitive session data and should be protected.
 
 If you use this on a shared machine, treat the local auth state like a credential.
+
+## License
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
