@@ -92,7 +92,6 @@ class MiFitnessAuthClient:
         email: str,
         password: str,
         device_id: str,
-        country_code: str | None = None,
     ) -> LoginSession:
         meta = self._get_meta_login_data(email=email, device_id=device_id)
         response = self.session.post(
@@ -102,7 +101,6 @@ class MiFitnessAuthClient:
                 email=email,
                 password=password,
                 meta=meta,
-                country_code=country_code,
             ),
             cookies={"deviceId": device_id},
             timeout=self.timeout,
@@ -166,7 +164,6 @@ class MiFitnessAuthClient:
         email: str,
         password: str,
         meta: MetaLoginData,
-        country_code: str | None,
     ) -> dict[str, str]:
         form = {
             "user": email,
@@ -177,9 +174,6 @@ class MiFitnessAuthClient:
             "qs": meta.qs,
             "callback": meta.callback,
         }
-        if country_code:
-            form["cc"] = country_code
-            form["countryCode"] = country_code
         return form
 
     def _get_meta_login_data(self, *, email: str, device_id: str) -> MetaLoginData:

@@ -87,8 +87,7 @@ python -m mi_fitness_sync login --email you@example.com --password your-password
 
 Relevant flags:
 
-1. `--country-code` to send a country code hint such as `44`
-2. `--state-path` to override the default auth state file path
+1. `--state-path` to override the default auth state file path
 
 ### `auth-status`
 

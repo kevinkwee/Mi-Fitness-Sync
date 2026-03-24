@@ -25,7 +25,6 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser = subparsers.add_parser("login", help="Authenticate with Mi Fitness via Xiaomi Passport")
     login_parser.add_argument("--email", required=True, help="Mi / Xiaomi account email")
     login_parser.add_argument("--password", required=True, help="Mi / Xiaomi account password")
-    login_parser.add_argument("--country-code", help="Optional country code hint, for example 44")
     login_parser.add_argument("--state-path", help="Override the persisted auth state path")
 
     logout_parser = subparsers.add_parser("logout", help="Delete the persisted auth state")
@@ -80,7 +79,6 @@ def handle_login(args: argparse.Namespace) -> int:
         email=args.email,
         password=args.password,
         device_id=device_id,
-        country_code=args.country_code,
     )
 
     state = session.to_auth_state()
