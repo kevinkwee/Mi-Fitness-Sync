@@ -41,7 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     activities_parser.add_argument("--until", help="Inclusive end time as unix seconds or ISO-8601")
     activities_parser.add_argument("--limit", type=int, default=20, help="Maximum activities to return (default: 20)")
     activities_parser.add_argument("--category", help="Optional Mi Fitness category filter")
-    activities_parser.add_argument("--region", help="Optional Mi Fitness region override such as sg, de, us, or cn")
+    activities_parser.add_argument(
+        "--country-code",
+        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+    )
     activities_parser.add_argument("--json", action="store_true", help="Print activities as JSON")
 
     return parser
@@ -137,7 +140,7 @@ def handle_list_activities(args: argparse.Namespace) -> int:
     if start_time is not None and end_time is not None and start_time > end_time:
         raise MiFitnessError("--since must be earlier than or equal to --until.")
 
-    client = MiFitnessActivitiesClient(state, region=args.region)
+    client = MiFitnessActivitiesClient(state, country_code=args.country_code)
     activities = client.list_activities(
         start_time=start_time,
         end_time=end_time,

@@ -39,6 +39,16 @@ def test_main_returns_error_for_invalid_limit(monkeypatch, capsys, auth_state):
     assert "--limit must be greater than zero." in captured.err
 
 
+def test_main_returns_error_for_invalid_country_override(monkeypatch, capsys, auth_state):
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+
+    exit_code = cli.main(["list-activities", "--country-code", "ZZ"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Unsupported Mi Fitness country override: ZZ." in captured.err
+
+
 def test_list_activities_json_output(monkeypatch, capsys, auth_state):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
 
@@ -62,9 +72,9 @@ def test_list_activities_json_output(monkeypatch, capsys, auth_state):
     )
 
     class DummyClient:
-        def __init__(self, state, region=None):
+        def __init__(self, state, country_code=None):
             assert state == auth_state
-            self.region = region
+            self.country_code = country_code
 
         def list_activities(self, *, start_time, end_time, limit, category=None):
             assert start_time == 1704067200
@@ -75,7 +85,7 @@ def test_list_activities_json_output(monkeypatch, capsys, auth_state):
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
 
-    exit_code = cli.main(["list-activities", "--since", "2024-01-01T00:00:00Z", "--limit", "1", "--json"])
+    exit_code = cli.main(["list-activities", "--since", "2024-01-01T00:00:00Z", "--limit", "1", "--country-code", "ID", "--json"])
     output = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0

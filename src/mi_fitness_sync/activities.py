@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 
 import requests
 
-from mi_fitness_sync.exceptions import XiaomiApiError
+from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
+from mi_fitness_sync.region_mapping import region_for_country_code
 from mi_fitness_sync.storage import AuthState
 
 
@@ -146,10 +147,16 @@ class Activity:
 
 
 class MiFitnessActivitiesClient:
-    def __init__(self, auth_state: AuthState, *, timeout: int = DEFAULT_TIMEOUT_SECONDS, region: str | None = None):
+    def __init__(
+        self,
+        auth_state: AuthState,
+        *,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        country_code: str | None = None,
+    ):
         self._auth_state = auth_state
         self._timeout = timeout
-        self._region_override = self._normalize_region(region)
+        self._region_override = region_for_country_code(country_code)
         self._resolved_region: str | None = None
         self._session = requests.Session()
         self._session.headers.update(

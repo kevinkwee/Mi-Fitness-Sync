@@ -111,7 +111,7 @@ Examples:
 python -m mi_fitness_sync list-activities --limit 10
 python -m mi_fitness_sync list-activities --since 2024-01-01 --json
 python -m mi_fitness_sync list-activities --since 1717200000 --until 1719800000 --limit 50
-python -m mi_fitness_sync list-activities --since 2026-03-20 --region sg
+python -m mi_fitness_sync list-activities --since 2026-03-20 --country-code ID
 ```
 
 Relevant flags:
@@ -119,8 +119,10 @@ Relevant flags:
 1. `--since` and `--until` accept unix seconds or ISO-8601 timestamps
 2. `--limit` controls how many activities are returned
 3. `--category` passes a Mi Fitness category filter if you already know the category string
-4. `--region` overrides the Mi Fitness cloud region if auto-detection is wrong
+4. `--country-code` overrides activity routing with a two-letter country code such as `ID`, `GB`, or `US`; the CLI maps that to the Mi Fitness region used by the Android app
 5. `--json` prints the parsed activity list as JSON
+
+If `--country-code` is omitted, the CLI keeps the existing automatic Mi Fitness region detection behavior.
 
 ### `logout`
 
