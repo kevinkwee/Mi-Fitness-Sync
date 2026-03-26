@@ -4,9 +4,11 @@ import argparse
 import json
 import sys
 from dataclasses import asdict, replace
+from pathlib import Path
 
 from mi_fitness_sync.activities import MiFitnessActivitiesClient, parse_cli_time, render_activities_table
 from mi_fitness_sync.auth import DEFAULT_SERVICE_ID, MiFitnessAuthClient
+from mi_fitness_sync.exports import SUPPORTED_EXPORT_FORMATS, render_export
 from mi_fitness_sync.exceptions import (
     AuthStateNotFoundError,
     CaptchaRequiredError,
@@ -46,6 +48,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     activities_parser.add_argument("--json", action="store_true", help="Print activities as JSON")
 
+    detail_parser = subparsers.add_parser("activity-detail", help="Fetch normalized detail for a listed Mi Fitness activity")
+    detail_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
+    detail_parser.add_argument("--state-path", help="Override the persisted auth state path")
+    detail_parser.add_argument(
+        "--country-code",
+        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+    )
+    detail_parser.add_argument("--json", action="store_true", help="Print the normalized activity detail as JSON")
+
+    export_parser = subparsers.add_parser("export-activity", help="Export one Mi Fitness activity to GPX, TCX, or FIT")
+    export_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
+    export_parser.add_argument("--state-path", help="Override the persisted auth state path")
+    export_parser.add_argument(
+        "--country-code",
+        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+    )
+    export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
+    export_parser.add_argument("--output", required=True, help="Destination file path")
+    export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
+
     return parser
 
 
@@ -62,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
             return handle_auth_status(args)
         if args.command == "list-activities":
             return handle_list_activities(args)
+        if args.command == "activity-detail":
+            return handle_activity_detail(args)
+        if args.command == "export-activity":
+            return handle_export_activity(args)
     except MiFitnessError as exc:
         print(format_error(exc), file=sys.stderr)
         return 1
@@ -126,10 +152,6 @@ def handle_auth_status(args: argparse.Namespace) -> int:
 
 
 def handle_list_activities(args: argparse.Namespace) -> int:
-    state = load_state(args.state_path)
-    if state is None:
-        raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
-
     if args.limit <= 0:
         raise MiFitnessError("--limit must be greater than zero.")
 
@@ -138,7 +160,7 @@ def handle_list_activities(args: argparse.Namespace) -> int:
     if start_time is not None and end_time is not None and start_time > end_time:
         raise MiFitnessError("--since must be earlier than or equal to --until.")
 
-    client = MiFitnessActivitiesClient(state, country_code=args.country_code)
+    client = _activities_client(args.state_path, args.country_code)
     activities = client.list_activities(
         start_time=start_time,
         end_time=end_time,
@@ -152,6 +174,50 @@ def handle_list_activities(args: argparse.Namespace) -> int:
 
     print(render_activities_table(activities))
     return 0
+
+
+def handle_activity_detail(args: argparse.Namespace) -> int:
+    client = _activities_client(args.state_path, args.country_code)
+    detail = client.get_activity_detail(args.activity_id)
+
+    if args.json:
+        print(json.dumps(detail.to_json_dict(), indent=2, sort_keys=True))
+        return 0
+
+    print(f"Activity ID: {detail.activity.activity_id}")
+    print(f"Title: {detail.activity.title}")
+    print(f"Category: {detail.activity.category or 'unknown'}")
+    print(f"Start: {detail.start_time}")
+    print(f"End: {detail.end_time}")
+    print(f"Duration seconds: {detail.total_duration_seconds}")
+    print(f"Distance meters: {detail.total_distance_meters}")
+    print(f"Calories: {detail.total_calories if detail.total_calories is not None else 'unknown'}")
+    print(f"Track points: {len(detail.track_points)}")
+    print(f"Samples: {len(detail.samples)}")
+    return 0
+
+
+def handle_export_activity(args: argparse.Namespace) -> int:
+    client = _activities_client(args.state_path, args.country_code)
+    detail = client.get_activity_detail(args.activity_id)
+    export = render_export(detail, args.format, compress=args.gzip)
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(export.payload)
+
+    print(f"Exported {detail.activity.activity_id} to {output_path}")
+    print(f"Format: {export.file_format}")
+    print(f"Compressed: {'yes' if export.compressed else 'no'}")
+    print(f"Bytes written: {len(export.payload)}")
+    return 0
+
+
+def _activities_client(state_path: str | None, country_code: str | None) -> MiFitnessActivitiesClient:
+    state = load_state(state_path)
+    if state is None:
+        raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
+    return MiFitnessActivitiesClient(state, country_code=country_code)
 
 
 def format_error(exc: MiFitnessError) -> str:

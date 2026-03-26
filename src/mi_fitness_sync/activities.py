@@ -14,15 +14,22 @@ from urllib.parse import urlparse
 import requests
 
 from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
+from mi_fitness_sync.fds_parser import download_and_parse_sport_record
 from mi_fitness_sync.region_mapping import region_for_country_code
 from mi_fitness_sync.storage import AuthState
 
 
 ACTIVITY_LIST_ENDPOINT = "https://hlth.io.mi.com/app/v1/data/get_sport_records_by_time"
+FITNESS_DATA_TIME_ENDPOINT = "https://hlth.io.mi.com/app/v1/data/get_fitness_data_by_time"
+FDS_DOWNLOAD_URL_ENDPOINT = "https://hlth.io.mi.com/healthapp/service/gen_download_url"
 REGION_BY_IP_ENDPOINT = "https://region.hlth.io.mi.com/app/v1/public/user_region_by_ip"
 REGION_BY_IP_AUTH_KEY = "rwelJuWBFJxmbMKD"
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_TIMEOUT_SECONDS = 30
+DETAIL_DATA_KEY = "huami_sport_record"
+ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
+FDS_SPORT_RECORD_FILE_TYPE = 0
+FDS_GPS_FILE_TYPE = 2
 
 
 def parse_cli_time(value: str) -> int:
@@ -119,6 +126,13 @@ class ActivityPage:
 
 
 @dataclass(slots=True)
+class FitnessDataPage:
+    items: list[dict[str, Any]]
+    has_more: bool
+    next_key: str | None
+
+
+@dataclass(slots=True)
 class Activity:
     activity_id: str
     sid: str
@@ -144,6 +158,152 @@ class Activity:
         payload["duration"] = format_duration(self.duration_seconds)
         payload["distance_km"] = None if self.distance_meters is None else round(self.distance_meters / 1000, 3)
         return payload
+
+
+@dataclass(slots=True)
+class ActivitySample:
+    timestamp: int
+    start_time: int | None
+    end_time: int | None
+    duration_seconds: int | None
+    heart_rate: int | None
+    cadence: int | None
+    speed_mps: float | None
+    distance_meters: float | None
+    altitude_meters: float | None
+    steps: int | None
+    calories: int | None
+    raw_sample: dict[str, Any]
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "timestamp_local": format_terminal_time(self.timestamp),
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "duration_seconds": self.duration_seconds,
+            "heart_rate": self.heart_rate,
+            "cadence": self.cadence,
+            "speed_mps": self.speed_mps,
+            "distance_meters": self.distance_meters,
+            "altitude_meters": self.altitude_meters,
+            "steps": self.steps,
+            "calories": self.calories,
+            "raw_sample": self.raw_sample,
+        }
+
+
+@dataclass(slots=True)
+class TrackPoint:
+    timestamp: int
+    latitude: float | None
+    longitude: float | None
+    altitude_meters: float | None
+    speed_mps: float | None
+    distance_meters: float | None
+    heart_rate: int | None
+    cadence: int | None
+    raw_point: dict[str, Any]
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "timestamp_local": format_terminal_time(self.timestamp),
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "altitude_meters": self.altitude_meters,
+            "speed_mps": self.speed_mps,
+            "distance_meters": self.distance_meters,
+            "heart_rate": self.heart_rate,
+            "cadence": self.cadence,
+            "raw_point": self.raw_point,
+        }
+
+
+@dataclass(slots=True)
+class ActivityDetail:
+    activity: Activity
+    detail_sid: str
+    detail_key: str
+    detail_time: int
+    zone_name: str | None
+    zone_offset_seconds: int | None
+    track_points: list[TrackPoint]
+    samples: list[ActivitySample]
+    raw_fitness_item: dict[str, Any]
+    raw_detail: dict[str, Any]
+
+    @property
+    def start_time(self) -> int:
+        return self.activity.start_time or self.detail_time
+
+    @property
+    def end_time(self) -> int:
+        if self.activity.end_time is not None:
+            return self.activity.end_time
+        if self.samples:
+            return self.samples[-1].timestamp
+        if self.track_points:
+            return self.track_points[-1].timestamp
+        return self.detail_time
+
+    @property
+    def total_duration_seconds(self) -> int:
+        if self.activity.duration_seconds is not None:
+            return self.activity.duration_seconds
+        return max(self.end_time - self.start_time, 0)
+
+    @property
+    def _is_timeline_fallback(self) -> bool:
+        return self.detail_key == "fitness_data_timeline"
+
+    @property
+    def total_distance_meters(self) -> float:
+        if self._is_timeline_fallback:
+            sample_distances = [sample.distance_meters for sample in self.samples if sample.distance_meters is not None]
+            if sample_distances:
+                return max(sample_distances)
+        if self.activity.distance_meters is not None:
+            return float(self.activity.distance_meters)
+        distances = [point.distance_meters for point in self.track_points if point.distance_meters is not None]
+        if distances:
+            return max(distances)
+        sample_distances = [sample.distance_meters for sample in self.samples if sample.distance_meters is not None]
+        if sample_distances:
+            return max(sample_distances)
+        return 0.0
+
+    @property
+    def total_calories(self) -> int | None:
+        if self._is_timeline_fallback:
+            sample_calories = [sample.calories for sample in self.samples if sample.calories is not None]
+            if sample_calories:
+                return max(sample_calories)
+        if self.activity.calories is not None:
+            return self.activity.calories
+        sample_calories = [sample.calories for sample in self.samples if sample.calories is not None]
+        if sample_calories:
+            return max(sample_calories)
+        return None
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "activity": self.activity.to_json_dict(),
+            "detail_sid": self.detail_sid,
+            "detail_key": self.detail_key,
+            "detail_time": self.detail_time,
+            "zone_name": self.zone_name,
+            "zone_offset_seconds": self.zone_offset_seconds,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "duration_seconds": self.total_duration_seconds,
+            "distance_meters": self.total_distance_meters,
+            "calories": self.total_calories,
+            "track_points": [point.to_json_dict() for point in self.track_points],
+            "samples": [sample.to_json_dict() for sample in self.samples],
+            "raw_fitness_item": self.raw_fitness_item,
+            "raw_detail": self.raw_detail,
+        }
 
 
 class MiFitnessActivitiesClient:
@@ -193,6 +353,89 @@ class MiFitnessActivitiesClient:
             next_key = page.next_key
 
         return activities
+
+    def get_activity_by_id(
+        self,
+        activity_id: str,
+        *,
+        search_window_seconds: int = ACTIVITY_ID_SEARCH_WINDOW_SECONDS,
+    ) -> Activity:
+        sid, key, time_value = parse_activity_id(activity_id)
+        start_time = max(time_value - search_window_seconds, 0)
+        end_time = time_value + search_window_seconds
+        next_key: str | None = None
+
+        while True:
+            page = self._fetch_activity_page(
+                start_time=start_time,
+                end_time=end_time,
+                limit=DEFAULT_PAGE_SIZE,
+                category=None,
+                next_key=next_key,
+            )
+            for activity in page.activities:
+                if activity.sid == sid and activity.key == key:
+                    return activity
+            if not page.has_more or not page.next_key:
+                break
+            next_key = page.next_key
+
+        raise MiFitnessError(f"Could not find activity {activity_id} in Mi Fitness for the surrounding time window.")
+
+    def get_activity_detail(self, activity_or_id: Activity | str) -> ActivityDetail:
+        activity = activity_or_id if isinstance(activity_or_id, Activity) else self.get_activity_by_id(activity_or_id)
+        fds_downloads = self._try_get_fds_download_map(activity)
+
+        fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
+
+        fitness_item = self._get_activity_detail_item(activity)
+        if fitness_item:
+            detail = self._build_activity_detail_from_item(activity, fitness_item, fds_downloads)
+            if fds_samples and len(fds_samples) > len(detail.samples):
+                detail.samples = fds_samples
+            return detail
+
+        timeline_items = self._get_activity_timeline_items(activity)
+        activity_start = activity.start_time or activity.raw_record.get("time") or 0
+        activity_end = activity.end_time
+        if activity_end is None and activity.duration_seconds is not None and activity_start:
+            activity_end = activity_start + activity.duration_seconds
+
+        best_samples = fds_samples
+        if not best_samples:
+            best_samples = _extract_timeline_samples(
+                timeline_items,
+                sid=activity.sid,
+                activity_start=activity_start,
+                activity_end=activity_end,
+            )
+
+        if best_samples:
+            source = "fds_sport_record" if fds_samples else "fitness_data_timeline"
+            return ActivityDetail(
+                activity=activity,
+                detail_sid=activity.sid,
+                detail_key=source,
+                detail_time=activity.start_time or activity.raw_record.get("time") or 0,
+                zone_name=_common_zone_name(timeline_items) or _coerce_str(activity.raw_record.get("zone_name")),
+                zone_offset_seconds=_common_zone_offset(timeline_items) or _coerce_int(activity.raw_record.get("zone_offset")),
+                track_points=[],
+                samples=best_samples,
+                raw_fitness_item={
+                    "source": source,
+                    "item_count": len(timeline_items) if not fds_samples else 0,
+                },
+                raw_detail={
+                    "source": source,
+                    "fds_downloads": fds_downloads,
+                    "fitness_data": timeline_items if not fds_samples else [],
+                },
+            )
+
+        raise MiFitnessError(
+            f"Could not find a detail payload for activity {activity.activity_id} in Mi Fitness. "
+            "The workout summary exists, but Mi Fitness did not expose a JSON detail blob or timeline samples for it."
+        )
 
     def _fetch_activity_page(
         self,
@@ -281,6 +524,18 @@ class MiFitnessActivitiesClient:
             return ACTIVITY_LIST_ENDPOINT
         return ACTIVITY_LIST_ENDPOINT.replace("://", f"://{region}.", 1)
 
+    def _get_fitness_data_time_endpoint(self) -> str:
+        region = self._get_region()
+        if region == "cn":
+            return FITNESS_DATA_TIME_ENDPOINT
+        return FITNESS_DATA_TIME_ENDPOINT.replace("://", f"://{region}.", 1)
+
+    def _get_fds_download_url_endpoint(self) -> str:
+        region = self._get_region()
+        if region == "cn":
+            return FDS_DOWNLOAD_URL_ENDPOINT
+        return FDS_DOWNLOAD_URL_ENDPOINT.replace("://", f"://{region}.", 1)
+
     def _get_region(self) -> str:
         if self._region_override:
             return self._region_override
@@ -345,17 +600,18 @@ class MiFitnessActivitiesClient:
         params: dict[str, str],
         nonce: str,
         ssecurity: str,
+        signature_path: str | None = None,
     ) -> dict[str, str]:
         signed_nonce = _signed_nonce(ssecurity, nonce)
         signature_input = {key: value for key, value in params.items() if key and value}
-        signature_input["rc4_hash__"] = self._build_signature(method, path, signature_input, signed_nonce)
+        signature_input["rc4_hash__"] = self._build_signature(method, signature_path or path, signature_input, signed_nonce)
 
         cipher = _Rc4Cipher(_b64decode(signed_nonce))
         encrypted_params = {
             key: _b64encode(cipher.apply(value.encode("utf-8")))
             for key, value in sorted(signature_input.items())
         }
-        encrypted_params["signature"] = self._build_signature(method, path, encrypted_params, signed_nonce)
+        encrypted_params["signature"] = self._build_signature(method, signature_path or path, encrypted_params, signed_nonce)
         encrypted_params["_nonce"] = nonce
         return encrypted_params
 
@@ -433,6 +689,288 @@ class MiFitnessActivitiesClient:
             raw_report=report,
         )
 
+    def _get_activity_detail_item(self, activity: Activity) -> dict[str, Any]:
+        start_time = activity.start_time
+        if start_time is None:
+            raise MiFitnessError(f"Activity {activity.activity_id} does not have a start_time, so detail retrieval cannot be bounded.")
+
+        end_time = activity.end_time
+        if end_time is None:
+            if activity.duration_seconds is not None:
+                end_time = start_time + activity.duration_seconds
+            else:
+                end_time = start_time + ACTIVITY_ID_SEARCH_WINDOW_SECONDS
+
+        next_key: str | None = None
+        while True:
+            page = self._fetch_fitness_data_page(
+                key=DETAIL_DATA_KEY,
+                start_time=start_time,
+                end_time=end_time,
+                next_key=next_key,
+            )
+            for item in page.items:
+                if str(item.get("sid") or "") == activity.sid and str(item.get("key") or "") == activity.key:
+                    return item
+            if not page.has_more or not page.next_key:
+                break
+            next_key = page.next_key
+
+        return {}
+
+    def _build_activity_detail_from_item(
+        self,
+        activity: Activity,
+        fitness_item: dict[str, Any],
+        fds_downloads: dict[str, dict[str, Any]],
+    ) -> ActivityDetail:
+        raw_value = fitness_item.get("value")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise MiFitnessError(f"Mi Fitness detail payload for {activity.activity_id} did not include a usable value blob.")
+
+        try:
+            raw_detail = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise MiFitnessError(f"Mi Fitness detail payload for {activity.activity_id} was not valid JSON: {exc}.") from exc
+
+        if isinstance(raw_detail, dict) and fds_downloads:
+            raw_detail = {**raw_detail, "fds_downloads": fds_downloads}
+
+        track_points = _extract_track_points(raw_detail)
+        samples = _extract_activity_samples(raw_detail)
+        _merge_samples_into_track_points(track_points, samples)
+
+        detail_time = fitness_item.get("time") if isinstance(fitness_item.get("time"), int) else activity.start_time or 0
+        zone_offset_seconds = fitness_item.get("zone_offset") if isinstance(fitness_item.get("zone_offset"), int) else None
+        zone_name = fitness_item.get("zone_name") if isinstance(fitness_item.get("zone_name"), str) else None
+
+        return ActivityDetail(
+            activity=activity,
+            detail_sid=str(fitness_item.get("sid") or activity.sid),
+            detail_key=str(fitness_item.get("key") or activity.key),
+            detail_time=detail_time,
+            zone_name=zone_name,
+            zone_offset_seconds=zone_offset_seconds,
+            track_points=track_points,
+            samples=samples,
+            raw_fitness_item=fitness_item,
+            raw_detail=raw_detail,
+        )
+
+    def _get_activity_timeline_items(self, activity: Activity) -> list[dict[str, Any]]:
+        start_time = activity.start_time
+        if start_time is None:
+            return []
+
+        end_time = activity.end_time
+        if end_time is None:
+            if activity.duration_seconds is not None:
+                end_time = start_time + activity.duration_seconds
+            else:
+                end_time = start_time + ACTIVITY_ID_SEARCH_WINDOW_SECONDS
+
+        next_key: str | None = None
+        items: list[dict[str, Any]] = []
+        while True:
+            page = self._fetch_fitness_data_page(
+                key="",
+                start_time=start_time,
+                end_time=end_time,
+                next_key=next_key,
+            )
+            items.extend(
+                item
+                for item in page.items
+                if str(item.get("sid") or "") == activity.sid
+            )
+            if not page.has_more or not page.next_key:
+                break
+            next_key = page.next_key
+        return items
+
+    def _try_get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
+        try:
+            return self._get_fds_download_map(activity)
+        except (MiFitnessError, XiaomiApiError, requests.RequestException, ValueError):
+            return {}
+
+    def _try_download_fds_sport_samples(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]],
+    ) -> list[ActivitySample]:
+        """Attempt to download, decrypt, and parse the FDS sport record binary.
+
+        Returns parsed per-second ActivitySamples, or an empty list on failure.
+        """
+        if not fds_downloads:
+            return []
+
+        proto_type = _coerce_int(activity.raw_report.get("proto_type"))
+        timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
+        timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
+        if proto_type is None or timestamp is None or timezone_offset is None or not activity.sid:
+            return []
+
+        record_suffix = _build_fds_suffix(
+            sid=activity.sid,
+            timestamp=timestamp,
+            timezone_offset=timezone_offset,
+            sport_type=proto_type,
+            file_type=FDS_SPORT_RECORD_FILE_TYPE,
+        )
+
+        fds_entry = _find_fds_entry(fds_downloads, record_suffix)
+        if fds_entry is None:
+            return []
+
+        try:
+            sport_samples = download_and_parse_sport_record(
+                self._session, fds_entry, proto_type, timeout=self._timeout,
+            )
+        except Exception:
+            return []
+
+        return [
+            ActivitySample(
+                timestamp=s.timestamp,
+                start_time=s.timestamp,
+                end_time=s.timestamp,
+                duration_seconds=1,
+                heart_rate=s.heart_rate,
+                cadence=s.cadence,
+                speed_mps=None,
+                distance_meters=float(s.distance) if s.distance is not None else None,
+                altitude_meters=None,
+                steps=s.steps,
+                calories=s.calories,
+                raw_sample={"source": "fds_sport_record"},
+            )
+            for s in sport_samples
+        ]
+
+    def _get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
+        timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
+        proto_type = _coerce_int(activity.raw_report.get("proto_type"))
+        timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
+        if timestamp is None or proto_type is None or timezone_offset is None or not activity.sid:
+            return {}
+
+        request_items = [
+            self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_SPORT_RECORD_FILE_TYPE),
+            self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_GPS_FILE_TYPE),
+        ]
+        request_payload = {"did": activity.sid, "items": request_items}
+        nonce = self._generate_nonce(0)
+        params = self._encrypt_query_params(
+            method="GET",
+            path="/healthapp/service/gen_download_url",
+            signature_path="/service/gen_download_url",
+            params={"data": json.dumps(request_payload, separators=(",", ":"))},
+            nonce=nonce,
+            ssecurity=self._auth_state.ssecurity,
+        )
+
+        response = self._session.get(
+            self._get_fds_download_url_endpoint(),
+            params=params,
+            headers=self._build_request_headers(),
+            timeout=self._timeout,
+        )
+
+        if response.status_code == 401:
+            raise XiaomiApiError("Mi Fitness FDS metadata request was rejected with 401 auth err.")
+        if not response.ok:
+            raise XiaomiApiError(
+                f"Mi Fitness FDS metadata request failed with HTTP {response.status_code}.",
+                payload={"response_text": response.text[:500]},
+            )
+
+        payload = self._decrypt_response_payload(response.text, nonce, self._auth_state.ssecurity)
+        if payload.get("code") != 0:
+            raise XiaomiApiError(
+                payload.get("message") or "Mi Fitness FDS metadata API returned an error.",
+                code=payload.get("code"),
+                payload=payload,
+            )
+
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return {}
+        return {
+            key: value
+            for key, value in result.items()
+            if isinstance(key, str) and isinstance(value, dict)
+        }
+
+    def _build_fds_request_item(
+        self,
+        sid: str,
+        timestamp: int,
+        timezone_offset: int,
+        sport_type: int,
+        file_type: int,
+    ) -> dict[str, Any]:
+        suffix = _build_fds_suffix(
+            sid=sid,
+            timestamp=timestamp,
+            timezone_offset=timezone_offset,
+            sport_type=sport_type,
+            file_type=file_type,
+        )
+        return {"timestamp": timestamp, "suffix": suffix}
+
+    def _fetch_fitness_data_page(
+        self,
+        *,
+        key: str,
+        start_time: int | None,
+        end_time: int | None,
+        next_key: str | None,
+    ) -> FitnessDataPage:
+        request_payload: dict[str, Any] = {"key": key, "reverse": True}
+        if start_time is not None and start_time > 0:
+            request_payload["startTime"] = start_time
+        if end_time is not None and end_time > 0:
+            request_payload["endTime"] = end_time
+        if next_key:
+            request_payload["next_key"] = next_key
+
+        nonce = self._generate_nonce(0)
+        params = self._encrypt_query_params(
+            method="GET",
+            path="/app/v1/data/get_fitness_data_by_time",
+            params={"data": json.dumps(request_payload, separators=(",", ":"))},
+            nonce=nonce,
+            ssecurity=self._auth_state.ssecurity,
+        )
+
+        response = self._session.get(
+            self._get_fitness_data_time_endpoint(),
+            params=params,
+            headers=self._build_request_headers(),
+            timeout=self._timeout,
+        )
+
+        if response.status_code == 401:
+            raise XiaomiApiError("Mi Fitness activity detail request was rejected with 401 auth err.")
+        if not response.ok:
+            raise XiaomiApiError(
+                f"Mi Fitness activity detail request failed with HTTP {response.status_code}.",
+                payload={"response_text": response.text[:500]},
+            )
+
+        payload = self._decrypt_response_payload(response.text, nonce, self._auth_state.ssecurity)
+        if payload.get("code") != 0:
+            raise XiaomiApiError(
+                payload.get("message") or "Mi Fitness activity detail API returned an error.",
+                code=payload.get("code"),
+                payload=payload,
+            )
+
+        result = payload.get("result") or {}
+        raw_items = result.get("data_list") or []
+        items = [item for item in raw_items if isinstance(item, dict)]
+        return FitnessDataPage(items=items, has_more=bool(result.get("has_more")), next_key=result.get("next_key") or None)
+
 
 def render_activities_table(activities: list[Activity]) -> str:
     if not activities:
@@ -476,3 +1014,419 @@ def render_activities_table(activities: list[Activity]) -> str:
     output = [format_row(headers), format_row(["-" * width for width in widths])]
     output.extend(format_row(row) for row in rows)
     return "\n".join(output)
+
+
+def parse_activity_id(value: str) -> tuple[str, str, int]:
+    sid, separator, remainder = value.partition(":")
+    if not separator:
+        raise MiFitnessError(
+            "Activity IDs must use the list-activities format sid:key:time."
+        )
+    key, separator, time_value = remainder.rpartition(":")
+    if not separator or not sid or not key:
+        raise MiFitnessError(
+            "Activity IDs must use the list-activities format sid:key:time."
+        )
+    try:
+        return sid, key, int(time_value)
+    except ValueError as exc:
+        raise MiFitnessError(
+            "Activity IDs must use the list-activities format sid:key:time."
+        ) from exc
+
+
+def _extract_track_points(payload: Any) -> list[TrackPoint]:
+    groups = _collect_groups(payload, _looks_like_gps_point)
+    track_points: list[TrackPoint] = []
+    for group in groups:
+        for point in group:
+            timestamp = _coerce_int(point.get("timestamp"))
+            if timestamp is None:
+                timestamp = _coerce_int(point.get("time"))
+            latitude = _coerce_float(point.get("latitude"))
+            longitude = _coerce_float(point.get("longitude"))
+            if timestamp is None or latitude is None or longitude is None:
+                continue
+            track_points.append(
+                TrackPoint(
+                    timestamp=timestamp,
+                    latitude=latitude,
+                    longitude=longitude,
+                    altitude_meters=_coerce_float(point.get("altitude")),
+                    speed_mps=_coerce_float(point.get("speed") or point.get("locationSpeed")),
+                    distance_meters=None,
+                    heart_rate=None,
+                    cadence=None,
+                    raw_point=point,
+                )
+            )
+    track_points.sort(key=lambda point: point.timestamp)
+    return _dedupe_track_points(track_points)
+
+
+def _extract_activity_samples(payload: Any) -> list[ActivitySample]:
+    groups = _collect_groups(payload, _looks_like_activity_sample)
+    samples: list[ActivitySample] = []
+    for group in groups:
+        for sample in group:
+            start_time = _coerce_int(sample.get("startTime") or sample.get("start_time"))
+            end_time = _coerce_int(sample.get("endTime") or sample.get("end_time"))
+            timestamp = end_time or start_time
+            if timestamp is None:
+                continue
+            duration_seconds = _coerce_int(sample.get("duration"))
+            if duration_seconds is None and start_time is not None and end_time is not None:
+                duration_seconds = max(end_time - start_time, 0)
+            samples.append(
+                ActivitySample(
+                    timestamp=timestamp,
+                    start_time=start_time,
+                    end_time=end_time,
+                    duration_seconds=duration_seconds,
+                    heart_rate=_coerce_int(sample.get("hr") or sample.get("heartRate")),
+                    cadence=_coerce_int(
+                        sample.get("cadence")
+                        or sample.get("cycleCadence")
+                        or sample.get("jumpFrequency")
+                        or sample.get("rowingCadence")
+                    ),
+                    speed_mps=_coerce_float(sample.get("speed") or sample.get("avgSpeed") or sample.get("locationSpeed")),
+                    distance_meters=_coerce_float(sample.get("distance") or sample.get("newDistance") or sample.get("runDistance")),
+                    altitude_meters=_coerce_float(sample.get("altitude") or sample.get("height")),
+                    steps=_coerce_int(sample.get("steps") or sample.get("newSteps") or sample.get("totalSteps")),
+                    calories=_coerce_int(sample.get("calories") or sample.get("newCalories") or sample.get("activeCalories")),
+                    raw_sample=sample,
+                )
+            )
+    samples.sort(key=lambda sample: sample.timestamp)
+    return _dedupe_samples(samples)
+
+
+def _merge_samples_into_track_points(track_points: list[TrackPoint], samples: list[ActivitySample]) -> None:
+    if not track_points or not samples:
+        return
+
+    sample_index = 0
+    for point in track_points:
+        while sample_index + 1 < len(samples) and samples[sample_index + 1].timestamp <= point.timestamp:
+            sample_index += 1
+        candidates = [samples[sample_index]]
+        if sample_index + 1 < len(samples):
+            candidates.append(samples[sample_index + 1])
+        sample = min(candidates, key=lambda candidate: abs(candidate.timestamp - point.timestamp))
+        if abs(sample.timestamp - point.timestamp) > 5:
+            continue
+        point.distance_meters = sample.distance_meters
+        point.heart_rate = sample.heart_rate
+        point.cadence = sample.cadence
+        if point.speed_mps is None:
+            point.speed_mps = sample.speed_mps
+        if point.altitude_meters is None:
+            point.altitude_meters = sample.altitude_meters
+
+
+def _collect_groups(payload: Any, predicate: Any) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    seen_ids: set[int] = set()
+
+    def visit(node: Any) -> None:
+        node_id = id(node)
+        if node_id in seen_ids:
+            return
+        seen_ids.add(node_id)
+
+        if isinstance(node, list):
+            if node and all(isinstance(item, dict) for item in node) and any(predicate(item) for item in node):
+                group = [item for item in node if isinstance(item, dict) and predicate(item)]
+                if group:
+                    groups.append(group)
+                    return
+            for item in node:
+                visit(item)
+            return
+
+        if isinstance(node, dict):
+            values = list(node.values())
+            if values and all(isinstance(value, list) for value in values):
+                matching_lists = [
+                    [item for item in value if isinstance(item, dict) and predicate(item)]
+                    for value in values
+                    if isinstance(value, list) and value and any(isinstance(item, dict) and predicate(item) for item in value)
+                ]
+                if matching_lists:
+                    groups.extend(group for group in matching_lists if group)
+                    return
+            for value in node.values():
+                visit(value)
+
+    visit(payload)
+    return groups
+
+
+def _looks_like_gps_point(point: dict[str, Any]) -> bool:
+    return (
+        ("latitude" in point and "longitude" in point)
+        and ("timestamp" in point or "time" in point)
+    )
+
+
+def _looks_like_activity_sample(sample: dict[str, Any]) -> bool:
+    keys = set(sample)
+    if "startTime" in keys or "endTime" in keys or "start_time" in keys or "end_time" in keys:
+        return True
+    metric_keys = {
+        "hr",
+        "heartRate",
+        "distance",
+        "newDistance",
+        "speed",
+        "pace",
+        "steps",
+        "cadence",
+        "cycleCadence",
+        "newCalories",
+        "calories",
+    }
+    return bool(keys & metric_keys)
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
+def _common_zone_name(items: list[dict[str, Any]]) -> str | None:
+    for item in items:
+        zone_name = _coerce_str(item.get("zone_name"))
+        if zone_name:
+            return zone_name
+    return None
+
+
+def _common_zone_offset(items: list[dict[str, Any]]) -> int | None:
+    for item in items:
+        zone_offset = _coerce_int(item.get("zone_offset"))
+        if zone_offset is not None:
+            return zone_offset
+    return None
+
+
+def _extract_timeline_samples(
+    items: list[dict[str, Any]],
+    *,
+    sid: str,
+    activity_start: int | None = None,
+    activity_end: int | None = None,
+) -> list[ActivitySample]:
+    grouped: dict[int, dict[str, Any]] = {}
+
+    for item in items:
+        if str(item.get("sid") or "") != sid:
+            continue
+        item_time = _coerce_int(item.get("time"))
+        metric_key = _coerce_str(item.get("key"))
+        if item_time is None or not metric_key:
+            continue
+
+        metric_payload = _parse_timeline_metric_payload(item.get("value"), fallback_key=metric_key)
+
+        # Prefer the timestamp inside the metric payload over the item-level time.
+        # The item time can be a daily bucket while the payload time is the actual measurement.
+        timestamp = _coerce_int(metric_payload.get("time")) or item_time
+
+        # Filter out samples outside the activity's actual time range.
+        if activity_start is not None and timestamp < activity_start - 60:
+            continue
+        if activity_end is not None and timestamp > activity_end + 60:
+            continue
+
+        sample = grouped.setdefault(
+            timestamp,
+            {
+                "timestamp": timestamp,
+                "start_time": timestamp,
+                "end_time": timestamp,
+                "heart_rate": None,
+                "cadence": None,
+                "speed_mps": None,
+                "distance_meters": None,
+                "altitude_meters": None,
+                "steps": None,
+                "calories": None,
+                "raw_items": [],
+            },
+        )
+        sample["raw_items"].append(item)
+
+        heart_rate = _coerce_int(
+            metric_payload.get("bpm")
+            or metric_payload.get("hr")
+            or metric_payload.get("heartRate")
+            or metric_payload.get("heart_rate")
+        )
+        if heart_rate is not None:
+            sample["heart_rate"] = heart_rate
+
+        cadence = _coerce_int(
+            metric_payload.get("cadence")
+            or metric_payload.get("cycleCadence")
+            or metric_payload.get("jumpFrequency")
+            or metric_payload.get("rowingCadence")
+        )
+        if cadence is not None:
+            sample["cadence"] = cadence
+
+        speed = _coerce_float(metric_payload.get("speed") or metric_payload.get("avgSpeed") or metric_payload.get("locationSpeed"))
+        if speed is not None:
+            sample["speed_mps"] = speed
+
+        distance = _coerce_float(metric_payload.get("distance") or metric_payload.get("newDistance") or metric_payload.get("runDistance"))
+        if distance is not None:
+            sample["distance_meters"] = distance
+
+        altitude = _coerce_float(metric_payload.get("altitude") or metric_payload.get("height"))
+        if altitude is not None:
+            sample["altitude_meters"] = altitude
+
+        steps = _coerce_int(metric_payload.get("steps") or metric_payload.get("newSteps") or metric_payload.get("totalSteps"))
+        if steps is not None:
+            sample["steps"] = steps
+
+        calories = _coerce_int(metric_payload.get("calories") or metric_payload.get("newCalories") or metric_payload.get("activeCalories"))
+        if calories is not None:
+            sample["calories"] = calories
+
+    samples = [
+        ActivitySample(
+            timestamp=sample["timestamp"],
+            start_time=sample["start_time"],
+            end_time=sample["end_time"],
+            duration_seconds=0,
+            heart_rate=sample["heart_rate"],
+            cadence=sample["cadence"],
+            speed_mps=sample["speed_mps"],
+            distance_meters=sample["distance_meters"],
+            altitude_meters=sample["altitude_meters"],
+            steps=sample["steps"],
+            calories=sample["calories"],
+            raw_sample={"items": sample["raw_items"]},
+        )
+        for sample in grouped.values()
+        if any(
+            sample[field] is not None
+            for field in (
+                "heart_rate",
+                "cadence",
+                "speed_mps",
+                "distance_meters",
+                "altitude_meters",
+                "steps",
+                "calories",
+            )
+        )
+    ]
+    samples.sort(key=lambda sample: sample.timestamp)
+    return _dedupe_samples(samples)
+
+
+def _base64url_no_padding(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _parse_timeline_metric_payload(value: Any, *, fallback_key: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+        scalar = _coerce_float(value)
+        if scalar is not None:
+            return {fallback_key: scalar}
+    elif isinstance(value, (int, float)):
+        return {fallback_key: value}
+    return {}
+
+
+def _find_fds_entry(
+    fds_downloads: dict[str, dict[str, Any]], suffix: str,
+) -> dict[str, Any] | None:
+    """Find an FDS result entry matching *suffix* as key or key prefix."""
+    if suffix in fds_downloads:
+        return fds_downloads[suffix]
+    for key, value in fds_downloads.items():
+        if key.startswith(suffix) or suffix.startswith(key):
+            return value
+    return None
+
+
+def _build_fds_suffix(
+    *,
+    sid: str,
+    timestamp: int,
+    timezone_offset: int,
+    sport_type: int,
+    file_type: int,
+) -> str:
+    tz_in_15_minutes = timezone_offset & 0xFF
+    data_type_byte = ((1 << 7) + (sport_type << 2) + file_type) & 0xFF
+    server_key = struct.pack("<I", int(timestamp)) + bytes((tz_in_15_minutes, data_type_byte))
+    sid_hash = hashlib.sha1(sid.encode("utf-8")).digest()
+    return f"{_base64url_no_padding(server_key)}_{_base64url_no_padding(sid_hash)}"
+
+
+def _dedupe_track_points(points: list[TrackPoint]) -> list[TrackPoint]:
+    deduped: list[TrackPoint] = []
+    seen: set[tuple[int, float | None, float | None]] = set()
+    for point in points:
+        key = (point.timestamp, point.latitude, point.longitude)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(point)
+    return deduped
+
+
+def _dedupe_samples(samples: list[ActivitySample]) -> list[ActivitySample]:
+    deduped: list[ActivitySample] = []
+    seen: set[tuple[int, int | None, int | None]] = set()
+    for sample in samples:
+        key = (sample.timestamp, sample.start_time, sample.end_time)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(sample)
+    return deduped
