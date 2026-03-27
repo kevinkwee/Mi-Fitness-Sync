@@ -481,20 +481,15 @@ class TestMultipleSegments:
 
 
 class TestFindFdsEntry:
-    def test_exact_key_match(self):
+    def test_exact_server_key_match(self):
         from mi_fitness_sync.activities import _find_fds_entry
         downloads = {"abc_123": {"url": "http://x", "obj_key": "k"}}
-        assert _find_fds_entry(downloads, "abc_123") == {"url": "http://x", "obj_key": "k"}
-
-    def test_prefix_match(self):
-        from mi_fitness_sync.activities import _find_fds_entry
-        downloads = {"abc_123:456": {"url": "http://x", "obj_key": "k"}}
-        assert _find_fds_entry(downloads, "abc_123") == {"url": "http://x", "obj_key": "k"}
+        assert _find_fds_entry(downloads, "abc", 123) == {"url": "http://x", "obj_key": "k"}
 
     def test_no_match_returns_none(self):
         from mi_fitness_sync.activities import _find_fds_entry
         downloads = {"xyz": {"url": "http://x", "obj_key": "k"}}
-        assert _find_fds_entry(downloads, "abc") is None
+        assert _find_fds_entry(downloads, "abc", 123) is None
 
 
 # ---------------------------------------------------------------------------

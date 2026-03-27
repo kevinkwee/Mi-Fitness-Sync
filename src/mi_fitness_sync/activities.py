@@ -816,7 +816,7 @@ class MiFitnessActivitiesClient:
             file_type=FDS_SPORT_RECORD_FILE_TYPE,
         )
 
-        fds_entry = _find_fds_entry(fds_downloads, record_suffix)
+        fds_entry = _find_fds_entry(fds_downloads, record_suffix, timestamp)
         if fds_entry is None:
             return []
 
@@ -1380,15 +1380,17 @@ def _parse_timeline_metric_payload(value: Any, *, fallback_key: str) -> dict[str
 
 
 def _find_fds_entry(
-    fds_downloads: dict[str, dict[str, Any]], suffix: str,
+    fds_downloads: dict[str, dict[str, Any]],
+    suffix: str,
+    timestamp: int,
 ) -> dict[str, Any] | None:
-    """Find an FDS result entry matching *suffix* as key or key prefix."""
-    if suffix in fds_downloads:
-        return fds_downloads[suffix]
-    for key, value in fds_downloads.items():
-        if key.startswith(suffix) or suffix.startswith(key):
-            return value
-    return None
+    """Find an FDS result entry by exact server key.
+
+    The FDS response map is keyed by ``suffix_timestamp`` per
+    ``FDSItem.toServerKey()`` in the Android app.
+    """
+    server_key = f"{suffix}_{timestamp}"
+    return fds_downloads.get(server_key)
 
 
 def _build_fds_suffix(
