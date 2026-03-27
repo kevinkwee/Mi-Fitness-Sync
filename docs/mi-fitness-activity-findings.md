@@ -192,6 +192,7 @@ The FDS response is a map keyed by `suffix_timestamp` pairs (underscore separato
 | `sport_type` | `int` | Sport type integer |
 | `proto_type` | `int` | Protocol/parser type |
 | `timestamp` | `long` | Activity timestamp (seconds) |
+| `timezone` | `int` | Timezone offset in 15-minute increments (e.g., UTC+8 = 32). Java field `tzIn15Min`; also accepts `@SerializedName(alternate = {"time_zone"})` |
 | `start_time` | `long` | Start time |
 | `end_time` | `long` | End time |
 | `duration` | `int` | Duration |
