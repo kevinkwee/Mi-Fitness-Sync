@@ -512,10 +512,11 @@ class MiFitnessActivitiesClient:
         return "; ".join(f"{name}={value}" for name, value in cookies.items())
 
     def _build_request_headers(self) -> dict[str, str]:
-        headers = {"Cookie": self._build_cookie_header()}
         region = self._get_region()
-        if region != "cn":
-            headers["region_tag"] = region
+        headers = {
+            "Cookie": self._build_cookie_header(),
+            "region_tag": region,
+        }
         return headers
 
     def _get_activity_list_endpoint(self) -> str:
@@ -624,10 +625,7 @@ class MiFitnessActivitiesClient:
         return _sha1_signature(parts)
 
     def _generate_nonce(self, time_diff_ms: int) -> str:
-        payload = struct.pack(
-            ">q",
-            struct.unpack(">q", os.urandom(8))[0],
-        )
+        payload = os.urandom(8)
         payload += struct.pack(">i", int((time.time() * 1000 + time_diff_ms) // 60000))
         return _b64encode(payload)
 
