@@ -150,9 +150,9 @@ _TRIATHLON_RECORD_VALIDITY: dict[int, int] = {1: 0, 2: 0}
 # Keyed by sport_type (= proto_type from the Mi Fitness report)
 _SPORT_RECORD_VALIDITY: dict[int, dict[int, int]] = {
     1: _OUTDOOR_RECORD_VALIDITY,           # outdoor_run
-    2: _OUTDOOR_RECORD_VALIDITY,           # outdoor_walk
+    2: _OUTDOOR_RECORD_VALIDITY,           # track_running
     3: _RUNNING_IN_RECORD_VALIDITY,        # indoor_run / treadmill
-    4: _OUTDOOR_RECORD_VALIDITY,           # outdoor_hiking
+    4: _OUTDOOR_RECORD_VALIDITY,           # outdoor_walk
     5: _OUTDOOR_RECORD_VALIDITY,           # trail_running
     6: _BIKING_OUT_RECORD_VALIDITY,        # outdoor_cycling
     7: _BIKING_IN_RECORD_VALIDITY,         # indoor_cycling
