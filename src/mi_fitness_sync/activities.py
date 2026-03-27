@@ -1034,10 +1034,24 @@ def parse_activity_id(value: str) -> tuple[str, str, int]:
 
 
 def _extract_track_points(payload: Any) -> list[TrackPoint]:
-    groups = _collect_groups(payload, _looks_like_gps_point)
+    """Extract GPS track points from the huami_sport_record value.
+
+    The payload is a dict whose top-level values are lists of per-second
+    records.  GPS points live in lists where items carry ``latitude``,
+    ``longitude``, and a timestamp (``timestamp`` or ``time``).
+    """
+    if not isinstance(payload, dict):
+        return []
+
     track_points: list[TrackPoint] = []
-    for group in groups:
-        for point in group:
+    for value in payload.values():
+        if not isinstance(value, list):
+            continue
+        for point in value:
+            if not isinstance(point, dict):
+                continue
+            if "latitude" not in point or "longitude" not in point:
+                continue
             timestamp = _coerce_int(point.get("timestamp"))
             if timestamp is None:
                 timestamp = _coerce_int(point.get("time"))
@@ -1063,10 +1077,22 @@ def _extract_track_points(payload: Any) -> list[TrackPoint]:
 
 
 def _extract_activity_samples(payload: Any) -> list[ActivitySample]:
-    groups = _collect_groups(payload, _looks_like_activity_sample)
+    """Extract per-second activity samples from the huami_sport_record value.
+
+    The payload is a dict whose top-level values are lists of per-second
+    records.  Sample records carry timing fields (``startTime``/``endTime``
+    or ``start_time``/``end_time``) and metric fields (HR, distance, etc.).
+    """
+    if not isinstance(payload, dict):
+        return []
+
     samples: list[ActivitySample] = []
-    for group in groups:
-        for sample in group:
+    for value in payload.values():
+        if not isinstance(value, list):
+            continue
+        for sample in value:
+            if not isinstance(sample, dict):
+                continue
             start_time = _coerce_int(sample.get("startTime") or sample.get("start_time"))
             end_time = _coerce_int(sample.get("endTime") or sample.get("end_time"))
             timestamp = end_time or start_time
@@ -1121,71 +1147,6 @@ def _merge_samples_into_track_points(track_points: list[TrackPoint], samples: li
             point.speed_mps = sample.speed_mps
         if point.altitude_meters is None:
             point.altitude_meters = sample.altitude_meters
-
-
-def _collect_groups(payload: Any, predicate: Any) -> list[list[dict[str, Any]]]:
-    groups: list[list[dict[str, Any]]] = []
-    seen_ids: set[int] = set()
-
-    def visit(node: Any) -> None:
-        node_id = id(node)
-        if node_id in seen_ids:
-            return
-        seen_ids.add(node_id)
-
-        if isinstance(node, list):
-            if node and all(isinstance(item, dict) for item in node) and any(predicate(item) for item in node):
-                group = [item for item in node if isinstance(item, dict) and predicate(item)]
-                if group:
-                    groups.append(group)
-                    return
-            for item in node:
-                visit(item)
-            return
-
-        if isinstance(node, dict):
-            values = list(node.values())
-            if values and all(isinstance(value, list) for value in values):
-                matching_lists = [
-                    [item for item in value if isinstance(item, dict) and predicate(item)]
-                    for value in values
-                    if isinstance(value, list) and value and any(isinstance(item, dict) and predicate(item) for item in value)
-                ]
-                if matching_lists:
-                    groups.extend(group for group in matching_lists if group)
-                    return
-            for value in node.values():
-                visit(value)
-
-    visit(payload)
-    return groups
-
-
-def _looks_like_gps_point(point: dict[str, Any]) -> bool:
-    return (
-        ("latitude" in point and "longitude" in point)
-        and ("timestamp" in point or "time" in point)
-    )
-
-
-def _looks_like_activity_sample(sample: dict[str, Any]) -> bool:
-    keys = set(sample)
-    if "startTime" in keys or "endTime" in keys or "start_time" in keys or "end_time" in keys:
-        return True
-    metric_keys = {
-        "hr",
-        "heartRate",
-        "distance",
-        "newDistance",
-        "speed",
-        "pace",
-        "steps",
-        "cadence",
-        "cycleCadence",
-        "newCalories",
-        "calories",
-    }
-    return bool(keys & metric_keys)
 
 
 def _coerce_int(value: Any) -> int | None:
