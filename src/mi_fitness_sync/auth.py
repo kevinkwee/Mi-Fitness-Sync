@@ -96,7 +96,6 @@ class MiFitnessAuthClient:
         meta = self._get_meta_login_data(email=email, device_id=device_id)
         response = self.session.post(
             URL_LOGIN_AUTH2,
-            params={"_json": "true"},
             data=self._build_password_login_form(
                 email=email,
                 password=password,
