@@ -15,7 +15,12 @@ from urllib.parse import urlparse
 import requests
 
 from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
-from mi_fitness_sync.fds_parser import download_and_parse_gps_record, download_and_parse_sport_record
+from mi_fitness_sync.fds_parser import (
+    SportReport,
+    download_and_parse_gps_record,
+    download_and_parse_sport_record,
+    download_and_parse_sport_report,
+)
 from mi_fitness_sync.region_mapping import region_for_country_code
 from mi_fitness_sync.storage import AuthState
 
@@ -32,6 +37,7 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DETAIL_DATA_KEY = "huami_sport_record"
 ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
 FDS_SPORT_RECORD_FILE_TYPE = 0
+FDS_SPORT_REPORT_FILE_TYPE = 1
 FDS_GPS_FILE_TYPE = 2
 
 
@@ -233,6 +239,7 @@ class ActivityDetail:
     zone_offset_seconds: int | None
     track_points: list[TrackPoint]
     samples: list[ActivitySample]
+    sport_report: SportReport | None
     raw_fitness_item: dict[str, Any]
     raw_detail: dict[str, Any]
 
@@ -292,6 +299,7 @@ class ActivityDetail:
             "calories": self.total_calories,
             "track_points": [point.to_json_dict() for point in self.track_points],
             "samples": [sample.to_json_dict() for sample in self.samples],
+            "sport_report": asdict(self.sport_report) if self.sport_report else None,
             "raw_fitness_item": self.raw_fitness_item,
             "raw_detail": self.raw_detail,
         }
@@ -381,6 +389,7 @@ class MiFitnessActivitiesClient:
         fds_downloads = self._try_get_fds_download_map(activity)
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
         fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
+        fds_sport_report = self._try_download_fds_sport_report(activity, fds_downloads)
 
         # Merge FDS sport sample HR/cadence into GPS track points by timestamp
         if fds_track_points and fds_samples:
@@ -396,6 +405,8 @@ class MiFitnessActivitiesClient:
             # Prefer FDS GPS track points (per-second, higher quality)
             if fds_track_points:
                 detail.track_points = fds_track_points
+            if fds_sport_report:
+                detail.sport_report = fds_sport_report
             return detail
 
         if fds_samples or fds_track_points:
@@ -410,6 +421,7 @@ class MiFitnessActivitiesClient:
                 zone_offset_seconds=_coerce_int(activity.raw_record.get("zone_offset")),
                 track_points=fds_track_points,
                 samples=fds_samples,
+                sport_report=fds_sport_report,
                 raw_fitness_item={"source": "fds_sport_record"},
                 raw_detail={"source": "fds_sport_record", "fds_downloads": fds_downloads},
             )
@@ -755,6 +767,7 @@ class MiFitnessActivitiesClient:
             zone_offset_seconds=zone_offset_seconds,
             track_points=track_points,
             samples=samples,
+            sport_report=None,
             raw_fitness_item=fitness_item,
             raw_detail=raw_detail,
         )
@@ -836,6 +849,53 @@ class MiFitnessActivitiesClient:
             for s in sport_samples
         ]
 
+    def _try_download_fds_sport_report(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]],
+    ) -> SportReport | None:
+        """Attempt to download, decrypt, and parse the FDS sport report binary.
+
+        Returns a SportReport, or None on failure.
+        """
+        if not fds_downloads:
+            return None
+
+        proto_type = _coerce_int(activity.raw_report.get("proto_type"))
+        timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
+        timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
+        if proto_type is None or timestamp is None or timezone_offset is None or not activity.sid:
+            logger.debug("_try_download_fds_sport_report: missing fields for %s", activity.activity_id)
+            return None
+
+        report_suffix = _build_fds_suffix(
+            sid=activity.sid,
+            timestamp=timestamp,
+            timezone_offset=timezone_offset,
+            sport_type=proto_type,
+            file_type=FDS_SPORT_REPORT_FILE_TYPE,
+        )
+
+        fds_entry = _find_fds_entry(fds_downloads, report_suffix, timestamp)
+        if fds_entry is None:
+            logger.debug("_try_download_fds_sport_report: no FDS entry for suffix=%s in %s",
+                         report_suffix, list(fds_downloads.keys()))
+            return None
+
+        try:
+            report = download_and_parse_sport_report(
+                self._session, fds_entry, proto_type, timeout=self._timeout,
+            )
+        except Exception:
+            logger.warning("_try_download_fds_sport_report: download/parse failed for %s",
+                           activity.activity_id, exc_info=True)
+            return None
+
+        if report:
+            logger.debug("_try_download_fds_sport_report: parsed report for %s "
+                         "(calories=%s, avg_hr=%s, max_hr=%s, distance=%s)",
+                         activity.activity_id, report.calories, report.avg_hr,
+                         report.max_hr, report.distance)
+        return report
+
     def _try_download_fds_gps_track_points(
         self, activity: Activity, fds_downloads: dict[str, dict[str, Any]],
     ) -> list[TrackPoint]:
@@ -908,6 +968,7 @@ class MiFitnessActivitiesClient:
 
         request_items = [
             self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_SPORT_RECORD_FILE_TYPE),
+            self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_SPORT_REPORT_FILE_TYPE),
             self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_GPS_FILE_TYPE),
         ]
         request_payload = {"did": activity.sid, "items": request_items}

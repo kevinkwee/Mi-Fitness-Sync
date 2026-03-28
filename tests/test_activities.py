@@ -538,6 +538,7 @@ def test_summary_calories_preferred_over_sample_calories():
                 steps=None, calories=372, raw_sample={},
             ),
         ],
+        sport_report=None,
         raw_fitness_item={},
         raw_detail={},
     )
@@ -584,6 +585,7 @@ def test_detail_still_prefers_activity_summary_calories():
                 steps=None, calories=99, raw_sample={},
             ),
         ],
+        sport_report=None,
         raw_fitness_item={},
         raw_detail={},
     )
@@ -630,6 +632,7 @@ def test_sample_distance_used_when_summary_missing():
                 steps=None, calories=None, raw_sample={},
             ),
         ],
+        sport_report=None,
         raw_fitness_item={},
         raw_detail={},
     )

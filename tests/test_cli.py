@@ -63,6 +63,7 @@ def sample_detail() -> ActivityDetail:
                 raw_sample={},
             )
         ],
+        sport_report=None,
         raw_fitness_item={},
         raw_detail={},
     )

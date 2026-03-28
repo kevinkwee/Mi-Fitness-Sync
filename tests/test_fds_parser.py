@@ -1320,3 +1320,229 @@ class TestFourDimenMaxSupportVersion:
         assert records[0][TYPE_DISTANCE_DOUBLE] == 300
         assert records[0][TYPE_SPEED] == 150
         assert offset == 10
+
+
+# ===========================================================================
+# Sport report parsing tests (fileType=1)
+# ===========================================================================
+
+
+class TestSportReportParsing:
+    """Tests for FDS sport report binary parsing."""
+
+    def test_compute_report_validity_len_free_training_v1(self):
+        from mi_fitness_sync.fds_parser import (
+            _compute_report_validity_len,
+            _FREE_TRAINING_REPORT_FIELDS,
+        )
+        # v1: types with type_id>=0 and support_version<=1:
+        # 1,2,3,6,16,17,18,25,28,29,30,31,32,33,34 = 15 fields → ceil(15/8)=2
+        assert _compute_report_validity_len(_FREE_TRAINING_REPORT_FIELDS, 1) == 2
+
+    def test_compute_report_validity_len_outdoor_v1(self):
+        from mi_fitness_sync.fds_parser import (
+            _compute_report_validity_len,
+            _OUTDOOR_SPORT_REPORT_FIELDS,
+        )
+        # v1: 27 fields → ceil(27/8) = 4
+        assert _compute_report_validity_len(_OUTDOOR_SPORT_REPORT_FIELDS, 1) == 4
+
+    def test_compute_report_validity_len_outdoor_v4(self):
+        from mi_fitness_sync.fds_parser import (
+            _compute_report_validity_len,
+            _OUTDOOR_SPORT_REPORT_FIELDS,
+        )
+        # v4: +7(v2) +4,26(v3) +90,91,92,93,94,95,96(v4) = 27+10=37 → ceil(37/8)=5
+        assert _compute_report_validity_len(_OUTDOOR_SPORT_REPORT_FIELDS, 4) == 5
+
+    def test_parse_report_validity_bitmap(self):
+        from mi_fitness_sync.fds_parser import (
+            _FREE_TRAINING_REPORT_FIELDS,
+            _parse_report_validity,
+        )
+        # v1: 15 fields, all valid (bits all set)
+        data_valid = bytes([0xFF, 0xFE])  # 15 bits set (MSB-first)
+        valid_map = _parse_report_validity(
+            _FREE_TRAINING_REPORT_FIELDS, version=1, data_valid=data_valid,
+        )
+        assert valid_map[1] is True   # startTime
+        assert valid_map[6] is True   # calories
+        assert valid_map[16] is True  # avgHr
+        assert valid_map[34] is True  # hrWarmUpDur
+
+    def test_parse_free_training_report_v1(self):
+        from mi_fitness_sync.fds_parser import (
+            _FREE_TRAINING_REPORT_FIELDS,
+            ReportFieldDef,
+            SportReport,
+            parse_sport_report,
+        )
+        # Build a v1 free training report binary
+        sport_type = 8
+        version = 1
+        timestamp = 1700000000
+
+        # Body: sequential field values for v1 fields
+        body = b""
+        body += struct.pack("<I", 1700000000)   # 1: startTime
+        body += struct.pack("<I", 1700003600)   # 2: endTime
+        body += struct.pack("<I", 3600)          # 3: duration
+        body += struct.pack("<H", 350)           # 6: calories
+        body += bytes([130])                     # 16: avgHr
+        body += bytes([175])                     # 17: maxHr
+        body += bytes([95])                      # 18: minHr
+        body += struct.pack("<f", 3.5)           # 25: trainEffect (float)
+        body += bytes([42])                      # 28: energyConsume
+        body += struct.pack("<H", 600)           # 29: recoveryTime
+        body += struct.pack("<I", 120)           # 30: hrExtremeDur
+        body += struct.pack("<I", 300)           # 31: hrAnaerobicDur
+        body += struct.pack("<I", 1800)          # 32: hrAerobicDur
+        body += struct.pack("<I", 900)           # 33: hrFatBurningDur
+        body += struct.pack("<I", 480)           # 34: hrWarmUpDur
+
+        # Validity: 15 bits, all set = 0xFF 0xFE
+        data_valid = bytes([0xFF, 0xFE])
+
+        # Construct full FDS binary: header + body
+        header = struct.pack("<I", timestamp)   # timestamp LE
+        header += bytes([32])                    # tzIn15Min
+        header += bytes([version])               # version
+        header += bytes([sport_type])            # sportType
+        header += bytes([0x00])                  # pad
+        header += data_valid                     # dataValid (2 bytes)
+
+        decrypted = header + body
+        report = parse_sport_report(decrypted, sport_type)
+
+        assert report is not None
+        assert report.start_time == 1700000000
+        assert report.end_time == 1700003600
+        assert report.duration == 3600
+        assert report.calories == 350
+        assert report.avg_hr == 130
+        assert report.max_hr == 175
+        assert report.min_hr == 95
+        assert abs(report.train_effect - 3.5) < 0.01
+        assert report.recovery_time == 600
+        assert report.hr_extreme_duration == 120
+        assert report.hr_aerobic_duration == 1800
+
+    def test_parse_outdoor_sport_report_v1(self):
+        from mi_fitness_sync.fds_parser import parse_sport_report
+
+        sport_type = 1  # outdoor_run
+        version = 1
+
+        # v1 outdoor sport report body (27 fields)
+        body = b""
+        body += struct.pack("<I", 1700000000)   # 1: startTime
+        body += struct.pack("<I", 1700001800)   # 2: endTime
+        body += struct.pack("<I", 1800)          # 3: duration
+        body += struct.pack("<I", 5000)          # 5: distance (meters)
+        body += struct.pack("<H", 250)           # 6: calories
+        body += struct.pack("<I", 400)           # 8: maxPace
+        body += struct.pack("<I", 300)           # 9: minPace
+        body += struct.pack("<f", 4.2)           # 12: maxSpeed (float)
+        body += struct.pack("<I", 2500)          # 13: steps
+        body += struct.pack("<H", 190)           # 14: maxCadence
+        body += bytes([145])                     # 16: avgHr
+        body += bytes([180])                     # 17: maxHr
+        body += bytes([110])                     # 18: minHr
+        body += struct.pack("<f", 50.5)          # 19: riseHeight
+        body += struct.pack("<f", 30.2)          # 20: fallHeight
+        body += struct.pack("<f", 100.0)         # 21: avgHeight
+        body += struct.pack("<f", 120.0)         # 22: maxHeight
+        body += struct.pack("<f", 80.0)          # 23: minHeight
+        body += struct.pack("<f", 4.0)           # 25: trainEffect
+        body += bytes([55])                      # 27: vo2max
+        body += bytes([30])                      # 28: energyConsume
+        body += struct.pack("<H", 720)           # 29: recoveryTime
+        body += struct.pack("<I", 60)            # 30: hrExtreme
+        body += struct.pack("<I", 300)           # 31: hrAnaerobic
+        body += struct.pack("<I", 900)           # 32: hrAerobic
+        body += struct.pack("<I", 400)           # 33: hrFatBurning
+        body += struct.pack("<I", 140)           # 34: hrWarmUp
+
+        # 27 valid fields → 4 bytes validity, all valid
+        data_valid = bytes([0xFF, 0xFF, 0xFF, 0xF8])
+
+        header = struct.pack("<I", 1700000000)
+        header += bytes([32, version, sport_type, 0x00])
+        header += data_valid
+
+        decrypted = header + body
+        report = parse_sport_report(decrypted, sport_type)
+
+        assert report is not None
+        assert report.distance == 5000
+        assert report.calories == 250
+        assert report.steps == 2500
+        assert report.avg_hr == 145
+        assert report.max_hr == 180
+        assert report.min_hr == 110
+        assert report.vo2max == 55
+        assert abs(report.max_speed - 4.2) < 0.01
+        assert abs(report.rise_height - 50.5) < 0.1
+        assert report.max_pace == 400
+        assert report.min_pace == 300
+
+    def test_parse_report_partial_validity(self):
+        """Some fields marked invalid in the bitmap are excluded from result."""
+        from mi_fitness_sync.fds_parser import parse_sport_report
+
+        sport_type = 8  # free training
+        version = 1
+
+        body = b""
+        body += struct.pack("<I", 1700000000)   # 1: startTime
+        body += struct.pack("<I", 1700003600)   # 2: endTime
+        body += struct.pack("<I", 3600)          # 3: duration
+        body += struct.pack("<H", 350)           # 6: calories
+        body += bytes([130])                     # 16: avgHr
+        body += bytes([175])                     # 17: maxHr
+        body += bytes([95])                      # 18: minHr
+        body += struct.pack("<f", 3.5)           # 25: trainEffect
+        body += bytes([42])                      # 28: energyConsume
+        body += struct.pack("<H", 600)           # 29: recoveryTime
+        body += struct.pack("<I", 0)             # 30: hrExtreme (zero)
+        body += struct.pack("<I", 0)             # 31: hrAnaerobic (zero)
+        body += struct.pack("<I", 0)             # 32: hrAerobic (zero)
+        body += struct.pack("<I", 0)             # 33: hrFatBurning (zero)
+        body += struct.pack("<I", 0)             # 34: hrWarmUp (zero)
+
+        # Only first 5 fields valid: 11111 000 00000 00 → 0xF8 0x00
+        data_valid = bytes([0xF8, 0x00])
+
+        header = struct.pack("<I", 1700000000)
+        header += bytes([32, version, sport_type, 0x00])
+        header += data_valid
+
+        decrypted = header + body
+        report = parse_sport_report(decrypted, sport_type)
+
+        assert report is not None
+        assert report.start_time == 1700000000
+        assert report.duration == 3600
+        assert report.calories == 350
+        assert report.avg_hr == 130
+        # 6th field onwards marked invalid
+        assert report.max_hr is None
+        assert report.min_hr is None
+        assert report.train_effect is None
+        assert report.recovery_time is None
+
+    def test_parse_report_unsupported_sport_type(self):
+        from mi_fitness_sync.fds_parser import parse_sport_report
+
+        # Sport type 99 has no report parser
+        header = struct.pack("<I", 1700000000) + bytes([32, 1, 99, 0x00])
+        result = parse_sport_report(header, 99)
+        assert result is None
+
+    def test_get_report_data_valid_len(self):
+        from mi_fitness_sync.fds_parser import get_report_data_valid_len
+
+        assert get_report_data_valid_len(8, 1) == 2   # free training v1
+        assert get_report_data_valid_len(1, 1) == 4   # outdoor v1
+        assert get_report_data_valid_len(1, 4) == 5   # outdoor v4
+        assert get_report_data_valid_len(99, 1) is None  # unsupported

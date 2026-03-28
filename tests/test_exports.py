@@ -87,6 +87,7 @@ def sample_detail() -> ActivityDetail:
                 raw_sample={},
             ),
         ],
+        sport_report=None,
         raw_fitness_item={},
         raw_detail={},
     )
@@ -174,6 +175,7 @@ def _strength_detail_with_samples() -> ActivityDetail:
                 steps=None, calories=372, raw_sample={},
             ),
         ],
+        sport_report=None,
         raw_fitness_item={},
         raw_detail={},
     )
