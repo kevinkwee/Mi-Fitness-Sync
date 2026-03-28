@@ -16,8 +16,10 @@ import requests
 
 from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
 from mi_fitness_sync.fds_parser import (
+    RecoveryRateData,
     SportReport,
     download_and_parse_gps_record,
+    download_and_parse_recovery_rate,
     download_and_parse_sport_record,
     download_and_parse_sport_report,
 )
@@ -39,6 +41,7 @@ ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
 FDS_SPORT_RECORD_FILE_TYPE = 0
 FDS_SPORT_REPORT_FILE_TYPE = 1
 FDS_GPS_FILE_TYPE = 2
+FDS_RECOVERY_RATE_FILE_TYPE = 3
 
 
 def parse_cli_time(value: str) -> int:
@@ -240,6 +243,7 @@ class ActivityDetail:
     track_points: list[TrackPoint]
     samples: list[ActivitySample]
     sport_report: SportReport | None
+    recovery_rate: RecoveryRateData | None
     raw_fitness_item: dict[str, Any]
     raw_detail: dict[str, Any]
 
@@ -300,6 +304,7 @@ class ActivityDetail:
             "track_points": [point.to_json_dict() for point in self.track_points],
             "samples": [sample.to_json_dict() for sample in self.samples],
             "sport_report": asdict(self.sport_report) if self.sport_report else None,
+            "recovery_rate": asdict(self.recovery_rate) if self.recovery_rate else None,
             "raw_fitness_item": self.raw_fitness_item,
             "raw_detail": self.raw_detail,
         }
@@ -390,6 +395,7 @@ class MiFitnessActivitiesClient:
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
         fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
         fds_sport_report = self._try_download_fds_sport_report(activity, fds_downloads)
+        fds_recovery_rate = self._try_download_fds_recovery_rate(activity, fds_downloads)
 
         # Merge FDS sport sample HR/cadence into GPS track points by timestamp
         if fds_track_points and fds_samples:
@@ -407,6 +413,8 @@ class MiFitnessActivitiesClient:
                 detail.track_points = fds_track_points
             if fds_sport_report:
                 detail.sport_report = fds_sport_report
+            if fds_recovery_rate:
+                detail.recovery_rate = fds_recovery_rate
             return detail
 
         if fds_samples or fds_track_points:
@@ -422,6 +430,7 @@ class MiFitnessActivitiesClient:
                 track_points=fds_track_points,
                 samples=fds_samples,
                 sport_report=fds_sport_report,
+                recovery_rate=fds_recovery_rate,
                 raw_fitness_item={"source": "fds_sport_record"},
                 raw_detail={"source": "fds_sport_record", "fds_downloads": fds_downloads},
             )
@@ -768,6 +777,7 @@ class MiFitnessActivitiesClient:
             track_points=track_points,
             samples=samples,
             sport_report=None,
+            recovery_rate=None,
             raw_fitness_item=fitness_item,
             raw_detail=raw_detail,
         )
@@ -959,6 +969,53 @@ class MiFitnessActivitiesClient:
             for g in gps_samples
         ]
 
+    def _try_download_fds_recovery_rate(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]],
+    ) -> RecoveryRateData | None:
+        """Attempt to download, decrypt, and parse the FDS recovery rate binary (fileType=3).
+
+        Returns a RecoveryRateData, or None on failure.
+        """
+        if not fds_downloads:
+            return None
+
+        proto_type = _coerce_int(activity.raw_report.get("proto_type"))
+        timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
+        timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
+        if proto_type is None or timestamp is None or timezone_offset is None or not activity.sid:
+            logger.debug("_try_download_fds_recovery_rate: missing fields for %s", activity.activity_id)
+            return None
+
+        recovery_suffix = _build_fds_suffix(
+            sid=activity.sid,
+            timestamp=timestamp,
+            timezone_offset=timezone_offset,
+            sport_type=proto_type,
+            file_type=FDS_RECOVERY_RATE_FILE_TYPE,
+        )
+
+        fds_entry = _find_fds_entry(fds_downloads, recovery_suffix, timestamp)
+        if fds_entry is None:
+            logger.debug("_try_download_fds_recovery_rate: no FDS entry for suffix=%s in %s",
+                         recovery_suffix, list(fds_downloads.keys()))
+            return None
+
+        try:
+            data = download_and_parse_recovery_rate(
+                self._session, fds_entry, timeout=self._timeout,
+            )
+        except Exception:
+            logger.warning("_try_download_fds_recovery_rate: download/parse failed for %s",
+                           activity.activity_id, exc_info=True)
+            return None
+
+        if data:
+            logger.debug("_try_download_fds_recovery_rate: parsed recovery rate for %s "
+                         "(heartRate=%d, recoverRate=%.1f, samples=%d)",
+                         activity.activity_id, data.heart_rate,
+                         data.recover_rate, len(data.rate_samples))
+        return data
+
     def _get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
         timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
         proto_type = _coerce_int(activity.raw_report.get("proto_type"))
@@ -970,6 +1027,7 @@ class MiFitnessActivitiesClient:
             self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_SPORT_RECORD_FILE_TYPE),
             self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_SPORT_REPORT_FILE_TYPE),
             self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_GPS_FILE_TYPE),
+            self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_RECOVERY_RATE_FILE_TYPE),
         ]
         request_payload = {"did": activity.sid, "items": request_items}
         nonce = self._generate_nonce(0)

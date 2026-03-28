@@ -1976,3 +1976,162 @@ def download_and_parse_sport_report(
     except Exception:
         logger.warning("Failed to parse FDS sport report binary", exc_info=True)
         return None
+
+
+# ===========================================================================
+# Recovery rate parsing (fileType=3, from decompiled RecoverRateRecordParser)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Recovery rate validity (1 OneDimen field → 1 byte)
+# ---------------------------------------------------------------------------
+
+_RECOVERY_RATE_RECORD_VALIDITY: dict[int, int] = {1: 1}
+
+
+def get_recovery_rate_data_valid_len(version: int) -> int | None:
+    """Return recovery rate dataValid byte length, or None if version unsupported."""
+    return _RECOVERY_RATE_RECORD_VALIDITY.get(version)
+
+
+# ---------------------------------------------------------------------------
+# Recovery rate data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class RecoveryRateSample:
+    """One per-second recovery rate value."""
+
+    rate: int
+
+
+@dataclass(slots=True)
+class RecoveryRateData:
+    """Parsed FDS recovery rate data (fileType=3).
+
+    From ``RecoverRateRecordParser.nativeParseRecoverRate()``:
+    - *recover_timestamp*: 4-byte LE uint from body header
+    - *heart_rate*: 1-byte uint from body header
+    - *recover_rate*: 1-byte uint / 10.0 from body header
+    - *rate_samples*: per-second rate values from OneDimen loop
+    - *start_rate* / *end_rate*: first / last sample value
+    """
+
+    recover_timestamp: int
+    heart_rate: int
+    recover_rate: float
+    rate_samples: list[RecoveryRateSample]
+    start_rate: int | None = None
+    end_rate: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Recovery rate parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_recovery_rate_record(decrypted: bytes) -> RecoveryRateData | None:
+    """Parse decrypted FDS recovery rate binary (fileType=3).
+
+    Body layout (after FDS header):
+        [rateCount: 2 LE uint16]
+        [recoverTimestamp: 4 LE uint32]
+        [heartRate: 1 byte]
+        [recoverRateRaw: 1 byte]  (divided by 10.0)
+        [rateCount × 1-byte OneDimen records]
+
+    Returns :class:`RecoveryRateData`, or None if data is too short.
+    """
+    if len(decrypted) < _SPORT_SERVER_DATA_ID_LEN + 1:
+        logger.warning("Recovery rate data too short to read header version byte")
+        return None
+
+    version = decrypted[5]
+    data_valid_len = get_recovery_rate_data_valid_len(version)
+    if data_valid_len is None:
+        logger.info(
+            "No recovery rate dataValid for version=%d; skipping parse", version,
+        )
+        return None
+
+    header = parse_fds_header(decrypted, data_valid_len)
+    body = header.body_data
+
+    # Body header: rateCount(2) + recoverTimestamp(4) + heartRate(1) + recoverRateRaw(1) = 8
+    if len(body) < 8:
+        logger.warning("Recovery rate body too short: %d bytes", len(body))
+        return None
+
+    rate_count = struct.unpack_from("<H", body, 0)[0]
+    recover_timestamp = struct.unpack_from("<I", body, 2)[0]
+    heart_rate_val = body[6]
+    recover_rate_raw = body[7]
+    recover_rate = recover_rate_raw / 10.0
+
+    # Parse OneDimen records: rateCount × 1 byte each (field 0 = rate)
+    offset = 8
+    samples: list[RecoveryRateSample] = []
+    for _ in range(rate_count):
+        if offset >= len(body):
+            break
+        samples.append(RecoveryRateSample(rate=body[offset]))
+        offset += 1
+
+    logger.debug(
+        "parse_recovery_rate_record: rateCount=%d, recoverTimestamp=%d, "
+        "heartRate=%d, recoverRate=%.1f, parsed %d samples",
+        rate_count, recover_timestamp, heart_rate_val, recover_rate, len(samples),
+    )
+
+    data = RecoveryRateData(
+        recover_timestamp=recover_timestamp,
+        heart_rate=heart_rate_val,
+        recover_rate=recover_rate,
+        rate_samples=samples,
+    )
+    if samples:
+        data.start_rate = samples[0].rate
+        data.end_rate = samples[-1].rate
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Recovery rate download → decrypt → parse pipeline
+# ---------------------------------------------------------------------------
+
+
+def download_and_parse_recovery_rate(
+    session: requests.Session,
+    fds_entry: dict[str, Any],
+    *,
+    timeout: int = 30,
+) -> RecoveryRateData | None:
+    """Download, decrypt, and parse a recovery rate record from an FDS entry.
+
+    Returns :class:`RecoveryRateData`, or None on failure.
+    """
+    url = fds_entry.get("url")
+    object_key = fds_entry.get("obj_key")
+    if not isinstance(url, str) or not isinstance(object_key, str):
+        logger.debug("FDS recovery rate entry missing url or obj_key — raw entry: %s", fds_entry)
+        return None
+
+    try:
+        resp = session.get(url, timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException:
+        logger.warning("Failed to download FDS recovery rate from %s", url, exc_info=True)
+        return None
+
+    try:
+        decrypted = decrypt_fds_data(resp.text, object_key)
+    except Exception:
+        logger.warning("Failed to decrypt FDS recovery rate", exc_info=True)
+        return None
+
+    try:
+        return parse_recovery_rate_record(decrypted)
+    except Exception:
+        logger.warning("Failed to parse FDS recovery rate binary", exc_info=True)
+        return None

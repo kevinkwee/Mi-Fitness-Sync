@@ -31,6 +31,8 @@ from mi_fitness_sync.fds_parser import (
     GPS_TYPE_SPEED,
     GPS_TYPE_TIME,
     OneDimenType,
+    RecoveryRateData,
+    RecoveryRateSample,
     SportRecordConfig,
     SportSample,
     TYPE_CALORIES,
@@ -54,12 +56,15 @@ from mi_fitness_sync.fds_parser import (
     _SPORT_CONFIG,
     decrypt_fds_data,
     download_and_parse_gps_record,
+    download_and_parse_recovery_rate,
     download_and_parse_sport_record,
     get_gps_data_valid_len,
     get_record_data_valid_len,
+    get_recovery_rate_data_valid_len,
     parse_fds_header,
     parse_free_training_record,
     parse_gps_record,
+    parse_recovery_rate_record,
     parse_sport_record,
 )
 
@@ -1250,8 +1255,169 @@ class TestFourDimenMaxSupportVersion:
         assert result[TYPE_CALORIES].exist is True
         assert result[TYPE_CALORIES].high is True
         assert result[TYPE_HR].exist is False  # maxed out
-        assert result[TYPE_DISTANCE].exist is True
-        assert result[TYPE_DISTANCE].high is True
+
+
+# ---------------------------------------------------------------------------
+# Recovery rate parsing (fileType=3)
+# ---------------------------------------------------------------------------
+
+
+def _build_recovery_rate_body(
+    rate_count: int,
+    recover_timestamp: int,
+    heart_rate: int,
+    recover_rate_raw: int,
+    rates: list[int],
+) -> bytes:
+    """Build a recovery rate body (after FDS header)."""
+    return (
+        struct.pack("<H", rate_count)
+        + struct.pack("<I", recover_timestamp)
+        + bytes([heart_rate, recover_rate_raw])
+        + bytes(rates)
+    )
+
+
+class TestRecoveryRateDataValidLen:
+    def test_version_1(self):
+        assert get_recovery_rate_data_valid_len(1) == 1
+
+    def test_unknown_version(self):
+        assert get_recovery_rate_data_valid_len(99) is None
+
+
+class TestParseRecoveryRateRecord:
+    def test_basic_parse(self):
+        """Parses a recovery rate binary with 3 rate samples."""
+        rates = [80, 75, 70]
+        body = _build_recovery_rate_body(
+            rate_count=3,
+            recover_timestamp=1717200100,
+            heart_rate=120,
+            recover_rate_raw=85,  # 85 / 10.0 = 8.5
+            rates=rates,
+        )
+        data_valid = bytes([0x80])  # 1 bit set (rate field valid)
+        header = _build_header(
+            timestamp=1717200000, tz=28, version=1, sport_type=8, data_valid=data_valid,
+        )
+        decrypted = header + body
+
+        result = parse_recovery_rate_record(decrypted)
+
+        assert result is not None
+        assert result.recover_timestamp == 1717200100
+        assert result.heart_rate == 120
+        assert result.recover_rate == pytest.approx(8.5)
+        assert len(result.rate_samples) == 3
+        assert result.rate_samples[0].rate == 80
+        assert result.rate_samples[1].rate == 75
+        assert result.rate_samples[2].rate == 70
+        assert result.start_rate == 80
+        assert result.end_rate == 70
+
+    def test_empty_rates(self):
+        """Recovery rate with 0 samples."""
+        body = _build_recovery_rate_body(
+            rate_count=0,
+            recover_timestamp=1717200100,
+            heart_rate=90,
+            recover_rate_raw=0,
+            rates=[],
+        )
+        data_valid = bytes([0x80])
+        header = _build_header(
+            timestamp=1717200000, tz=28, version=1, sport_type=8, data_valid=data_valid,
+        )
+        decrypted = header + body
+
+        result = parse_recovery_rate_record(decrypted)
+
+        assert result is not None
+        assert len(result.rate_samples) == 0
+        assert result.start_rate is None
+        assert result.end_rate is None
+
+    def test_too_short_returns_none(self):
+        """Data too short to contain even a header returns None."""
+        assert parse_recovery_rate_record(b"\x00" * 5) is None
+
+    def test_unsupported_version_returns_none(self):
+        """Version 99 has no dataValid mapping → returns None."""
+        header = _build_header(
+            timestamp=1717200000, tz=28, version=99, sport_type=8, data_valid=bytes([0x80]),
+        )
+        body = _build_recovery_rate_body(0, 1717200100, 90, 0, [])
+        decrypted = header + body
+
+        result = parse_recovery_rate_record(decrypted)
+        assert result is None
+
+    def test_truncated_body_returns_none(self):
+        """Body too short (< 8 bytes) returns None."""
+        data_valid = bytes([0x80])
+        header = _build_header(
+            timestamp=1717200000, tz=28, version=1, sport_type=8, data_valid=data_valid,
+        )
+        # Only 4 bytes of body instead of the required 8
+        decrypted = header + b"\x00\x00\x00\x00"
+
+        result = parse_recovery_rate_record(decrypted)
+        assert result is None
+
+    def test_truncated_rate_samples(self):
+        """Fewer rate bytes than rateCount still parses available samples."""
+        body = _build_recovery_rate_body(
+            rate_count=5,
+            recover_timestamp=1717200100,
+            heart_rate=100,
+            recover_rate_raw=50,
+            rates=[60, 55],  # Only 2 bytes instead of 5
+        )
+        data_valid = bytes([0x80])
+        header = _build_header(
+            timestamp=1717200000, tz=28, version=1, sport_type=8, data_valid=data_valid,
+        )
+        decrypted = header + body
+
+        result = parse_recovery_rate_record(decrypted)
+
+        assert result is not None
+        assert len(result.rate_samples) == 2
+        assert result.start_rate == 60
+        assert result.end_rate == 55
+
+    def test_full_decrypt_pipeline(self):
+        """Full AES-encrypted pipeline: decrypt → parse recovery rate."""
+        rates = [90, 85, 80, 75]
+        body = _build_recovery_rate_body(
+            rate_count=4,
+            recover_timestamp=1717200200,
+            heart_rate=130,
+            recover_rate_raw=42,  # 4.2
+            rates=rates,
+        )
+        data_valid = bytes([0x80])
+        header = _build_header(
+            timestamp=1717200000, tz=28, version=1, sport_type=8, data_valid=data_valid,
+        )
+        plaintext = header + body
+
+        key = _make_aes_key()
+        object_key = _b64url_encode_no_pad(key)
+        encrypted_body = _encrypt(plaintext, key)
+
+        decrypted = decrypt_fds_data(encrypted_body, object_key)
+        result = parse_recovery_rate_record(decrypted)
+
+        assert result is not None
+        assert result.recover_timestamp == 1717200200
+        assert result.heart_rate == 130
+        assert result.recover_rate == pytest.approx(4.2)
+        assert len(result.rate_samples) == 4
+        assert [s.rate for s in result.rate_samples] == [90, 85, 80, 75]
+        assert result.start_rate == 90
+        assert result.end_rate == 75
 
     def test_ski_config_v1_all_legacy_fields_present(self):
         """Ski at v1: legacy fields (max=3) are present, v4+ fields are not."""

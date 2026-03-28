@@ -539,6 +539,7 @@ def test_summary_calories_preferred_over_sample_calories():
             ),
         ],
         sport_report=None,
+        recovery_rate=None,
         raw_fitness_item={},
         raw_detail={},
     )
@@ -586,6 +587,7 @@ def test_detail_still_prefers_activity_summary_calories():
             ),
         ],
         sport_report=None,
+        recovery_rate=None,
         raw_fitness_item={},
         raw_detail={},
     )
@@ -633,6 +635,7 @@ def test_sample_distance_used_when_summary_missing():
             ),
         ],
         sport_report=None,
+        recovery_rate=None,
         raw_fitness_item={},
         raw_detail={},
     )
