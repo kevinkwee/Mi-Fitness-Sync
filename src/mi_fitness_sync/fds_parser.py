@@ -1020,7 +1020,7 @@ def download_and_parse_sport_record(
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
-        logger.debug("FDS entry missing url or obj_key")
+        logger.debug("FDS entry missing url or obj_key — raw entry: %s", fds_entry)
         return []
 
     try:
@@ -1271,7 +1271,7 @@ def download_and_parse_gps_record(
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
-        logger.debug("FDS GPS entry missing url or obj_key")
+        logger.debug("FDS GPS entry missing url or obj_key — raw entry: %s", fds_entry)
         return []
 
     try:

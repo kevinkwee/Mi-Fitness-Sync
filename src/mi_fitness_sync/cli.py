@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -47,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
     )
     activities_parser.add_argument("--json", action="store_true", help="Print activities as JSON")
+    activities_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     detail_parser = subparsers.add_parser("activity-detail", help="Fetch normalized detail for a listed Mi Fitness activity")
     detail_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
@@ -56,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
     )
     detail_parser.add_argument("--json", action="store_true", help="Print the normalized activity detail as JSON")
+    detail_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     export_parser = subparsers.add_parser("export-activity", help="Export one Mi Fitness activity to GPX, TCX, or FIT")
     export_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
@@ -67,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
     export_parser.add_argument("--output", required=True, help="Destination file path")
     export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
+    export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     return parser
 
@@ -74,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "verbose", False):
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
 
     try:
         if args.command == "login":

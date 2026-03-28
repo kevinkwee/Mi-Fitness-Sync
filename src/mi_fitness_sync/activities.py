@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import struct
 import time
@@ -18,6 +19,8 @@ from mi_fitness_sync.fds_parser import download_and_parse_gps_record, download_a
 from mi_fitness_sync.region_mapping import region_for_country_code
 from mi_fitness_sync.storage import AuthState
 
+
+logger = logging.getLogger(__name__)
 
 ACTIVITY_LIST_ENDPOINT = "https://hlth.io.mi.com/app/v1/data/get_sport_records_by_time"
 FITNESS_DATA_TIME_ENDPOINT = "https://hlth.io.mi.com/app/v1/data/get_fitness_data_by_time"
@@ -372,6 +375,9 @@ class MiFitnessActivitiesClient:
 
     def get_activity_detail(self, activity_or_id: Activity | str) -> ActivityDetail:
         activity = activity_or_id if isinstance(activity_or_id, Activity) else self.get_activity_by_id(activity_or_id)
+        logger.debug("get_activity_detail: resolved activity %s (sid=%s, key=%s, start_time=%s)",
+                     activity.activity_id, activity.sid, activity.key, activity.start_time)
+
         fds_downloads = self._try_get_fds_download_map(activity)
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
         fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
@@ -382,6 +388,8 @@ class MiFitnessActivitiesClient:
 
         fitness_item = self._get_activity_detail_item(activity)
         if fitness_item:
+            logger.debug("get_activity_detail: using JSON detail item (sid=%s, key=%s, time=%s)",
+                         fitness_item.get("sid"), fitness_item.get("key"), fitness_item.get("time"))
             detail = self._build_activity_detail_from_item(activity, fitness_item, fds_downloads)
             if fds_samples:
                 detail.samples = fds_samples
@@ -391,6 +399,8 @@ class MiFitnessActivitiesClient:
             return detail
 
         if fds_samples or fds_track_points:
+            logger.debug("get_activity_detail: no JSON detail found, using FDS-only data "
+                         "(%d samples, %d track points)", len(fds_samples), len(fds_track_points))
             return ActivityDetail(
                 activity=activity,
                 detail_sid=activity.sid,
@@ -404,6 +414,11 @@ class MiFitnessActivitiesClient:
                 raw_detail={"source": "fds_sport_record", "fds_downloads": fds_downloads},
             )
 
+        logger.warning("get_activity_detail: no detail data found for %s — "
+                       "fds_downloads had %d entries, JSON detail item was empty, "
+                       "FDS sport samples=%d, FDS GPS points=%d",
+                       activity.activity_id, len(fds_downloads),
+                       len(fds_samples), len(fds_track_points))
         raise MiFitnessError(
             f"Could not find a detail payload for activity {activity.activity_id} in Mi Fitness. "
             "The workout summary exists, but neither the JSON detail nor FDS binary data was available."
@@ -672,6 +687,11 @@ class MiFitnessActivitiesClient:
                 end_time = start_time + ACTIVITY_ID_SEARCH_WINDOW_SECONDS
 
         record_time = activity.raw_record.get("time")
+        logger.debug("_get_activity_detail_item: querying key=%s, start_time=%s, end_time=%s, "
+                     "record_time=%s for %s",
+                     DETAIL_DATA_KEY, start_time, end_time, record_time, activity.activity_id)
+
+        total_items = 0
         next_key: str | None = None
         while True:
             page = self._fetch_fitness_data_page(
@@ -680,17 +700,24 @@ class MiFitnessActivitiesClient:
                 end_time=end_time,
                 next_key=next_key,
             )
+            total_items += len(page.items)
             for item in page.items:
                 if (
                     str(item.get("sid") or "") == activity.sid
                     and str(item.get("key") or "") == activity.key
                     and (record_time is None or item.get("time") == record_time)
                 ):
+                    logger.debug("_get_activity_detail_item: matched item (sid=%s, key=%s, time=%s) "
+                                 "after scanning %d items",
+                                 item.get("sid"), item.get("key"), item.get("time"), total_items)
                     return item
             if not page.has_more or not page.next_key:
                 break
             next_key = page.next_key
 
+        logger.debug("_get_activity_detail_item: no match found among %d items for %s "
+                     "(looking for sid=%s, key=%s, record_time=%s)",
+                     total_items, activity.activity_id, activity.sid, activity.key, record_time)
         return {}
 
     def _build_activity_detail_from_item(
@@ -734,8 +761,13 @@ class MiFitnessActivitiesClient:
 
     def _try_get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
         try:
-            return self._get_fds_download_map(activity)
-        except (MiFitnessError, XiaomiApiError, requests.RequestException, ValueError):
+            result = self._get_fds_download_map(activity)
+            logger.debug("_try_get_fds_download_map: got %d entries for %s — keys: %s",
+                         len(result), activity.activity_id, list(result.keys()))
+            return result
+        except (MiFitnessError, XiaomiApiError, requests.RequestException, ValueError) as exc:
+            logger.warning("_try_get_fds_download_map: FDS metadata request failed for %s: %s",
+                           activity.activity_id, exc)
             return {}
 
     def _try_download_fds_sport_samples(
@@ -746,12 +778,17 @@ class MiFitnessActivitiesClient:
         Returns parsed per-second ActivitySamples, or an empty list on failure.
         """
         if not fds_downloads:
+            logger.debug("_try_download_fds_sport_samples: skipped — no FDS downloads for %s",
+                         activity.activity_id)
             return []
 
         proto_type = _coerce_int(activity.raw_report.get("proto_type"))
         timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
         timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
         if proto_type is None or timestamp is None or timezone_offset is None or not activity.sid:
+            logger.debug("_try_download_fds_sport_samples: missing fields for %s — "
+                         "proto_type=%s, timestamp=%s, timezone_offset=%s, sid=%s",
+                         activity.activity_id, proto_type, timestamp, timezone_offset, activity.sid)
             return []
 
         record_suffix = _build_fds_suffix(
@@ -761,9 +798,13 @@ class MiFitnessActivitiesClient:
             sport_type=proto_type,
             file_type=FDS_SPORT_RECORD_FILE_TYPE,
         )
+        logger.debug("_try_download_fds_sport_samples: computed suffix=%s for %s",
+                     record_suffix, activity.activity_id)
 
         fds_entry = _find_fds_entry(fds_downloads, record_suffix, timestamp)
         if fds_entry is None:
+            logger.debug("_try_download_fds_sport_samples: no FDS entry matched key '%s_%s' in %s",
+                         record_suffix, timestamp, list(fds_downloads.keys()))
             return []
 
         try:
@@ -771,7 +812,11 @@ class MiFitnessActivitiesClient:
                 self._session, fds_entry, proto_type, timeout=self._timeout,
             )
         except Exception:
+            logger.warning("_try_download_fds_sport_samples: download/parse failed for %s",
+                           activity.activity_id, exc_info=True)
             return []
+        logger.debug("_try_download_fds_sport_samples: parsed %d samples for %s",
+                     len(sport_samples), activity.activity_id)
 
         return [
             ActivitySample(
@@ -799,12 +844,17 @@ class MiFitnessActivitiesClient:
         Returns GPS track points, or an empty list on failure.
         """
         if not fds_downloads:
+            logger.debug("_try_download_fds_gps_track_points: skipped — no FDS downloads for %s",
+                         activity.activity_id)
             return []
 
         proto_type = _coerce_int(activity.raw_report.get("proto_type"))
         timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
         timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
         if proto_type is None or timestamp is None or timezone_offset is None or not activity.sid:
+            logger.debug("_try_download_fds_gps_track_points: missing fields for %s — "
+                         "proto_type=%s, timestamp=%s, timezone_offset=%s, sid=%s",
+                         activity.activity_id, proto_type, timestamp, timezone_offset, activity.sid)
             return []
 
         gps_suffix = _build_fds_suffix(
@@ -814,9 +864,13 @@ class MiFitnessActivitiesClient:
             sport_type=proto_type,
             file_type=FDS_GPS_FILE_TYPE,
         )
+        logger.debug("_try_download_fds_gps_track_points: computed suffix=%s for %s",
+                     gps_suffix, activity.activity_id)
 
         fds_entry = _find_fds_entry(fds_downloads, gps_suffix, timestamp)
         if fds_entry is None:
+            logger.debug("_try_download_fds_gps_track_points: no FDS entry matched key '%s_%s' in %s",
+                         gps_suffix, timestamp, list(fds_downloads.keys()))
             return []
 
         try:
@@ -824,7 +878,11 @@ class MiFitnessActivitiesClient:
                 self._session, fds_entry, timeout=self._timeout,
             )
         except Exception:
+            logger.warning("_try_download_fds_gps_track_points: download/parse failed for %s",
+                           activity.activity_id, exc_info=True)
             return []
+        logger.debug("_try_download_fds_gps_track_points: parsed %d track points for %s",
+                     len(gps_samples), activity.activity_id)
 
         return [
             TrackPoint(
@@ -887,6 +945,8 @@ class MiFitnessActivitiesClient:
             )
 
         result = payload.get("result")
+        logger.debug("_get_fds_download_map: raw decrypted payload keys=%s, result=%s",
+                     list(payload.keys()), result)
         if not isinstance(result, dict):
             return {}
         return {
