@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+USER_AGENT = "MiFitnessSync/0.1"
+
 APP_DIR = Path.home() / ".mi_fitness_sync"
 
 

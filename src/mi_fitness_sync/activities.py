@@ -26,6 +26,7 @@ from mi_fitness_sync.fds_parser import (
     download_and_parse_sport_record,
     download_and_parse_sport_report,
 )
+from mi_fitness_sync.app_dirs import USER_AGENT
 from mi_fitness_sync.region_mapping import region_for_country_code
 from mi_fitness_sync.storage import AuthState
 
@@ -332,7 +333,7 @@ class MiFitnessActivitiesClient:
         self._session.headers.update(
             {
                 "Accept": "application/json, text/plain, */*",
-                "User-Agent": "Mi-Fitness-Sync/0.1",
+                "User-Agent": USER_AGENT,
             }
         )
         self._cookie_values = self._collect_cookie_values()

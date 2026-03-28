@@ -16,6 +16,7 @@ from mi_fitness_sync.exceptions import (
     Step2RequiredError,
     XiaomiApiError,
 )
+from mi_fitness_sync.app_dirs import USER_AGENT
 from mi_fitness_sync.storage import AuthState, utc_now_iso
 
 
@@ -23,7 +24,6 @@ ACCOUNT_BASE = "https://account.xiaomi.com"
 URL_LOGIN = f"{ACCOUNT_BASE}/pass/serviceLogin"
 URL_LOGIN_AUTH2 = f"{ACCOUNT_BASE}/pass/serviceLoginAuth2"
 DEFAULT_SERVICE_ID = "miothealth"
-USER_AGENT = "MiFitnessSyncAuth/0.1"
 SAFE_PREFIX = "&&&START&&&"
 
 
