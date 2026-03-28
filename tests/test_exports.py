@@ -126,8 +126,8 @@ def test_render_export_gzip_wraps_output():
     assert gzip.decompress(export.payload).startswith(b"<?xml")
 
 
-def _timeline_fallback_detail() -> ActivityDetail:
-    """Build a timeline-fallback ActivityDetail where summary values conflict with samples."""
+def _strength_detail_with_samples() -> ActivityDetail:
+    """Build an ActivityDetail with FDS samples where summary calories differ from sample max."""
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
         sid="sid-1",
@@ -139,7 +139,7 @@ def _timeline_fallback_detail() -> ActivityDetail:
         end_time=1717203600,
         duration_seconds=3600,
         distance_meters=0,
-        calories=321,  # stale summary value
+        calories=372,
         steps=None,
         sync_state="server",
         next_key=None,
@@ -149,7 +149,7 @@ def _timeline_fallback_detail() -> ActivityDetail:
     return ActivityDetail(
         activity=activity,
         detail_sid="sid-1",
-        detail_key="fitness_data_timeline",
+        detail_key="fds_sport_record",
         detail_time=1717200000,
         zone_name="UTC",
         zone_offset_seconds=0,
@@ -174,22 +174,21 @@ def _timeline_fallback_detail() -> ActivityDetail:
                 steps=None, calories=372, raw_sample={},
             ),
         ],
-        raw_fitness_item={"source": "fitness_data_timeline"},
-        raw_detail={"source": "fitness_data_timeline"},
+        raw_fitness_item={},
+        raw_detail={},
     )
 
 
-def test_tcx_export_uses_timeline_calories_and_hr():
-    """Regression: TCX lap must use timeline-derived calories, avg HR, and max HR
-    instead of stale summary values."""
-    detail = _timeline_fallback_detail()
+def test_tcx_export_uses_summary_calories_and_sample_hr():
+    """TCX lap must use summary calories and sample-derived HR values."""
+    detail = _strength_detail_with_samples()
     export = render_export(detail, "tcx")
     root = ET.fromstring(export.payload)
     ns = {"tcx": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
 
     lap_calories = root.find(".//tcx:Lap/tcx:Calories", ns)
     assert lap_calories is not None
-    assert int(lap_calories.text) == 372  # sample-derived, NOT 321 from summary
+    assert int(lap_calories.text) == 372
 
     avg_hr = root.find(".//tcx:Lap/tcx:AverageHeartRateBpm/tcx:Value", ns)
     assert avg_hr is not None
@@ -201,13 +200,13 @@ def test_tcx_export_uses_timeline_calories_and_hr():
     assert int(max_hr.text) == 145
 
 
-def test_fit_export_uses_timeline_calories_and_hr():
-    """Regression: FIT lap/session must use timeline-derived values."""
+def test_fit_export_uses_summary_calories_and_sample_hr():
+    """FIT lap/session must use summary calories and sample-derived HR values."""
     from fit_tool.fit_file import FitFile
     from fit_tool.profile.messages.lap_message import LapMessage
     from fit_tool.profile.messages.session_message import SessionMessage
 
-    detail = _timeline_fallback_detail()
+    detail = _strength_detail_with_samples()
     export = render_export(detail, "fit")
 
     assert export.file_format == "fit"

@@ -142,6 +142,8 @@ def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, mon
         ),
     }
 
+    monkeypatch.setattr(client, "_try_get_fds_download_map", lambda selected_activity: {})
+    monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda activity, fds: [])
     monkeypatch.setattr(client, "_get_activity_detail_item", lambda selected_activity: fitness_item)
 
     detail = client.get_activity_detail(activity)
@@ -177,7 +179,10 @@ def test_build_fds_suffix_strength_training_proto_type_28():
     ) == "28XAaRzw_KdJjWE97g_CXNigsrsLabYEzCPg"
 
 
-def test_get_activity_detail_falls_back_to_timeline_samples(auth_state, monkeypatch):
+def test_get_activity_detail_uses_fds_samples_as_primary(auth_state, monkeypatch):
+    """When FDS samples are available, they replace JSON detail samples regardless of count."""
+    from mi_fitness_sync.activities import ActivitySample
+
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
@@ -198,70 +203,114 @@ def test_get_activity_detail_falls_back_to_timeline_samples(auth_state, monkeypa
         raw_report={"name": "Morning Run"},
     )
 
-    monkeypatch.setattr(client, "_try_get_fds_download_map", lambda selected_activity: {"key": {"url": "https://example.com"}})
-    monkeypatch.setattr(client, "_get_activity_detail_item", lambda selected_activity: {})
-    monkeypatch.setattr(
-        client,
-        "_get_activity_timeline_items",
-        lambda selected_activity: [
-            {"sid": "sid-1", "time": 1717200000, "key": "heart_rate", "value": 120, "zone_name": "UTC", "zone_offset": 0},
-            {"sid": "sid-1", "time": 1717200000, "key": "steps", "value": 100, "zone_name": "UTC", "zone_offset": 0},
-            {"sid": "sid-1", "time": 1717200060, "key": "heart_rate", "value": 125, "zone_name": "UTC", "zone_offset": 0},
-            {"sid": "sid-1", "time": 1717200060, "key": "calories", "value": 42, "zone_name": "UTC", "zone_offset": 0},
-        ],
-    )
+    fds_samples = [
+        ActivitySample(
+            timestamp=1717200000, start_time=1717200000, end_time=1717200000,
+            duration_seconds=1, heart_rate=118, cadence=None, speed_mps=None,
+            distance_meters=None, altitude_meters=None, steps=None, calories=None,
+            raw_sample={"source": "fds_sport_record"},
+        ),
+    ]
+
+    fitness_item = {
+        "sid": "sid-1",
+        "key": "key-1",
+        "time": 1717200000,
+        "zone_name": "UTC",
+        "zone_offset": 0,
+        "value": json.dumps({
+            "sport_records": [
+                {"startTime": 1717200000, "endTime": 1717200000, "hr": 120, "distance": 0},
+                {"startTime": 1717200030, "endTime": 1717200030, "hr": 122, "distance": 250},
+                {"startTime": 1717200060, "endTime": 1717200060, "hr": 125, "distance": 500},
+            ],
+        }),
+    }
+
+    monkeypatch.setattr(client, "_try_get_fds_download_map", lambda a: {})
+    monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda a, f: fds_samples)
+    monkeypatch.setattr(client, "_get_activity_detail_item", lambda a: fitness_item)
 
     detail = client.get_activity_detail(activity)
 
-    assert detail.detail_key == "fitness_data_timeline"
-    assert detail.zone_name == "UTC"
-    assert len(detail.track_points) == 0
-    assert [sample.heart_rate for sample in detail.samples] == [120, 125]
-    assert detail.raw_detail["fds_downloads"]["key"]["url"] == "https://example.com"
+    # FDS samples replace JSON samples even though JSON has more (3 vs 1)
+    assert len(detail.samples) == 1
+    assert detail.samples[0].heart_rate == 118
+    assert detail.samples[0].raw_sample["source"] == "fds_sport_record"
 
 
-def test_extract_timeline_samples_filters_out_of_range_timestamps():
-    from mi_fitness_sync.activities import _extract_timeline_samples
+def test_get_activity_detail_fds_only_when_no_json(auth_state, monkeypatch):
+    """When JSON detail is empty but FDS samples are available, use FDS as sole source."""
+    from mi_fitness_sync.activities import ActivitySample
 
-    items = [
-        # Within activity range
-        {"sid": "s1", "time": 1717200000, "key": "heart_rate", "value": '{"time":1717200010,"bpm":120}'},
-        # Within activity range
-        {"sid": "s1", "time": 1717200000, "key": "heart_rate", "value": '{"time":1717200050,"bpm":130}'},
-        # Outside range: 20 days earlier (metric payload time matters)
-        {"sid": "s1", "time": 1717200000, "key": "heart_rate", "value": '{"time":1715500000,"bpm":80}'},
-        # Outside range: way after activity
-        {"sid": "s1", "time": 1717200000, "key": "heart_rate", "value": '{"time":1717290000,"bpm":70}'},
-    ]
-
-    samples = _extract_timeline_samples(
-        items,
-        sid="s1",
-        activity_start=1717200000,
-        activity_end=1717200060,
+    client = MiFitnessActivitiesClient(auth_state)
+    activity = Activity(
+        activity_id="sid-1:key-1:1717200000",
+        sid="sid-1",
+        key="key-1",
+        category="strength_training",
+        sport_type=22,
+        title="Strength",
+        start_time=1717200000,
+        end_time=1717200060,
+        duration_seconds=60,
+        distance_meters=None,
+        calories=None,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "sid-1", "key": "key-1", "time": 1717200000, "zone_name": "UTC", "zone_offset": 0},
+        raw_report={},
     )
 
-    timestamps = [s.timestamp for s in samples]
-    # Only the samples whose metric payload time falls within [start-60, end+60] should remain
-    assert 1717200010 in timestamps
-    assert 1717200050 in timestamps
-    assert 1715500000 not in timestamps
-    assert 1717290000 not in timestamps
-
-
-def test_extract_timeline_samples_uses_metric_payload_time():
-    from mi_fitness_sync.activities import _extract_timeline_samples
-
-    items = [
-        # Item time is a bucket, but metric payload has the actual measurement time
-        {"sid": "s1", "time": 1717200000, "key": "heart_rate", "value": '{"time":1717200030,"bpm":140}'},
+    fds_samples = [
+        ActivitySample(
+            timestamp=1717200000, start_time=1717200000, end_time=1717200000,
+            duration_seconds=1, heart_rate=100, cadence=None, speed_mps=None,
+            distance_meters=None, altitude_meters=None, steps=None, calories=None,
+            raw_sample={"source": "fds_sport_record"},
+        ),
     ]
 
-    samples = _extract_timeline_samples(items, sid="s1")
+    monkeypatch.setattr(client, "_try_get_fds_download_map", lambda a: {})
+    monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda a, f: fds_samples)
+    monkeypatch.setattr(client, "_get_activity_detail_item", lambda a: {})
 
-    assert len(samples) == 1
-    assert samples[0].timestamp == 1717200030
-    assert samples[0].heart_rate == 140
+    detail = client.get_activity_detail(activity)
+
+    assert detail.detail_key == "fds_sport_record"
+    assert len(detail.samples) == 1
+    assert len(detail.track_points) == 0
+
+
+def test_get_activity_detail_raises_when_no_data(auth_state, monkeypatch):
+    """When both JSON detail and FDS fail, raise MiFitnessError."""
+    client = MiFitnessActivitiesClient(auth_state)
+    activity = Activity(
+        activity_id="sid-1:key-1:1717200000",
+        sid="sid-1",
+        key="key-1",
+        category="outdoor_run",
+        sport_type=1,
+        title="Run",
+        start_time=1717200000,
+        end_time=1717200060,
+        duration_seconds=60,
+        distance_meters=None,
+        calories=None,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "sid-1", "key": "key-1", "time": 1717200000},
+        raw_report={},
+    )
+
+    monkeypatch.setattr(client, "_try_get_fds_download_map", lambda a: {})
+    monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda a, f: [])
+    monkeypatch.setattr(client, "_get_activity_detail_item", lambda a: {})
+
+    with pytest.raises(MiFitnessError, match="Could not find a detail payload"):
+        client.get_activity_detail(activity)
 
 
 def test_build_fds_suffix_uses_underscore_separator():
@@ -280,9 +329,8 @@ def test_build_fds_suffix_uses_underscore_separator():
     assert ":" not in result.split("_", 1)[0]
 
 
-def test_timeline_fallback_detail_prefers_sample_calories_over_summary():
-    """Regression: when detail comes from timeline fallback, sample-derived
-    calories must take precedence over the stale activity summary value."""
+def test_summary_calories_preferred_over_sample_calories():
+    """Activity summary calories should always be preferred over sample-derived values."""
     from mi_fitness_sync.activities import ActivityDetail, ActivitySample
 
     activity = Activity(
@@ -296,7 +344,7 @@ def test_timeline_fallback_detail_prefers_sample_calories_over_summary():
         end_time=1717203600,
         duration_seconds=3600,
         distance_meters=0,
-        calories=321,  # stale summary value
+        calories=321,
         steps=None,
         sync_state="server",
         next_key=None,
@@ -306,7 +354,7 @@ def test_timeline_fallback_detail_prefers_sample_calories_over_summary():
     detail = ActivityDetail(
         activity=activity,
         detail_sid="sid-1",
-        detail_key="fitness_data_timeline",  # timeline fallback
+        detail_key="fds_sport_record",
         detail_time=1717200000,
         zone_name="UTC",
         zone_offset_seconds=0,
@@ -325,16 +373,16 @@ def test_timeline_fallback_detail_prefers_sample_calories_over_summary():
                 steps=None, calories=372, raw_sample={},
             ),
         ],
-        raw_fitness_item={"source": "fitness_data_timeline"},
-        raw_detail={"source": "fitness_data_timeline"},
+        raw_fitness_item={},
+        raw_detail={},
     )
 
-    # Sample value (372) must win over stale summary (321)
-    assert detail.total_calories == 372
+    # Summary value (321) wins over sample value (372)
+    assert detail.total_calories == 321
 
 
-def test_non_timeline_detail_still_prefers_activity_summary_calories():
-    """Non-timeline detail should still prefer activity summary calories."""
+def test_detail_still_prefers_activity_summary_calories():
+    """Detail should always prefer activity summary calories."""
     from mi_fitness_sync.activities import ActivityDetail, ActivitySample
 
     activity = Activity(
@@ -379,9 +427,8 @@ def test_non_timeline_detail_still_prefers_activity_summary_calories():
     assert detail.total_calories == 42
 
 
-def test_timeline_fallback_detail_prefers_sample_distance_over_summary():
-    """When detail comes from timeline fallback, sample-derived distance
-    must take precedence over the stale summary value."""
+def test_sample_distance_used_when_summary_missing():
+    """When activity summary distance is missing, sample-derived distance is used."""
     from mi_fitness_sync.activities import ActivityDetail, ActivitySample
 
     activity = Activity(
@@ -394,7 +441,7 @@ def test_timeline_fallback_detail_prefers_sample_distance_over_summary():
         start_time=1717200000,
         end_time=1717200060,
         duration_seconds=60,
-        distance_meters=400,  # stale summary
+        distance_meters=None,  # no summary distance
         calories=None,
         steps=None,
         sync_state="server",
@@ -405,7 +452,7 @@ def test_timeline_fallback_detail_prefers_sample_distance_over_summary():
     detail = ActivityDetail(
         activity=activity,
         detail_sid="sid-1",
-        detail_key="fitness_data_timeline",
+        detail_key="fds_sport_record",
         detail_time=1717200000,
         zone_name="UTC",
         zone_offset_seconds=0,
@@ -418,8 +465,8 @@ def test_timeline_fallback_detail_prefers_sample_distance_over_summary():
                 steps=None, calories=None, raw_sample={},
             ),
         ],
-        raw_fitness_item={"source": "fitness_data_timeline"},
-        raw_detail={"source": "fitness_data_timeline"},
+        raw_fitness_item={},
+        raw_detail={},
     )
 
     assert detail.total_distance_meters == 550.0
