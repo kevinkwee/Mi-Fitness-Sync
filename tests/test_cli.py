@@ -135,9 +135,9 @@ def test_list_activities_json_output(monkeypatch, capsys, auth_state):
     )
 
     class DummyClient:
-        def __init__(self, state, country_code=None):
+        def __init__(self, state, **kwargs):
             assert state == auth_state
-            self.country_code = country_code
+            self.country_code = kwargs.get("country_code")
 
         def list_activities(self, *, start_time, end_time, limit, category=None):
             assert start_time == 1704067200
@@ -159,7 +159,7 @@ def test_activity_detail_json_output(monkeypatch, capsys, auth_state):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
 
     class DummyClient:
-        def __init__(self, state, country_code=None):
+        def __init__(self, state, **kwargs):
             assert state == auth_state
 
         def get_activity_detail(self, activity_id):
@@ -180,7 +180,7 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
 
     class DummyClient:
-        def __init__(self, state, country_code=None):
+        def __init__(self, state, **kwargs):
             assert state == auth_state
 
         def get_activity_detail(self, activity_id):
@@ -201,3 +201,42 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
     assert exit_code == 0
     assert output_path.read_bytes() == b"payload"
     assert "Compressed: yes" in captured
+
+
+def test_activity_detail_no_cache_flag(monkeypatch, capsys, auth_state):
+    """--no-cache flag propagates to the client constructor."""
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    captured_kwargs = {}
+
+    class DummyClient:
+        def __init__(self, state, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        def get_activity_detail(self, activity_id):
+            return sample_detail()
+
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
+
+    exit_code = cli.main(["activity-detail", "sid:key:1", "--no-cache", "--json"])
+    assert exit_code == 0
+    assert captured_kwargs["no_cache"] is True
+
+
+def test_activity_detail_cache_dir_flag(monkeypatch, tmp_path, capsys, auth_state):
+    """--cache-dir flag propagates to the client constructor."""
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    captured_kwargs = {}
+
+    class DummyClient:
+        def __init__(self, state, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        def get_activity_detail(self, activity_id):
+            return sample_detail()
+
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
+
+    cache_path = str(tmp_path / "custom_cache")
+    exit_code = cli.main(["activity-detail", "sid:key:1", "--cache-dir", cache_path, "--json"])
+    assert exit_code == 0
+    assert captured_kwargs["cache_dir"] == cache_path

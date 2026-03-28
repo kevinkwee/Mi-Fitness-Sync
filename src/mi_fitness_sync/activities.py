@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import struct
 import time
 from dataclasses import asdict, dataclass
@@ -16,6 +17,8 @@ import requests
 
 from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
 from mi_fitness_sync.fds_parser import (
+    DEFAULT_CACHE_DIR,
+    FdsCache,
     RecoveryRateData,
     SportReport,
     download_and_parse_gps_record,
@@ -317,11 +320,14 @@ class MiFitnessActivitiesClient:
         *,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         country_code: str | None = None,
+        cache_dir: Path | str = DEFAULT_CACHE_DIR,
+        no_cache: bool = False,
     ):
         self._auth_state = auth_state
         self._timeout = timeout
         self._region_override = region_for_country_code(country_code)
         self._resolved_region: str | None = None
+        self._cache: FdsCache | None = None if no_cache else FdsCache(cache_dir)
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -830,9 +836,11 @@ class MiFitnessActivitiesClient:
                          record_suffix, timestamp, list(fds_downloads.keys()))
             return []
 
+        cache_key = f"{activity.sid}_{FDS_SPORT_RECORD_FILE_TYPE}_{record_suffix}_{timestamp}"
         try:
             sport_samples = download_and_parse_sport_record(
                 self._session, fds_entry, proto_type, timeout=self._timeout,
+                cache=self._cache, cache_key=cache_key,
             )
         except Exception:
             logger.warning("_try_download_fds_sport_samples: download/parse failed for %s",
@@ -890,9 +898,11 @@ class MiFitnessActivitiesClient:
                          report_suffix, list(fds_downloads.keys()))
             return None
 
+        cache_key = f"{activity.sid}_{FDS_SPORT_REPORT_FILE_TYPE}_{report_suffix}_{timestamp}"
         try:
             report = download_and_parse_sport_report(
                 self._session, fds_entry, proto_type, timeout=self._timeout,
+                cache=self._cache, cache_key=cache_key,
             )
         except Exception:
             logger.warning("_try_download_fds_sport_report: download/parse failed for %s",
@@ -943,9 +953,11 @@ class MiFitnessActivitiesClient:
                          gps_suffix, timestamp, list(fds_downloads.keys()))
             return []
 
+        cache_key = f"{activity.sid}_{FDS_GPS_FILE_TYPE}_{gps_suffix}_{timestamp}"
         try:
             gps_samples = download_and_parse_gps_record(
                 self._session, fds_entry, timeout=self._timeout,
+                cache=self._cache, cache_key=cache_key,
             )
         except Exception:
             logger.warning("_try_download_fds_gps_track_points: download/parse failed for %s",
@@ -1000,9 +1012,11 @@ class MiFitnessActivitiesClient:
                          recovery_suffix, list(fds_downloads.keys()))
             return None
 
+        cache_key = f"{activity.sid}_{FDS_RECOVERY_RATE_FILE_TYPE}_{recovery_suffix}_{timestamp}"
         try:
             data = download_and_parse_recovery_rate(
                 self._session, fds_entry, timeout=self._timeout,
+                cache=self._cache, cache_key=cache_key,
             )
         except Exception:
             logger.warning("_try_download_fds_recovery_rate: download/parse failed for %s",

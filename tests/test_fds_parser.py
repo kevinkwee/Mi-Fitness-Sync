@@ -18,6 +18,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
 from mi_fitness_sync.fds_parser import (
+    FdsCache,
     FdsHeader,
     FourDimenType,
     FourDimenValid,
@@ -1712,3 +1713,130 @@ class TestSportReportParsing:
         assert get_report_data_valid_len(1, 1) == 4   # outdoor v1
         assert get_report_data_valid_len(1, 4) == 5   # outdoor v4
         assert get_report_data_valid_len(99, 1) is None  # unsupported
+
+
+# ---------------------------------------------------------------------------
+# FdsCache
+# ---------------------------------------------------------------------------
+
+
+class TestFdsCache:
+    def test_miss_returns_none(self, tmp_path):
+        cache = FdsCache(tmp_path / "cache")
+        assert cache.get("nonexistent_key") is None
+
+    def test_put_then_hit(self, tmp_path):
+        cache = FdsCache(tmp_path / "cache")
+        data = b"\x01\x02\x03\x04"
+        cache.put("my_key", data)
+        assert cache.get("my_key") == data
+
+    def test_creates_directory_on_put(self, tmp_path):
+        cache_dir = tmp_path / "deep" / "nested" / "cache"
+        cache = FdsCache(cache_dir)
+        cache.put("k", b"\xff")
+        assert cache.get("k") == b"\xff"
+
+    def test_separate_keys_independent(self, tmp_path):
+        cache = FdsCache(tmp_path / "cache")
+        cache.put("key_a", b"aaa")
+        cache.put("key_b", b"bbb")
+        assert cache.get("key_a") == b"aaa"
+        assert cache.get("key_b") == b"bbb"
+
+
+class TestDownloadAndParseSportRecordCache:
+    """Cache integration for download_and_parse_sport_record."""
+
+    def _make_encrypted_binary(self, aes_key: bytes, sport_type: int = 8) -> str:
+        data_valid = bytes([0b11000000])
+        header = struct.pack("<I", 1700000000) + bytes([28, 2, sport_type]) + b"\x00" + data_valid
+        it_summary = b"\x00"
+        rec1 = bytes([80, 10])
+        rec2 = bytes([85, 12])
+        segment = struct.pack("<II", 2, 1700000000) + it_summary + rec1 + rec2
+        plaintext = header + segment
+        cipher = AES.new(aes_key, AES.MODE_CBC, b"1234567887654321")
+        ct = cipher.encrypt(pad(plaintext, AES.block_size))
+        return base64.urlsafe_b64encode(ct).decode("ascii").rstrip("=")
+
+    def test_cache_miss_downloads_and_caches(self, tmp_path):
+        """On cache miss, data is downloaded, decrypted, cached, and parsed."""
+        aes_key = b"\xab" * 16
+        obj_key_b64 = base64.urlsafe_b64encode(aes_key).decode("ascii").rstrip("=")
+        encrypted_body = self._make_encrypted_binary(aes_key)
+
+        fds_entry = {"url": "https://fds.example.com/dl", "obj_key": obj_key_b64}
+        download_called = []
+
+        class FakeResponse:
+            status_code = 200
+            text = encrypted_body
+            def raise_for_status(self):
+                pass
+
+        class FakeSession:
+            def get(self, url, timeout=30):
+                download_called.append(url)
+                return FakeResponse()
+
+        cache = FdsCache(tmp_path / "cache")
+        samples = download_and_parse_sport_record(
+            FakeSession(), fds_entry, sport_type=8, cache=cache, cache_key="test_key",
+        )
+        assert len(samples) == 2
+        assert len(download_called) == 1
+        # Verify cached bytes exist
+        assert cache.get("test_key") is not None
+
+    def test_cache_hit_skips_download(self, tmp_path):
+        """On cache hit, no HTTP call is made."""
+        # Pre-populate cache with valid decrypted binary
+        data_valid = bytes([0b11000000])
+        header = struct.pack("<I", 1700000000) + bytes([28, 2, 8]) + b"\x00" + data_valid
+        it_summary = b"\x00"
+        rec1 = bytes([90, 20])
+        rec2 = bytes([95, 25])
+        segment = struct.pack("<II", 2, 1700000000) + it_summary + rec1 + rec2
+        plaintext = header + segment
+
+        cache = FdsCache(tmp_path / "cache")
+        cache.put("cached_key", plaintext)
+
+        class FakeSession:
+            def get(self, url, timeout=30):
+                raise AssertionError("HTTP call should not be made on cache hit")
+
+        samples = download_and_parse_sport_record(
+            FakeSession(), {"url": "https://unused", "obj_key": "unused"},
+            sport_type=8, cache=cache, cache_key="cached_key",
+        )
+        assert len(samples) == 2
+        assert samples[0].heart_rate == 90
+        assert samples[1].heart_rate == 95
+
+    def test_cache_bypass_when_cache_is_none(self, tmp_path):
+        """When cache=None, download always happens (--no-cache behaviour)."""
+        aes_key = b"\xab" * 16
+        obj_key_b64 = base64.urlsafe_b64encode(aes_key).decode("ascii").rstrip("=")
+        encrypted_body = self._make_encrypted_binary(aes_key)
+
+        fds_entry = {"url": "https://fds.example.com/dl", "obj_key": obj_key_b64}
+        download_called = []
+
+        class FakeResponse:
+            status_code = 200
+            text = encrypted_body
+            def raise_for_status(self):
+                pass
+
+        class FakeSession:
+            def get(self, url, timeout=30):
+                download_called.append(url)
+                return FakeResponse()
+
+        samples = download_and_parse_sport_record(
+            FakeSession(), fds_entry, sport_type=8, cache=None, cache_key="ignored",
+        )
+        assert len(samples) == 2
+        assert len(download_called) == 1

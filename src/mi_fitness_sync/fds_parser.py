@@ -1,10 +1,12 @@
 """FDS binary sport record download, decryption and parsing.
 
 Implements the Mi Fitness FDS (Fitness Data Service) pipeline:
-  1. Download encrypted binary from FDS URL
-  2. AES-CBC decrypt using objectKey from FDS metadata
-  3. Parse binary header (serverDataId + dataValid)
-  4. Parse body as OneDimen or FourDimen sport records
+  1. Check local cache for previously decrypted binary
+  2. Download encrypted binary from FDS URL (on cache miss)
+  3. AES-CBC decrypt using objectKey from FDS metadata
+  4. Write decrypted bytes to local cache
+  5. Parse binary header (serverDataId + dataValid)
+  6. Parse body as OneDimen or FourDimen sport records
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import base64
 import logging
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -21,6 +24,44 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CACHE_DIR = Path.home() / ".mi_fitness_sync" / "cache" / "fds"
+
+
+# ---------------------------------------------------------------------------
+# Local FDS binary cache
+# ---------------------------------------------------------------------------
+
+
+class FdsCache:
+    """Flat-file cache for decrypted FDS binaries.
+
+    FDS data is immutable per activity, so cached files never expire.
+    Files are stored as ``{cache_dir}/{cache_key}.bin``.
+    """
+
+    def __init__(self, cache_dir: Path | str) -> None:
+        self._dir = Path(cache_dir)
+
+    def _path_for(self, cache_key: str) -> Path:
+        # Sanitise key: replace path-unsafe chars
+        safe_key = cache_key.replace("/", "_").replace("\\", "_")
+        return self._dir / f"{safe_key}.bin"
+
+    def get(self, cache_key: str) -> bytes | None:
+        path = self._path_for(cache_key)
+        if path.is_file():
+            logger.debug("FDS cache hit: %s", path)
+            return path.read_bytes()
+        logger.debug("FDS cache miss: %s", path)
+        return None
+
+    def put(self, cache_key: str, data: bytes) -> None:
+        path = self._path_for(cache_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        logger.debug("FDS cache write: %s (%d bytes)", path, len(data))
+
 
 # ---------------------------------------------------------------------------
 # AES parameters (from decompiled AESCoder.java)
@@ -1009,6 +1050,8 @@ def download_and_parse_sport_record(
     sport_type: int,
     *,
     timeout: int = 30,
+    cache: FdsCache | None = None,
+    cache_key: str | None = None,
 ) -> list[SportSample]:
     """Download, decrypt, and parse a sport record from an FDS entry.
 
@@ -1017,6 +1060,15 @@ def download_and_parse_sport_record(
 
     Returns per-second :class:`SportSample` list, or empty list on failure.
     """
+    if cache is not None and cache_key is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            try:
+                return parse_sport_record(cached, sport_type)
+            except Exception:
+                logger.warning("Failed to parse cached FDS sport record", exc_info=True)
+                return []
+
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
@@ -1035,6 +1087,9 @@ def download_and_parse_sport_record(
     except Exception:
         logger.warning("Failed to decrypt FDS sport record", exc_info=True)
         return []
+
+    if cache is not None and cache_key is not None:
+        cache.put(cache_key, decrypted)
 
     try:
         return parse_sport_record(decrypted, sport_type)
@@ -1263,11 +1318,22 @@ def download_and_parse_gps_record(
     fds_entry: dict[str, Any],
     *,
     timeout: int = 30,
+    cache: FdsCache | None = None,
+    cache_key: str | None = None,
 ) -> list[GpsSample]:
     """Download, decrypt, and parse a GPS record from an FDS entry.
 
     Returns :class:`GpsSample` list, or empty list on failure.
     """
+    if cache is not None and cache_key is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            try:
+                return parse_gps_record(cached)
+            except Exception:
+                logger.warning("Failed to parse cached FDS GPS record", exc_info=True)
+                return []
+
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
@@ -1286,6 +1352,9 @@ def download_and_parse_gps_record(
     except Exception:
         logger.warning("Failed to decrypt FDS GPS record", exc_info=True)
         return []
+
+    if cache is not None and cache_key is not None:
+        cache.put(cache_key, decrypted)
 
     try:
         return parse_gps_record(decrypted)
@@ -1947,11 +2016,22 @@ def download_and_parse_sport_report(
     sport_type: int,
     *,
     timeout: int = 30,
+    cache: FdsCache | None = None,
+    cache_key: str | None = None,
 ) -> SportReport | None:
     """Download, decrypt, and parse a sport report from an FDS entry.
 
     Returns a :class:`SportReport`, or None on failure.
     """
+    if cache is not None and cache_key is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            try:
+                return parse_sport_report(cached, sport_type)
+            except Exception:
+                logger.warning("Failed to parse cached FDS sport report", exc_info=True)
+                return None
+
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
@@ -1970,6 +2050,9 @@ def download_and_parse_sport_report(
     except Exception:
         logger.warning("Failed to decrypt FDS sport report", exc_info=True)
         return None
+
+    if cache is not None and cache_key is not None:
+        cache.put(cache_key, decrypted)
 
     try:
         return parse_sport_report(decrypted, sport_type)
@@ -2106,11 +2189,22 @@ def download_and_parse_recovery_rate(
     fds_entry: dict[str, Any],
     *,
     timeout: int = 30,
+    cache: FdsCache | None = None,
+    cache_key: str | None = None,
 ) -> RecoveryRateData | None:
     """Download, decrypt, and parse a recovery rate record from an FDS entry.
 
     Returns :class:`RecoveryRateData`, or None on failure.
     """
+    if cache is not None and cache_key is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            try:
+                return parse_recovery_rate_record(cached)
+            except Exception:
+                logger.warning("Failed to parse cached FDS recovery rate", exc_info=True)
+                return None
+
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
@@ -2129,6 +2223,9 @@ def download_and_parse_recovery_rate(
     except Exception:
         logger.warning("Failed to decrypt FDS recovery rate", exc_info=True)
         return None
+
+    if cache is not None and cache_key is not None:
+        cache.put(cache_key, decrypted)
 
     try:
         return parse_recovery_rate_record(decrypted)

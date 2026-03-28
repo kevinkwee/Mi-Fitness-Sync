@@ -58,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
     )
     detail_parser.add_argument("--json", action="store_true", help="Print the normalized activity detail as JSON")
+    detail_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    detail_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
     detail_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     export_parser = subparsers.add_parser("export-activity", help="Export one Mi Fitness activity to GPX, TCX, or FIT")
@@ -70,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
     export_parser.add_argument("--output", required=True, help="Destination file path")
     export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
+    export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
     export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     return parser
@@ -184,7 +188,10 @@ def handle_list_activities(args: argparse.Namespace) -> int:
 
 
 def handle_activity_detail(args: argparse.Namespace) -> int:
-    client = _activities_client(args.state_path, args.country_code)
+    client = _activities_client(
+        args.state_path, args.country_code,
+        no_cache=args.no_cache, cache_dir=args.cache_dir,
+    )
     detail = client.get_activity_detail(args.activity_id)
 
     if args.json:
@@ -205,7 +212,10 @@ def handle_activity_detail(args: argparse.Namespace) -> int:
 
 
 def handle_export_activity(args: argparse.Namespace) -> int:
-    client = _activities_client(args.state_path, args.country_code)
+    client = _activities_client(
+        args.state_path, args.country_code,
+        no_cache=args.no_cache, cache_dir=args.cache_dir,
+    )
     detail = client.get_activity_detail(args.activity_id)
     export = render_export(detail, args.format, compress=args.gzip)
 
@@ -220,11 +230,20 @@ def handle_export_activity(args: argparse.Namespace) -> int:
     return 0
 
 
-def _activities_client(state_path: str | None, country_code: str | None) -> MiFitnessActivitiesClient:
+def _activities_client(
+    state_path: str | None,
+    country_code: str | None,
+    *,
+    no_cache: bool = False,
+    cache_dir: str | None = None,
+) -> MiFitnessActivitiesClient:
     state = load_state(state_path)
     if state is None:
         raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
-    return MiFitnessActivitiesClient(state, country_code=country_code)
+    kwargs: dict[str, object] = {"country_code": country_code, "no_cache": no_cache}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = cache_dir
+    return MiFitnessActivitiesClient(state, **kwargs)  # type: ignore[arg-type]
 
 
 def format_error(exc: MiFitnessError) -> str:
