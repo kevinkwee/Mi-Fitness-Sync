@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import logging
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -40,15 +40,36 @@ TYPE_CALORIES = 2
 TYPE_TOTAL_CAL = 3
 TYPE_STEPS = 4
 TYPE_HR = 5
+TYPE_INTEGER_KM = 6
+TYPE_HEIGHT_CHANGE_SIGN = 7
+TYPE_HEIGHT_CHANGE_VALUE = 8
 TYPE_DISTANCE = 9
+TYPE_TURN_COUNT = 10
 TYPE_PACE = 12
+TYPE_SWOLF = 13
+TYPE_STROKE_COUNT = 16
+TYPE_STROKE_FREQ = 17
+TYPE_RESISTANCE = 23
+TYPE_PULL_OARS = 24
+TYPE_SHOOT_COUNT = 27
+TYPE_SWING_COUNT = 29
+TYPE_SKIP_COUNT = 35
 TYPE_SPO2 = 38
 TYPE_STRESS = 39
+TYPE_STRIDE = 40
 TYPE_IT_STATE = 41
-TYPE_IT_TOTAL_DURATION = 78
+TYPE_LANDING_IMPACT = 44
+TYPE_POWER = 47
+TYPE_TOUCHDOWN_AIR_RATIO = 48
 TYPE_CADENCE = 49
 TYPE_CYCLE_CADENCE = 50
 TYPE_SPEED = 51
+TYPE_ROWING_CADENCE = 52
+TYPE_JUMP_CADENCE = 53
+TYPE_RUNNING_POWER = 57
+TYPE_IT_TOTAL_DURATION = 78
+TYPE_HEIGHT_VALUE = 87
+TYPE_DISTANCE_DOUBLE = 88
 TYPE_GYM_ACTION_TIMES = 89
 TYPE_GYM_ACTION_WEIGHT = 90
 TYPE_GYM_ACTION_ID = 91
@@ -138,7 +159,7 @@ _FREE_TRAINING_RECORD_VALIDITY: dict[int, int] = {1: 1, 2: 1, 3: 2, 4: 2, 5: 2}
 _OUTDOOR_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
 _RUNNING_IN_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
 _BIKING_OUT_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
-_BIKING_IN_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
+_BIKING_IN_RECORD_VALIDITY: dict[int, int] = {1: 1, 2: 2, 3: 2, 4: 2, 5: 3, 6: 4}
 _SWIMMING_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2, 3: 3}
 _ELLIPTICAL_RECORD_VALIDITY: dict[int, int] = {1: 1, 2: 1}
 _ROWING_RECORD_VALIDITY: dict[int, int] = {1: 1, 2: 1, 3: 2}
@@ -146,6 +167,12 @@ _ROPE_SKIPPING_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
 _NO_STEP_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3}
 _STEP_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 3, 3: 3, 4: 3, 5: 5, 6: 6, 7: 6, 8: 7, 9: 7}
 _TRIATHLON_RECORD_VALIDITY: dict[int, int] = {1: 0, 2: 0}
+_ORDINARY_BALL_RECORD_VALIDITY: dict[int, int] = {1: 2}
+_BASKETBALL_RECORD_VALIDITY: dict[int, int] = {1: 2}
+_GOLF_RECORD_VALIDITY: dict[int, int] = {1: 1}
+_SKI_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 3, 3: 3, 4: 3}
+_ROCK_CLIMBING_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
+_DIVING_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
 
 # Keyed by sport_type (= proto_type from the Mi Fitness report)
 _SPORT_RECORD_VALIDITY: dict[int, dict[int, int]] = {
@@ -166,8 +193,14 @@ _SPORT_RECORD_VALIDITY: dict[int, dict[int, int]] = {
     15: _OUTDOOR_RECORD_VALIDITY,          # hiking
     16: _FREE_TRAINING_RECORD_VALIDITY,    # HIIT
     17: _TRIATHLON_RECORD_VALIDITY,        # triathlon
+    18: _ORDINARY_BALL_RECORD_VALIDITY,    # ordinary_ball
+    19: _BASKETBALL_RECORD_VALIDITY,       # basketball
+    20: _GOLF_RECORD_VALIDITY,             # golf
+    21: _SKI_RECORD_VALIDITY,              # ski
     22: _STEP_RECORD_VALIDITY,             # step_sport
     23: _NO_STEP_RECORD_VALIDITY,          # no_step_sport
+    24: _ROCK_CLIMBING_RECORD_VALIDITY,    # rock_climbing
+    25: _DIVING_RECORD_VALIDITY,           # diving
     28: _FREE_TRAINING_RECORD_VALIDITY,    # strength_training (same format as free_training)
 }
 
@@ -190,43 +223,82 @@ class OneDimenType:
     type_id: int
     byte_count: int
     support_version: int
-
-
-# FreeTraining record types (OneDimen, version < 3)
-_FREE_TRAINING_RECORD_TYPES = [
-    OneDimenType(TYPE_HR, 1, 1),
-    OneDimenType(TYPE_CALORIES, 1, 1),
-]
-
-# FreeTraining IT summary types
-_FREE_TRAINING_IT_SUMMARY_TYPES = [
-    OneDimenType(TYPE_IT_STATE, 1, 2),
-    OneDimenType(TYPE_IT_TOTAL_DURATION, 4, 4),
-    OneDimenType(TYPE_GYM_ACTION_TIMES, 2, 5),
-    OneDimenType(TYPE_GYM_ACTION_WEIGHT, 2, 5),
-    OneDimenType(TYPE_GYM_ACTION_ID, 2, 5),
-]
-
-
-# ---------------------------------------------------------------------------
-# FourDimen data type definitions (from decompiled FreeTrainingRecordParser)
-# ---------------------------------------------------------------------------
+    depends_on: tuple[int, frozenset[int]] | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class FourDimenType:
+    """One field definition for FourDimen binary records.
+
+    *byte_size* is the total bytes consumed per record when *exist* is True.
+    For simple types, the value equals the full uint read.
+    For bit-packed compound types, *high_start_bit* and *high_bit_count*
+    control extraction of the primary ("high") sub-value.
+    """
+
     type_id: int
     byte_size: int
     support_version: int
+    high_start_bit: int | None = None  # None → full value
+    high_bit_count: int | None = None
+    max_support_version: int | None = None
 
 
-# FreeTraining record types (FourDimen, version >= 3)
-_FREE_TRAINING_FOURDIMEN_TYPES = [
-    FourDimenType(TYPE_HR, 1, 3),
-    FourDimenType(TYPE_CALORIES, 1, 3),
-    FourDimenType(TYPE_SPO2, 1, 3),
-    FourDimenType(TYPE_STRESS, 1, 3),
-]
+# ---------------------------------------------------------------------------
+# Per-second sport record
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class SportSample:
+    """One per-second sport record sample."""
+
+    timestamp: int
+    heart_rate: int | None = None
+    calories: int | None = None
+    spo2: int | None = None
+    stress: int | None = None
+    steps: int | None = None
+    distance: int | None = None
+    speed: int | None = None
+    cadence: int | None = None
+    pace: int | None = None
+    power: int | None = None
+    stride_length: int | None = None
+    resistance: int | None = None
+    running_power: int | None = None
+    altitude_value: int | None = None
+    extras: dict[int, int] = field(default_factory=dict)
+
+
+_TYPE_TO_ATTR: dict[int, str] = {
+    TYPE_HR: "heart_rate",
+    TYPE_CALORIES: "calories",
+    TYPE_SPO2: "spo2",
+    TYPE_STRESS: "stress",
+    TYPE_STEPS: "steps",
+    TYPE_DISTANCE: "distance",
+    TYPE_SPEED: "speed",
+    TYPE_CADENCE: "cadence",
+    TYPE_CYCLE_CADENCE: "cadence",
+    TYPE_PACE: "pace",
+    TYPE_POWER: "power",
+    TYPE_STRIDE: "stride_length",
+    TYPE_RESISTANCE: "resistance",
+    TYPE_RUNNING_POWER: "running_power",
+    TYPE_HEIGHT_VALUE: "altitude_value",
+}
+
+
+def _record_to_sample(timestamp: int, record: dict[int, int]) -> SportSample:
+    sample = SportSample(timestamp=timestamp)
+    for type_id, value in record.items():
+        attr = _TYPE_TO_ATTR.get(type_id)
+        if attr is not None:
+            setattr(sample, attr, value)
+        else:
+            sample.extras[type_id] = value
+    return sample
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +309,11 @@ _FREE_TRAINING_FOURDIMEN_TYPES = [
 def _parse_one_dimen_valid(
     data_types: list[OneDimenType], version: int, data_valid: bytes,
 ) -> dict[int, bool]:
-    """Parse OneDimen validity bitmap.  1 bit per supported type, MSB-first."""
+    """Parse OneDimen validity bitmap.  1 bit per supported type, MSB-first.
+
+    If *data_valid* is empty all supported types are treated as valid (used by
+    e.g. triathlon where ``data_valid_len == 0``).
+    """
     valid_map: dict[int, bool] = {}
     bit_index = 0
     for dt in data_types:
@@ -245,6 +321,10 @@ def _parse_one_dimen_valid(
             continue
         if dt.support_version > version:
             valid_map[dt.type_id] = False
+            continue
+        if not data_valid:
+            # No validity bitmap → all supported types are valid
+            valid_map[dt.type_id] = True
             continue
         byte_idx = bit_index // 8
         bit_idx = bit_index % 8
@@ -273,10 +353,17 @@ class FourDimenValid:
 def _parse_four_dimen_valid(
     data_types: list[FourDimenType], version: int, data_valid: bytes,
 ) -> dict[int, FourDimenValid]:
-    """Parse FourDimen validity nibbles.  4 bits per supported type."""
+    """Parse FourDimen validity nibbles.  4 bits per supported type.
+
+    Fields whose *max_support_version* is exceeded by *version* are marked
+    all-false **without** consuming a nibble (matching Java semantics).
+    """
     valid_map: dict[int, FourDimenValid] = {}
     nibble_index = 0
     for dt in data_types:
+        if dt.max_support_version is not None and version > dt.max_support_version:
+            valid_map[dt.type_id] = FourDimenValid(False, False, False, False)
+            continue
         if dt.support_version > version:
             valid_map[dt.type_id] = FourDimenValid(False, False, False, False)
             continue
@@ -315,47 +402,11 @@ def _read_uint(data: memoryview | bytes, offset: int, size: int) -> tuple[int, i
     raise ValueError(f"Unsupported read size {size}")
 
 
-# ---------------------------------------------------------------------------
-# Per-second sport record
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class SportSample:
-    """One per-second sport record sample."""
-
-    timestamp: int
-    heart_rate: int | None = None
-    calories: int | None = None
-    spo2: int | None = None
-    stress: int | None = None
-    steps: int | None = None
-    distance: int | None = None
-    speed: int | None = None
-    cadence: int | None = None
-    pace: int | None = None
-
-
-_TYPE_TO_ATTR: dict[int, str] = {
-    TYPE_HR: "heart_rate",
-    TYPE_CALORIES: "calories",
-    TYPE_SPO2: "spo2",
-    TYPE_STRESS: "stress",
-    TYPE_STEPS: "steps",
-    TYPE_DISTANCE: "distance",
-    TYPE_SPEED: "speed",
-    TYPE_CADENCE: "cadence",
-    TYPE_PACE: "pace",
-}
-
-
-def _record_to_sample(timestamp: int, record: dict[int, int]) -> SportSample:
-    sample = SportSample(timestamp=timestamp)
-    for type_id, value in record.items():
-        attr = _TYPE_TO_ATTR.get(type_id)
-        if attr is not None:
-            setattr(sample, attr, value)
-    return sample
+def _extract_high_value(raw_value: int, dt: FourDimenType) -> int:
+    """Extract the 'high' sub-value from a raw uint, applying bit extraction if needed."""
+    if dt.high_start_bit is not None and dt.high_bit_count is not None:
+        return (raw_value >> dt.high_start_bit) & ((1 << dt.high_bit_count) - 1)
+    return raw_value
 
 
 # ---------------------------------------------------------------------------
@@ -364,22 +415,41 @@ def _record_to_sample(timestamp: int, record: dict[int, int]) -> SportSample:
 
 
 def _it_summary_byte_count(types: list[OneDimenType], version: int) -> int:
-    return sum(t.byte_count for t in types if t.type_id >= 0 and t.support_version <= version)
+    return sum(
+        t.byte_count for t in types
+        if t.type_id >= 0 and t.support_version <= version and t.depends_on is None
+    )
 
 
 def _read_it_summary(
     buf: memoryview | bytes, offset: int, types: list[OneDimenType], version: int,
 ) -> tuple[dict[int, int], int]:
-    """Read IT summary data (one record, all supported types treated as valid)."""
+    """Read IT summary data (one record, dependency-aware)."""
     result: dict[int, int] = {}
     for t in types:
-        if t.type_id < 0 or t.support_version > version:
+        if t.support_version > version:
             continue
+        if t.depends_on is not None:
+            dep_type_id, dep_values = t.depends_on
+            dep_val = result.get(dep_type_id)
+            if dep_val is None or dep_val not in dep_values:
+                continue
         if offset + t.byte_count > len(buf):
             break
         value, offset = _read_uint(buf, offset, t.byte_count)
         result[t.type_id] = value
     return result, offset
+
+
+# ---------------------------------------------------------------------------
+# Pause initial data reading
+# ---------------------------------------------------------------------------
+
+
+def _pause_init_byte_count(types: list[OneDimenType] | None, version: int) -> int:
+    if types is None:
+        return 0
+    return sum(t.byte_count for t in types if t.support_version <= version)
 
 
 # ---------------------------------------------------------------------------
@@ -395,17 +465,29 @@ def _parse_one_dimen_records(
     version: int,
     valid_map: dict[int, bool],
 ) -> tuple[list[dict[int, int]], int]:
-    """Parse *record_count* OneDimen records.  Returns (records, new_offset)."""
+    """Parse *record_count* OneDimen records.  Returns (records, new_offset).
+
+    Supports dependency-aware field skipping: if a field has ``depends_on``
+    set and the dependency condition is not met, its bytes are **not**
+    consumed from the buffer (matching Java ``isDataExist()`` semantics).
+    """
     records: list[dict[int, int]] = []
     for _ in range(record_count):
         rec: dict[int, int] = {}
+        parsed: dict[int, int] = {}  # all values incl. negative type_ids
         for dt in data_types:
-            if dt.type_id < 0 or dt.support_version > version:
+            if dt.support_version > version:
                 continue
+            if dt.depends_on is not None:
+                dep_type_id, dep_values = dt.depends_on
+                dep_val = parsed.get(dep_type_id)
+                if dep_val is None or dep_val not in dep_values:
+                    continue
             if offset + dt.byte_count > len(buf):
                 return records, offset
             value, offset = _read_uint(buf, offset, dt.byte_count)
-            if valid_map.get(dt.type_id, False):
+            parsed[dt.type_id] = value
+            if dt.type_id >= 0 and valid_map.get(dt.type_id, False):
                 rec[dt.type_id] = value
         records.append(rec)
     return records, offset
@@ -437,9 +519,8 @@ def _parse_four_dimen_records(
             if offset + dt.byte_size > len(buf):
                 return records, offset
             value, offset = _read_uint(buf, offset, dt.byte_size)
-            # For FreeTraining: only "high" sub-value defined (full byte = value)
             if dv.high:
-                rec[dt.type_id] = value
+                rec[dt.type_id] = _extract_high_value(value, dt)
         records.append(rec)
     return records, offset
 
@@ -455,17 +536,20 @@ def _parse_body_one_dimen(
     version: int,
     record_types: list[OneDimenType],
     it_summary_types: list[OneDimenType],
+    pause_init_types: list[OneDimenType] | None = None,
 ) -> list[SportSample]:
     """Parse OneDimen sport record body into per-second samples."""
     valid_map = _parse_one_dimen_valid(record_types, version, data_valid)
     it_bytes = _it_summary_byte_count(it_summary_types, version)
-    min_segment = 8 + it_bytes  # recordCount(4) + startTime(4) + IT summary
+    init_bytes = _pause_init_byte_count(pause_init_types, version)
+    min_segment = init_bytes + 8 + it_bytes
 
     samples: list[SportSample] = []
     offset = 0
     buf = memoryview(body)
 
     while offset + min_segment <= len(buf):
+        offset += init_bytes
         record_count, offset = _read_uint(buf, offset, 4)
         start_time, offset = _read_uint(buf, offset, 4)
 
@@ -486,17 +570,20 @@ def _parse_body_four_dimen(
     version: int,
     record_types: list[FourDimenType],
     it_summary_types: list[OneDimenType],
+    pause_init_types: list[OneDimenType] | None = None,
 ) -> list[SportSample]:
     """Parse FourDimen sport record body into per-second samples."""
     valid_map = _parse_four_dimen_valid(record_types, version, data_valid)
     it_bytes = _it_summary_byte_count(it_summary_types, version)
-    min_segment = 8 + it_bytes  # recordCount(4) + startTime(4) + IT summary
+    init_bytes = _pause_init_byte_count(pause_init_types, version)
+    min_segment = init_bytes + 8 + it_bytes
 
     samples: list[SportSample] = []
     offset = 0
     buf = memoryview(body)
 
     while offset + min_segment <= len(buf):
+        offset += init_bytes
         record_count, offset = _read_uint(buf, offset, 4)
         start_time, offset = _read_uint(buf, offset, 4)
 
@@ -512,52 +599,382 @@ def _parse_body_four_dimen(
 
 
 # ---------------------------------------------------------------------------
-# Free-training parser dispatch (from FreeTrainingRecordParser.java)
+# Sport record config (data-driven approach)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class SportRecordConfig:
+    it_summary_types: list[OneDimenType] = field(default_factory=list)
+    one_dimen_types: list[OneDimenType] | None = None
+    four_dimen_types: list[FourDimenType] | None = None
+    four_dimen_min_version: int = 1
+    alt_four_dimen_types: list[FourDimenType] | None = None
+    alt_four_dimen_min_version: int = 0
+    pause_init_types: list[OneDimenType] | None = None
+
+
+def _parse_with_config(header: FdsHeader, config: SportRecordConfig) -> list[SportSample]:
+    """Generic parser that selects format based on version and config."""
+    v = header.version
+    if config.alt_four_dimen_types is not None and v >= config.alt_four_dimen_min_version:
+        return _parse_body_four_dimen(
+            header.body_data, header.data_valid, v,
+            config.alt_four_dimen_types, config.it_summary_types,
+            config.pause_init_types,
+        )
+    if config.four_dimen_types is not None and v >= config.four_dimen_min_version:
+        return _parse_body_four_dimen(
+            header.body_data, header.data_valid, v,
+            config.four_dimen_types, config.it_summary_types,
+            config.pause_init_types,
+        )
+    if config.one_dimen_types is not None:
+        return _parse_body_one_dimen(
+            header.body_data, header.data_valid, v,
+            config.one_dimen_types, config.it_summary_types,
+            config.pause_init_types,
+        )
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Sport type configurations (from decompiled record parsers)
+# ---------------------------------------------------------------------------
+
+_IT_STATE_ONLY = [OneDimenType(TYPE_IT_STATE, 1, 2)]
+
+_FREE_TRAINING_IT_SUMMARY_TYPES = [
+    OneDimenType(TYPE_IT_STATE, 1, 2),
+    OneDimenType(TYPE_IT_TOTAL_DURATION, 4, 4),
+    OneDimenType(TYPE_GYM_ACTION_TIMES, 2, 5),
+    OneDimenType(TYPE_GYM_ACTION_WEIGHT, 2, 5),
+    OneDimenType(TYPE_GYM_ACTION_ID, 2, 5),
+]
+_FREE_TRAINING_RECORD_TYPES = [
+    OneDimenType(TYPE_HR, 1, 1),
+    OneDimenType(TYPE_CALORIES, 1, 1),
+]
+_FREE_TRAINING_FOURDIMEN_TYPES = [
+    FourDimenType(TYPE_HR, 1, 3),
+    FourDimenType(TYPE_CALORIES, 1, 3),
+    FourDimenType(TYPE_SPO2, 1, 3),
+    FourDimenType(TYPE_STRESS, 1, 3),
+]
+_FREE_TRAINING_CONFIG = SportRecordConfig(
+    it_summary_types=_FREE_TRAINING_IT_SUMMARY_TYPES,
+    one_dimen_types=_FREE_TRAINING_RECORD_TYPES,
+    four_dimen_types=_FREE_TRAINING_FOURDIMEN_TYPES,
+    four_dimen_min_version=3,
+)
+
+_OUTDOOR_SPORT_CONFIG = SportRecordConfig(
+    it_summary_types=_IT_STATE_ONLY,
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_INTEGER_KM, 1, 1, high_start_bit=7, high_bit_count=1),
+        FourDimenType(TYPE_DISTANCE, 1, 1),
+    ],
+    pause_init_types=[OneDimenType(0, 4, 1)],
+)
+
+_INDOOR_RUN_CONFIG = SportRecordConfig(
+    it_summary_types=[
+        OneDimenType(TYPE_IT_STATE, 1, 2),
+        OneDimenType(43, 4, 4),
+        OneDimenType(TYPE_IT_TOTAL_DURATION, 4, 8),
+        OneDimenType(55, 2, 7),
+    ],
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_DISTANCE, 1, 1),
+        FourDimenType(TYPE_STRIDE, 1, 3),
+        FourDimenType(TYPE_LANDING_IMPACT, 4, 5, high_start_bit=26, high_bit_count=6),
+        FourDimenType(TYPE_TOUCHDOWN_AIR_RATIO, 1, 6),
+        FourDimenType(TYPE_CADENCE, 1, 6),
+        FourDimenType(TYPE_PACE, 2, 6),
+        FourDimenType(TYPE_RUNNING_POWER, 2, 7),
+        FourDimenType(79, 2, 9),
+        FourDimenType(80, 2, 9),
+    ],
+)
+
+_OUTDOOR_BIKING_CONFIG = SportRecordConfig(
+    it_summary_types=_IT_STATE_ONLY,
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_INTEGER_KM, 1, 1, high_start_bit=7, high_bit_count=1),
+    ],
+    pause_init_types=[OneDimenType(0, 4, 1)],
+)
+
+_INDOOR_BIKING_CONFIG = SportRecordConfig(
+    it_summary_types=[OneDimenType(TYPE_IT_STATE, 1, 3), OneDimenType(43, 4, 4)],
+    one_dimen_types=[OneDimenType(TYPE_HR, 1, 1), OneDimenType(TYPE_CALORIES, 1, 1)],
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 2, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_HR, 1, 2),
+        FourDimenType(TYPE_DISTANCE, 1, 2),
+        FourDimenType(TYPE_RESISTANCE, 1, 2),
+        FourDimenType(TYPE_POWER, 2, 5),
+        FourDimenType(TYPE_SPEED, 2, 6),
+        FourDimenType(TYPE_CYCLE_CADENCE, 1, 6),
+    ],
+    four_dimen_min_version=2,
+)
+
+_SWIMMING_DEP = (-1, frozenset({0}))
+
+_SWIMMING_CONFIG = SportRecordConfig(
+    one_dimen_types=[
+        OneDimenType(-1, 1, 1),
+        OneDimenType(TYPE_END_TIME, 4, 1),
+        OneDimenType(11, 1, 1),
+        OneDimenType(TYPE_PACE, 2, 1),
+        OneDimenType(TYPE_SWOLF, 2, 1),
+        OneDimenType(TYPE_DISTANCE, 2, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(TYPE_CALORIES, 2, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(TYPE_STROKE_COUNT, 2, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(TYPE_TURN_COUNT, 2, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(TYPE_STROKE_FREQ, 1, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(18, 1, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(19, 1, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(20, 1, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(21, 1, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(22, 1, 1, depends_on=_SWIMMING_DEP),
+        OneDimenType(TYPE_TOTAL_CAL, 2, 2, depends_on=_SWIMMING_DEP),
+        OneDimenType(81, 1, 3, depends_on=_SWIMMING_DEP),
+        OneDimenType(82, 1, 3, depends_on=_SWIMMING_DEP),
+        OneDimenType(83, 1, 3, depends_on=_SWIMMING_DEP),
+        OneDimenType(84, 2, 3, depends_on=_SWIMMING_DEP),
+        OneDimenType(85, 4, 3, depends_on=_SWIMMING_DEP),
+        OneDimenType(86, 1, 3, depends_on=_SWIMMING_DEP),
+    ],
+)
+
+_ELLIPTICAL_CONFIG = SportRecordConfig(
+    it_summary_types=_IT_STATE_ONLY,
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_CADENCE, 1, 3),
+    ],
+)
+
+_ROWING_CONFIG = SportRecordConfig(
+    it_summary_types=[OneDimenType(TYPE_IT_STATE, 1, 2), OneDimenType(42, 4, 3)],
+    four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_PULL_OARS, 1, 1, high_start_bit=7, high_bit_count=1),
+    ],
+    alt_four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_ROWING_CADENCE, 1, 4),
+    ],
+    alt_four_dimen_min_version=4,
+)
+
+_ROPE_SKIPPING_CONFIG = SportRecordConfig(
+    it_summary_types=[OneDimenType(TYPE_IT_STATE, 1, 3), OneDimenType(42, 4, 4)],
+    one_dimen_types=[
+        OneDimenType(TYPE_HR, 1, 1),
+        OneDimenType(TYPE_CALORIES, 1, 1),
+        OneDimenType(TYPE_SKIP_COUNT, 1, 1),
+        OneDimenType(36, 1, 1),
+        OneDimenType(37, 1, 2),
+    ],
+    four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 5),
+        FourDimenType(TYPE_CALORIES, 1, 5),
+        FourDimenType(TYPE_JUMP_CADENCE, 2, 5),
+        FourDimenType(36, 1, 5),
+        FourDimenType(37, 1, 5),
+    ],
+    four_dimen_min_version=5,
+    alt_four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 6),
+        FourDimenType(TYPE_CALORIES, 1, 6),
+        FourDimenType(TYPE_JUMP_CADENCE, 2, 6),
+        FourDimenType(36, 1, 6),
+        FourDimenType(37, 1, 6, high_start_bit=6, high_bit_count=2),
+    ],
+    alt_four_dimen_min_version=6,
+)
+
+_TRIATHLON_CONFIG = SportRecordConfig(
+    one_dimen_types=[OneDimenType(TYPE_HR, 1, 1), OneDimenType(TYPE_CALORIES, 1, 1)],
+)
+
+_ORDINARY_BALL_CONFIG = SportRecordConfig(
+    four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_SWING_COUNT, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_DISTANCE, 1, 1),
+    ],
+)
+
+_BASKETBALL_CONFIG = SportRecordConfig(
+    four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_SHOOT_COUNT, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_DISTANCE, 1, 1),
+    ],
+)
+
+_GOLF_CONFIG = SportRecordConfig(
+    one_dimen_types=[
+        OneDimenType(TYPE_END_TIME, 4, 1),
+        OneDimenType(TYPE_CALORIES, 2, 1),
+        OneDimenType(TYPE_TOTAL_CAL, 2, 1),
+        OneDimenType(31, 2, 1),
+        OneDimenType(32, 2, 1),
+        OneDimenType(33, 2, 1),
+        OneDimenType(34, 2, 1),
+    ],
+)
+
+_SKI_CONFIG = SportRecordConfig(
+    it_summary_types=[
+        OneDimenType(59, 4, 3), OneDimenType(60, 4, 3),
+        OneDimenType(61, 2, 3), OneDimenType(62, 2, 3), OneDimenType(63, 1, 3),
+    ],
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_HEIGHT_VALUE, 4, 4),
+        FourDimenType(TYPE_DISTANCE_DOUBLE, 2, 4),
+        FourDimenType(TYPE_HEIGHT_CHANGE_SIGN, 1, 1, high_start_bit=7, high_bit_count=1, max_support_version=3),
+        FourDimenType(TYPE_DISTANCE, 1, 1, max_support_version=3),
+        FourDimenType(TYPE_SPEED, 2, 2),
+    ],
+    pause_init_types=[OneDimenType(-2, 1, 1), OneDimenType(0, 4, 1)],
+)
+
+_OUTDOOR_STEP_CONFIG = SportRecordConfig(
+    it_summary_types=[
+        OneDimenType(TYPE_IT_STATE, 1, 1), OneDimenType(43, 4, 3),
+        OneDimenType(TYPE_IT_TOTAL_DURATION, 4, 7),
+        OneDimenType(54, 4, 6), OneDimenType(55, 2, 6),
+    ],
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_HEIGHT_VALUE, 4, 9),
+        FourDimenType(TYPE_INTEGER_KM, 2, 9, high_start_bit=15, high_bit_count=1),
+        FourDimenType(TYPE_INTEGER_KM, 1, 1, high_start_bit=7, high_bit_count=1),
+        FourDimenType(TYPE_DISTANCE, 1, 1),
+        FourDimenType(TYPE_STRIDE, 1, 2),
+        FourDimenType(TYPE_LANDING_IMPACT, 4, 4, high_start_bit=26, high_bit_count=6),
+        FourDimenType(TYPE_TOUCHDOWN_AIR_RATIO, 1, 5),
+        FourDimenType(TYPE_CADENCE, 1, 5),
+        FourDimenType(TYPE_PACE, 2, 5),
+        FourDimenType(56, 2, 6),
+        FourDimenType(TYPE_RUNNING_POWER, 2, 6),
+        FourDimenType(79, 2, 8),
+        FourDimenType(80, 2, 8),
+    ],
+    pause_init_types=[OneDimenType(0, 4, 1)],
+)
+
+_OUTDOOR_NO_STEP_CONFIG = SportRecordConfig(
+    it_summary_types=[
+        OneDimenType(TYPE_IT_STATE, 1, 1), OneDimenType(43, 4, 2),
+        OneDimenType(TYPE_IT_TOTAL_DURATION, 4, 5), OneDimenType(58, 2, 4),
+    ],
+    four_dimen_types=[
+        FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4),
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_HEIGHT_VALUE, 4, 6),
+        FourDimenType(TYPE_INTEGER_KM, 2, 6, high_start_bit=15, high_bit_count=1),
+        FourDimenType(TYPE_INTEGER_KM, 1, 1, high_start_bit=7, high_bit_count=1),
+        FourDimenType(TYPE_DISTANCE, 1, 1),
+        FourDimenType(TYPE_SPEED, 2, 3),
+        FourDimenType(TYPE_CYCLE_CADENCE, 1, 3),
+    ],
+    pause_init_types=[OneDimenType(0, 4, 1)],
+)
+
+_ROCK_CLIMBING_CONFIG = SportRecordConfig(
+    four_dimen_types=[
+        FourDimenType(TYPE_HR, 1, 1),
+        FourDimenType(TYPE_CALORIES, 1, 1),
+        FourDimenType(TYPE_HEIGHT_CHANGE_SIGN, 1, 1, high_start_bit=7, high_bit_count=1),
+        FourDimenType(TYPE_HEIGHT_VALUE, 4, 2),
+    ],
+    pause_init_types=[OneDimenType(0, 4, 1)],
+)
+
+_DIVING_IT_DEP = (64, frozenset({1}))
+
+_DIVING_CONFIG = SportRecordConfig(
+    it_summary_types=[
+        OneDimenType(64, 1, 1),
+        OneDimenType(65, 4, 1, depends_on=_DIVING_IT_DEP),
+        OneDimenType(66, 4, 1, depends_on=_DIVING_IT_DEP),
+        OneDimenType(67, 2, 1, depends_on=_DIVING_IT_DEP),
+        OneDimenType(68, 2, 1, depends_on=_DIVING_IT_DEP),
+        OneDimenType(69, 2, 1, depends_on=_DIVING_IT_DEP),
+        OneDimenType(75, 2, 2, depends_on=_DIVING_IT_DEP),
+        OneDimenType(76, 2, 2, depends_on=_DIVING_IT_DEP),
+        OneDimenType(77, 2, 2, depends_on=_DIVING_IT_DEP),
+    ],
+    four_dimen_types=[
+        FourDimenType(70, 1, 1),
+        FourDimenType(71, 2, 1),
+        FourDimenType(72, 2, 1),
+        FourDimenType(73, 2, 1, high_start_bit=14, high_bit_count=2),
+    ],
+)
+
+
+# ---------------------------------------------------------------------------
+# Sport parser dispatch table
+# ---------------------------------------------------------------------------
+
+_SPORT_CONFIG: dict[int, SportRecordConfig] = {
+    1: _OUTDOOR_SPORT_CONFIG,
+    2: _OUTDOOR_SPORT_CONFIG,
+    3: _INDOOR_RUN_CONFIG,
+    4: _OUTDOOR_SPORT_CONFIG,
+    5: _OUTDOOR_SPORT_CONFIG,
+    6: _OUTDOOR_BIKING_CONFIG,
+    7: _INDOOR_BIKING_CONFIG,
+    8: _FREE_TRAINING_CONFIG,
+    9: _SWIMMING_CONFIG,
+    10: _SWIMMING_CONFIG,
+    11: _ELLIPTICAL_CONFIG,
+    12: _FREE_TRAINING_CONFIG,
+    13: _ROWING_CONFIG,
+    14: _ROPE_SKIPPING_CONFIG,
+    15: _OUTDOOR_SPORT_CONFIG,
+    16: _FREE_TRAINING_CONFIG,
+    17: _TRIATHLON_CONFIG,
+    18: _ORDINARY_BALL_CONFIG,
+    19: _BASKETBALL_CONFIG,
+    20: _GOLF_CONFIG,
+    21: _SKI_CONFIG,
+    22: _OUTDOOR_STEP_CONFIG,
+    23: _OUTDOOR_NO_STEP_CONFIG,
+    24: _ROCK_CLIMBING_CONFIG,
+    25: _DIVING_CONFIG,
+    28: _FREE_TRAINING_CONFIG,
+}
 
 
 def parse_free_training_record(header: FdsHeader) -> list[SportSample]:
     """Parse a FreeTraining (strength / HIIT / yoga) sport record binary."""
-    if header.version >= 3:
-        return _parse_body_four_dimen(
-            header.body_data,
-            header.data_valid,
-            header.version,
-            _FREE_TRAINING_FOURDIMEN_TYPES,
-            _FREE_TRAINING_IT_SUMMARY_TYPES,
-        )
-    return _parse_body_one_dimen(
-        header.body_data,
-        header.data_valid,
-        header.version,
-        _FREE_TRAINING_RECORD_TYPES,
-        _FREE_TRAINING_IT_SUMMARY_TYPES,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Top-level sport record parser dispatch (from FitnessDataParser.java)
-# Maps sport_type (= proto_type from report) → parser function
-# ---------------------------------------------------------------------------
-
-_SPORT_PARSER: dict[int, Any] = {
-    8: parse_free_training_record,   # free_training
-    12: parse_free_training_record,  # yoga
-    16: parse_free_training_record,  # HIIT
-    28: parse_free_training_record,  # strength_training
-}
+    return _parse_with_config(header, _FREE_TRAINING_CONFIG)
 
 
 def parse_sport_record(decrypted: bytes, sport_type: int) -> list[SportSample]:
-    """Parse decrypted FDS sport record binary for the given sport_type.
-
-    *sport_type* is the proto_type from ``SportBasicReport``, NOT the
-    category-level sport type.
-
-    Returns a list of per-second :class:`SportSample` instances, or an empty
-    list if the sport type / version is unsupported.
-    """
-    # Determine version from header byte [5] to look up dataValid length.
+    """Parse decrypted FDS sport record binary for the given sport_type."""
     if len(decrypted) < _SPORT_SERVER_DATA_ID_LEN + 1:
         logger.warning("Decrypted data too short to read header version byte")
         return []
@@ -573,12 +990,12 @@ def parse_sport_record(decrypted: bytes, sport_type: int) -> list[SportSample]:
 
     header = parse_fds_header(decrypted, data_valid_len)
 
-    parser = _SPORT_PARSER.get(sport_type)
-    if parser is None:
+    config = _SPORT_CONFIG.get(sport_type)
+    if config is None:
         logger.info("No parser for sport_type=%d; skipping FDS parse", sport_type)
         return []
 
-    return parser(header)
+    return _parse_with_config(header, config)
 
 
 # ---------------------------------------------------------------------------

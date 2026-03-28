@@ -22,16 +22,24 @@ from mi_fitness_sync.fds_parser import (
     FourDimenType,
     FourDimenValid,
     OneDimenType,
+    SportRecordConfig,
     SportSample,
     TYPE_CALORIES,
+    TYPE_DISTANCE,
     TYPE_HR,
+    TYPE_INTEGER_KM,
+    TYPE_SHOOT_COUNT,
     TYPE_SPO2,
     TYPE_STRESS,
     _b64url_decode,
+    _extract_high_value,
     _it_summary_byte_count,
     _parse_four_dimen_records,
     _parse_four_dimen_valid,
+    _parse_one_dimen_records,
     _parse_one_dimen_valid,
+    _parse_with_config,
+    _SPORT_CONFIG,
     decrypt_fds_data,
     download_and_parse_sport_record,
     get_record_data_valid_len,
@@ -589,3 +597,478 @@ class TestDownloadAndParseSportRecordApiShape:
         }
         # obj_key is absent → should return empty, proving objectKey is ignored
         assert download_and_parse_sport_record(FakeSession(), fds_entry_old_keys, sport_type=8) == []
+
+
+# ---------------------------------------------------------------------------
+# _extract_high_value – bit extraction for compound FourDimen types
+# ---------------------------------------------------------------------------
+
+
+class TestExtractHighValue:
+    def test_no_bit_extraction(self):
+        """When high_start_bit is None, raw value returned as-is."""
+        dt = FourDimenType(TYPE_HR, 1, 1)
+        assert _extract_high_value(0xAB, dt) == 0xAB
+
+    def test_single_bit_extraction(self):
+        """Extract 1 bit at position 7 (e.g. integerKm sign bit)."""
+        dt = FourDimenType(TYPE_INTEGER_KM, 1, 1, high_start_bit=7, high_bit_count=1)
+        assert _extract_high_value(0xFF, dt) == 1
+        assert _extract_high_value(0x7F, dt) == 0
+        assert _extract_high_value(0x80, dt) == 1
+
+    def test_nibble_extraction(self):
+        """Extract 4 bits at position 4 (e.g. calories high nibble)."""
+        dt = FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4)
+        assert _extract_high_value(0xA5, dt) == 0xA  # bits [7:4] = 0xA
+        assert _extract_high_value(0x30, dt) == 3
+
+    def test_multi_bit_wide_field(self):
+        """Extract 6 bits at position 26 (e.g. landingImpact from 4-byte)."""
+        dt = FourDimenType(44, 4, 5, high_start_bit=26, high_bit_count=6)
+        raw = 42 << 26
+        assert _extract_high_value(raw, dt) == 42
+
+
+# ---------------------------------------------------------------------------
+# FourDimen records with bit extraction
+# ---------------------------------------------------------------------------
+
+
+class TestFourDimenRecordsWithHighExtraction:
+    def test_records_apply_high_bit_extraction(self):
+        """FourDimen parser applies _extract_high_value for types with bit fields."""
+        types = [
+            FourDimenType(TYPE_CALORIES, 1, 1, high_start_bit=4, high_bit_count=4),
+            FourDimenType(TYPE_HR, 1, 1),
+        ]
+        valid_map = {
+            TYPE_CALORIES: FourDimenValid(exist=True, high=True, middle=False, low=False),
+            TYPE_HR: FourDimenValid(exist=True, high=True, middle=False, low=False),
+        }
+        buf = bytes([0xA5, 120])
+        records, offset = _parse_four_dimen_records(buf, 0, 1, types, 1, valid_map)
+        assert records[0][TYPE_CALORIES] == 0xA
+        assert records[0][TYPE_HR] == 120
+        assert offset == 2
+
+
+# ---------------------------------------------------------------------------
+# SportRecordConfig + _parse_with_config
+# ---------------------------------------------------------------------------
+
+
+class TestParseWithConfig:
+    def test_selects_one_dimen_for_low_version(self):
+        config = SportRecordConfig(
+            it_summary_types=[],
+            one_dimen_types=[OneDimenType(TYPE_HR, 1, 1), OneDimenType(TYPE_CALORIES, 1, 1)],
+            four_dimen_types=[FourDimenType(TYPE_HR, 1, 3), FourDimenType(TYPE_CALORIES, 1, 3)],
+            four_dimen_min_version=3,
+        )
+        data_valid = bytes([0b11000000])
+        body = _build_one_dimen_segment(2, 5000, b"", bytes([80, 5, 90, 10]))
+        header = FdsHeader(5000, 0, 1, 8, data_valid, body)
+        samples = _parse_with_config(header, config)
+        assert len(samples) == 2
+        assert samples[0].heart_rate == 80
+
+    def test_selects_four_dimen_for_high_version(self):
+        config = SportRecordConfig(
+            it_summary_types=[],
+            one_dimen_types=[OneDimenType(TYPE_HR, 1, 1)],
+            four_dimen_types=[FourDimenType(TYPE_HR, 1, 3), FourDimenType(TYPE_CALORIES, 1, 3)],
+            four_dimen_min_version=3,
+        )
+        data_valid = bytes([0xCC])
+        body = _build_one_dimen_segment(1, 5000, b"", bytes([120, 10]))
+        header = FdsHeader(5000, 0, 3, 8, data_valid, body)
+        samples = _parse_with_config(header, config)
+        assert len(samples) == 1
+        assert samples[0].heart_rate == 120
+        assert samples[0].calories == 10
+
+    def test_alt_four_dimen_overrides(self):
+        config = SportRecordConfig(
+            it_summary_types=[],
+            four_dimen_types=[FourDimenType(TYPE_HR, 1, 1)],
+            four_dimen_min_version=1,
+            alt_four_dimen_types=[
+                FourDimenType(TYPE_HR, 1, 5),
+                FourDimenType(TYPE_CALORIES, 1, 5),
+            ],
+            alt_four_dimen_min_version=5,
+        )
+        data_valid = bytes([0xCC])
+        body = _build_one_dimen_segment(1, 5000, b"", bytes([100, 20]))
+        header = FdsHeader(5000, 0, 5, 14, data_valid, body)
+        samples = _parse_with_config(header, config)
+        assert len(samples) == 1
+        assert samples[0].heart_rate == 100
+        assert samples[0].calories == 20
+
+    def test_empty_config_returns_empty(self):
+        config = SportRecordConfig(it_summary_types=[])
+        header = FdsHeader(5000, 0, 1, 99, b"\x00", b"")
+        assert _parse_with_config(header, config) == []
+
+
+# ---------------------------------------------------------------------------
+# Pause initial data support
+# ---------------------------------------------------------------------------
+
+
+class TestPauseInitData:
+    def test_outdoor_running_with_init_height(self):
+        """Outdoor running (type 1) skips 4-byte initHeight before each segment."""
+        config = _SPORT_CONFIG[1]
+        init_height = struct.pack("<I", 12345)
+        # At v1, IT summary types have support_version=2 so 0 IT bytes are consumed
+        data_valid = bytes([0xCC, 0xCC])
+        record_data = bytes([0x52, 120, 0x81, 50])
+        segment = struct.pack("<II", 1, 9000) + record_data
+        body = init_height + segment
+
+        header = FdsHeader(9000, 0, 1, 1, data_valid, body)
+        samples = _parse_with_config(header, config)
+        assert len(samples) == 1
+        assert samples[0].heart_rate == 120
+        assert samples[0].calories == 5
+        assert samples[0].timestamp == 9000
+
+
+# ---------------------------------------------------------------------------
+# Sport type coverage – all config entries exist
+# ---------------------------------------------------------------------------
+
+
+class TestSportConfigCoverage:
+    @pytest.mark.parametrize("sport_type", list(range(1, 26)) + [28])
+    def test_config_exists(self, sport_type):
+        assert sport_type in _SPORT_CONFIG
+
+    @pytest.mark.parametrize("sport_type", list(range(1, 26)) + [28])
+    def test_validity_exists(self, sport_type):
+        assert get_record_data_valid_len(sport_type, 1) is not None
+
+
+# ---------------------------------------------------------------------------
+# parse_sport_record with new sport types
+# ---------------------------------------------------------------------------
+
+
+class TestParseSportRecordNewTypes:
+    def test_outdoor_run_type1(self):
+        sport_type = 1
+        data_valid = bytes([0xCC, 0xCC])
+        header_bytes = _build_header(9000, 28, 1, sport_type, data_valid)
+        init_height = struct.pack("<I", 0)
+        # At v1, IT summary types have support_version=2 so 0 bytes consumed
+        records = bytes([0x30, 100, 0x80, 25])
+        segment = struct.pack("<II", 1, 9000) + records
+        body = init_height + segment
+        decrypted = header_bytes + body
+
+        samples = parse_sport_record(decrypted, sport_type)
+        assert len(samples) == 1
+        assert samples[0].heart_rate == 100
+
+    def test_basketball_type19(self):
+        sport_type = 19
+        data_valid = bytes([0xCC, 0xCC])
+        header_bytes = _build_header(9000, 28, 1, sport_type, data_valid)
+        records = bytes([120, 10, 0x35, 50])
+        segment = struct.pack("<II", 1, 9000) + records
+        body = segment
+        decrypted = header_bytes + body
+
+        samples = parse_sport_record(decrypted, sport_type)
+        assert len(samples) == 1
+        assert samples[0].heart_rate == 120
+        assert samples[0].calories == 10
+
+    def test_triathlon_type17_one_dimen(self):
+        sport_type = 17
+        # Triathlon has data_valid_len=0 (all types always valid)
+        data_valid = b""
+        header_bytes = _build_header(9000, 28, 1, sport_type, data_valid)
+        records = bytes([100, 5, 110, 10])
+        segment = struct.pack("<II", 2, 9000) + records
+        decrypted = header_bytes + segment
+
+        samples = parse_sport_record(decrypted, sport_type)
+        assert len(samples) == 2
+        assert samples[0].heart_rate == 100
+        assert samples[0].calories == 5
+        assert samples[1].heart_rate == 110
+
+    def test_elliptical_type11(self):
+        sport_type = 11
+        data_valid = bytes([0xCC])
+        header_bytes = _build_header(9000, 28, 1, sport_type, data_valid)
+        # At v1, IT summary (itState support_version=2) is 0 bytes
+        # Type order: calories(high_nibble) then HR. 0x50 → cal high = 5, then HR=120
+        records = bytes([0x50, 120])
+        segment = struct.pack("<II", 1, 9000) + records
+        decrypted = header_bytes + segment
+
+        samples = parse_sport_record(decrypted, sport_type)
+        assert len(samples) == 1
+        assert samples[0].heart_rate == 120
+        assert samples[0].calories == 5
+
+
+# ---------------------------------------------------------------------------
+# OneDimen dependency-aware field skipping
+# ---------------------------------------------------------------------------
+
+
+class TestOneDimenDependency:
+    """Test that OneDimen records skip dependent fields when condition is unmet."""
+
+    # Swimming-like config: field -1 is the switch; fields 9, 2 depend on (-1, {0})
+    SWIM_DEP = (-1, frozenset({0}))
+    SWIM_TYPES = [
+        OneDimenType(-1, 1, 1),                                     # swimmingType
+        OneDimenType(1, 4, 1),                                      # endTime (no dep)
+        OneDimenType(11, 1, 1),                                     # sub-type (no dep)
+        OneDimenType(TYPE_DISTANCE, 2, 1, depends_on=SWIM_DEP),     # dep on -1==0
+        OneDimenType(TYPE_CALORIES, 2, 1, depends_on=SWIM_DEP),     # dep on -1==0
+    ]
+
+    def test_dependency_met_reads_all_fields(self):
+        """When swimmingType==0, dependent fields ARE consumed."""
+        # swimmingType=0 → dependency met
+        # Record: [swimType=0][endTime=1000 LE][subType=5][dist=200 LE][cal=50 LE]
+        record = (
+            bytes([0])                          # swimType = 0 → dep MET
+            + struct.pack("<I", 1000)           # endTime
+            + bytes([5])                        # subType
+            + struct.pack("<H", 200)            # distance (dep met)
+            + struct.pack("<H", 50)             # calories (dep met)
+        )
+        # validity bitmap: bits for types 1, 11, 9, 2 → 4 bits → need 1 byte
+        # All valid: 0b11110000
+        data_valid = bytes([0xF0])
+        valid_map = _parse_one_dimen_valid(self.SWIM_TYPES, version=1, data_valid=data_valid)
+
+        records, offset = _parse_one_dimen_records(
+            record, 0, 1, self.SWIM_TYPES, version=1, valid_map=valid_map,
+        )
+        assert len(records) == 1
+        assert records[0][TYPE_DISTANCE] == 200
+        assert records[0][TYPE_CALORIES] == 50
+        assert offset == len(record)
+
+    def test_dependency_unmet_skips_fields(self):
+        """When swimmingType!=0, dependent fields are NOT consumed."""
+        # swimmingType=1 → dependency NOT met → distance + calories bytes absent
+        record = (
+            bytes([1])                          # swimType = 1 → dep NOT met
+            + struct.pack("<I", 2000)           # endTime
+            + bytes([3])                        # subType
+            # NO distance or calories bytes in the stream
+        )
+        data_valid = bytes([0xF0])
+        valid_map = _parse_one_dimen_valid(self.SWIM_TYPES, version=1, data_valid=data_valid)
+
+        records, offset = _parse_one_dimen_records(
+            record, 0, 1, self.SWIM_TYPES, version=1, valid_map=valid_map,
+        )
+        assert len(records) == 1
+        assert TYPE_DISTANCE not in records[0]
+        assert TYPE_CALORIES not in records[0]
+        assert records[0][1] == 2000  # endTime still read correctly
+        assert offset == len(record)
+
+    def test_two_records_different_dependency(self):
+        """Two records: first has dep met, second has dep unmet → correct alignment."""
+        rec1 = (
+            bytes([0])                          # swimType=0 → dep met
+            + struct.pack("<I", 100)
+            + bytes([1])
+            + struct.pack("<H", 300)
+            + struct.pack("<H", 40)
+        )
+        rec2 = (
+            bytes([1])                          # swimType=1 → dep not met
+            + struct.pack("<I", 200)
+            + bytes([2])
+            # no dependent fields
+        )
+        buf = rec1 + rec2
+        data_valid = bytes([0xF0])
+        valid_map = _parse_one_dimen_valid(self.SWIM_TYPES, version=1, data_valid=data_valid)
+
+        records, offset = _parse_one_dimen_records(
+            buf, 0, 2, self.SWIM_TYPES, version=1, valid_map=valid_map,
+        )
+        assert len(records) == 2
+        assert records[0][TYPE_DISTANCE] == 300
+        assert records[0][TYPE_CALORIES] == 40
+        assert TYPE_DISTANCE not in records[1]
+        assert records[1][1] == 200  # endTime of second record
+        assert offset == len(buf)
+
+    def test_swimming_full_pipeline_dep_met(self):
+        """Full parse_sport_record for swimming with swimmingType=0 (dep met)."""
+        sport_type = 9  # pool swimming
+        version = 1
+        # Swimming has data_valid_len from validity table
+        data_valid_len = get_record_data_valid_len(sport_type, version)
+        assert data_valid_len is not None
+
+        # Build validity: Swimming v1 has 15 non-negative types (1,11,12,13,9,2,16,10,17,18,19,20,21,22)
+        # → 14 bits → 2 bytes. All valid.
+        data_valid = bytes([0xFF, 0xFC])  # 14 bits set
+        header_bytes = _build_header(9000, 28, version, sport_type, data_valid)
+
+        # One record: swimType=0 (dep met) → all dependent fields present
+        record = (
+            bytes([0])                          # swimType=0
+            + struct.pack("<I", 9000)           # endTime
+            + bytes([5])                        # type 11
+            + struct.pack("<H", 120)            # pace (type 12)
+            + struct.pack("<H", 45)             # swolf (type 13)
+            + struct.pack("<H", 400)            # distance (type 9, dep)
+            + struct.pack("<H", 80)             # calories (type 2, dep)
+            + struct.pack("<H", 30)             # stroke count (type 16, dep)
+            + struct.pack("<H", 10)             # turn count (type 10, dep)
+            + bytes([25])                       # stroke freq (type 17, dep)
+            + bytes([1])                        # type 18
+            + bytes([2])                        # type 19
+            + bytes([3])                        # type 20
+            + bytes([4])                        # type 21
+            + bytes([5])                        # type 22
+        )
+        segment = struct.pack("<II", 1, 9000) + record
+        decrypted = header_bytes + segment
+
+        samples = parse_sport_record(decrypted, sport_type)
+        assert len(samples) == 1
+        assert samples[0].distance == 400
+        assert samples[0].calories == 80
+
+
+# ---------------------------------------------------------------------------
+# FourDimen max-support-version semantics
+# ---------------------------------------------------------------------------
+
+
+class TestFourDimenMaxSupportVersion:
+    """Test that FourDimen types respect max_support_version."""
+
+    def test_max_version_excludes_field_at_higher_version(self):
+        """Field with max_support_version=3 is excluded at version 4."""
+        types = [
+            FourDimenType(TYPE_CALORIES, 1, 1),
+            FourDimenType(TYPE_HR, 1, 1),
+            FourDimenType(TYPE_DISTANCE, 1, 1, max_support_version=3),
+        ]
+        # At version 4, DISTANCE (max=3) should not consume a nibble
+        # So we only need nibbles for CALORIES + HR = 2 nibbles = 1 byte
+        data_valid = bytes([0xCC])  # 2 nibbles: exist+high for both
+        result = _parse_four_dimen_valid(types, version=4, data_valid=data_valid)
+        assert result[TYPE_CALORIES].exist is True
+        assert result[TYPE_HR].exist is True
+        assert result[TYPE_DISTANCE].exist is False
+
+    def test_max_version_includes_field_at_equal_version(self):
+        """Field with max_support_version=3 IS included at version 3."""
+        types = [
+            FourDimenType(TYPE_CALORIES, 1, 1),
+            FourDimenType(TYPE_HR, 1, 1),
+            FourDimenType(TYPE_DISTANCE, 1, 1, max_support_version=3),
+        ]
+        # At version 3, all 3 types present → 3 nibbles → 2 bytes
+        data_valid = bytes([0xCC, 0xC0])
+        result = _parse_four_dimen_valid(types, version=3, data_valid=data_valid)
+        assert result[TYPE_CALORIES].exist is True
+        assert result[TYPE_HR].exist is True
+        assert result[TYPE_DISTANCE].exist is True
+
+    def test_max_version_no_nibble_consumed(self):
+        """Exceeded max_support_version field does not shift nibble alignment."""
+        # Types: A(sv=1), B(sv=1, max=2), C(sv=1)
+        types = [
+            FourDimenType(TYPE_CALORIES, 1, 1),
+            FourDimenType(TYPE_HR, 1, 1, max_support_version=2),
+            FourDimenType(TYPE_DISTANCE, 1, 1),
+        ]
+        # At version 3: HR is maxed out → only CALORIES + DISTANCE consume nibbles
+        # 2 nibbles packed: nibble0 = 0xC (CALORIES exist+high), nibble1 = 0xC (DISTANCE)
+        data_valid = bytes([0xCC])
+        result = _parse_four_dimen_valid(types, version=3, data_valid=data_valid)
+        assert result[TYPE_CALORIES].exist is True
+        assert result[TYPE_CALORIES].high is True
+        assert result[TYPE_HR].exist is False  # maxed out
+        assert result[TYPE_DISTANCE].exist is True
+        assert result[TYPE_DISTANCE].high is True
+
+    def test_ski_config_v1_all_legacy_fields_present(self):
+        """Ski at v1: legacy fields (max=3) are present, v4+ fields are not."""
+        ski_types = _SPORT_CONFIG[21].four_dimen_types
+        # v1: CALORIES(sv=1), HR(sv=1), HEIGHT_VALUE(sv=4→skip), DISTANCE_DOUBLE(sv=4→skip),
+        #     HEIGHT_CHANGE_SIGN(sv=1,max=3→present), DISTANCE(sv=1,max=3→present),
+        #     SPEED(sv=2→skip)
+        # Active nibbles: CALORIES, HR, HEIGHT_CHANGE_SIGN, DISTANCE → 4 nibbles = 2 bytes
+        data_valid = bytes([0xCC, 0xCC])
+        result = _parse_four_dimen_valid(ski_types, version=1, data_valid=data_valid)
+        assert result[TYPE_CALORIES].exist is True
+        assert result[TYPE_HR].exist is True
+
+    def test_ski_config_v4_legacy_fields_gone(self):
+        """Ski at v4: legacy fields (max=3) are gone, new v4 fields appear."""
+        from mi_fitness_sync.fds_parser import (
+            TYPE_DISTANCE_DOUBLE,
+            TYPE_HEIGHT_CHANGE_SIGN,
+            TYPE_HEIGHT_VALUE,
+            TYPE_SPEED,
+        )
+        ski_types = _SPORT_CONFIG[21].four_dimen_types
+        # v4: CALORIES(sv=1), HR(sv=1), HEIGHT_VALUE(sv=4→present),
+        #     DISTANCE_DOUBLE(sv=4→present), HEIGHT_CHANGE_SIGN(sv=1,max=3→GONE),
+        #     DISTANCE(sv=1,max=3→GONE), SPEED(sv=2→present)
+        # Active nibbles: CALORIES, HR, HEIGHT_VALUE, DISTANCE_DOUBLE, SPEED → 5
+        # 5 nibbles → 3 bytes
+        data_valid = bytes([0xCC, 0xCC, 0xC0])
+        result = _parse_four_dimen_valid(ski_types, version=4, data_valid=data_valid)
+        assert result[TYPE_CALORIES].exist is True
+        assert result[TYPE_HR].exist is True
+        assert result[TYPE_HEIGHT_VALUE].exist is True
+        assert result[TYPE_DISTANCE_DOUBLE].exist is True
+        assert result[TYPE_HEIGHT_CHANGE_SIGN].exist is False
+        assert result[TYPE_DISTANCE].exist is False
+        assert result[TYPE_SPEED].exist is True
+
+    def test_ski_records_v4_correct_alignment(self):
+        """Ski v4 records: legacy fields gone, new fields present, bytes align correctly."""
+        from mi_fitness_sync.fds_parser import (
+            TYPE_DISTANCE_DOUBLE,
+            TYPE_HEIGHT_VALUE,
+            TYPE_SPEED,
+        )
+        ski_types = _SPORT_CONFIG[21].four_dimen_types
+        # v4, 5 active nibbles
+        data_valid = bytes([0xCC, 0xCC, 0xC0])
+        valid_map = _parse_four_dimen_valid(ski_types, version=4, data_valid=data_valid)
+
+        # Record: CALORIES(1) + HR(1) + HEIGHT_VALUE(4) + DISTANCE_DOUBLE(2) + SPEED(2)
+        # = 10 bytes per record
+        record = (
+            bytes([10])                         # calories
+            + bytes([120])                      # hr
+            + struct.pack("<I", 5000)           # height_value
+            + struct.pack("<H", 300)            # distance_double
+            + struct.pack("<H", 150)            # speed
+        )
+        records, offset = _parse_four_dimen_records(
+            record, 0, 1, ski_types, version=4, valid_map=valid_map,
+        )
+        assert len(records) == 1
+        assert records[0][TYPE_CALORIES] == 10
+        assert records[0][TYPE_HR] == 120
+        assert records[0][TYPE_HEIGHT_VALUE] == 5000
+        assert records[0][TYPE_DISTANCE_DOUBLE] == 300
+        assert records[0][TYPE_SPEED] == 150
+        assert offset == 10
