@@ -23,9 +23,11 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
+from mi_fitness_sync.app_dirs import get_cache_dir
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = Path.home() / ".mi_fitness_sync" / "cache" / "fds"
+DEFAULT_CACHE_DIR = get_cache_dir() / "fds"
 
 
 # ---------------------------------------------------------------------------

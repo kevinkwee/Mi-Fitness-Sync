@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from dataclasses import asdict, replace
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from mi_fitness_sync.activities import MiFitnessActivitiesClient, parse_cli_time, render_activities_table
+from mi_fitness_sync.activities import ActivityDetail, MiFitnessActivitiesClient, parse_cli_time, render_activities_table
+from mi_fitness_sync.app_dirs import get_exports_dir
 from mi_fitness_sync.auth import DEFAULT_SERVICE_ID, MiFitnessAuthClient
 from mi_fitness_sync.exports import SUPPORTED_EXPORT_FORMATS, render_export
 from mi_fitness_sync.exceptions import (
@@ -70,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
     )
     export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
-    export_parser.add_argument("--output", required=True, help="Destination file path")
+    export_parser.add_argument("--output", help="Destination file path (default: ~/.mi_fitness_sync/exports/<activity_id>.<format>)")
     export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
     export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
     export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
@@ -219,7 +222,14 @@ def handle_export_activity(args: argparse.Namespace) -> int:
     detail = client.get_activity_detail(args.activity_id)
     export = render_export(detail, args.format, compress=args.gzip)
 
-    output_path = Path(args.output)
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        safe_title = _sanitize_filename(detail.activity.title)
+        start_dt = _activity_local_datetime(detail)
+        date_str = start_dt.strftime("%Y%m%d_%H%M%S")
+        suffix = f".{args.format}.gz" if args.gzip else f".{args.format}"
+        output_path = get_exports_dir() / f"{safe_title}_{date_str}{suffix}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(export.payload)
 
@@ -228,6 +238,29 @@ def handle_export_activity(args: argparse.Namespace) -> int:
     print(f"Compressed: {'yes' if export.compressed else 'no'}")
     print(f"Bytes written: {len(export.payload)}")
     return 0
+
+
+def _sanitize_filename(title: str) -> str:
+    """Replace spaces with underscores and strip non-alphanumeric/underscore chars."""
+    name = title.replace(" ", "_")
+    return re.sub(r"[^\w]", "", name)
+
+
+def _activity_local_datetime(detail: ActivityDetail) -> datetime:
+    """Return the activity start time as a local datetime.
+
+    Uses the activity's zone_offset_seconds when available, otherwise falls
+    back to the system local timezone.
+    """
+    ts = detail.start_time
+    if detail.zone_offset_seconds is not None:
+        tz = timezone(timedelta(seconds=detail.zone_offset_seconds))
+    else:
+        tz = None
+    utc_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    if tz is not None:
+        return utc_dt.astimezone(tz)
+    return utc_dt.astimezone()
 
 
 def _activities_client(

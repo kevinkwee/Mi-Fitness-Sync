@@ -23,7 +23,7 @@ ACCOUNT_BASE = "https://account.xiaomi.com"
 URL_LOGIN = f"{ACCOUNT_BASE}/pass/serviceLogin"
 URL_LOGIN_AUTH2 = f"{ACCOUNT_BASE}/pass/serviceLoginAuth2"
 DEFAULT_SERVICE_ID = "miothealth"
-USER_AGENT = "MiFitnessStravaSyncAuth/0.1"
+USER_AGENT = "MiFitnessSyncAuth/0.1"
 SAFE_PREFIX = "&&&START&&&"
 
 

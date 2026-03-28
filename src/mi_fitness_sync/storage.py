@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mi_fitness_sync.app_dirs import get_auth_dir
 
-DEFAULT_STATE_PATH = Path.home() / ".mi-fitness-strava-sync" / "auth.json"
+
+DEFAULT_STATE_PATH = get_auth_dir() / "auth.json"
 STATE_PATH_ENV_VAR = "MI_FITNESS_AUTH_PATH"
 
 
