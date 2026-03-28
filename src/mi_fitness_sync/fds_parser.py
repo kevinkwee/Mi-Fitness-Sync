@@ -1041,3 +1041,254 @@ def download_and_parse_sport_record(
     except Exception:
         logger.warning("Failed to parse FDS sport record binary", exc_info=True)
         return []
+
+
+# ===========================================================================
+# GPS record parsing (from decompiled SportGpsParser.java)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# GPS validity length (from FitnessDataValidity.getSportGpsValidityLen)
+# ---------------------------------------------------------------------------
+
+_GPS_VALIDITY: dict[int, int] = {1: 1, 2: 1, 3: 1, 4: 1}
+
+
+def get_gps_data_valid_len(version: int) -> int | None:
+    """Return GPS dataValid byte length, or None if version unsupported."""
+    return _GPS_VALIDITY.get(version)
+
+
+# ---------------------------------------------------------------------------
+# GPS data types (from SportGpsParser.dataTypeArray)
+# ---------------------------------------------------------------------------
+
+GPS_TYPE_TIME = 0
+GPS_TYPE_LONGITUDE = 1
+GPS_TYPE_LATITUDE = 2
+GPS_TYPE_ACCURACY = 3
+GPS_TYPE_SPEED = 4
+GPS_TYPE_GPS_SOURCE = 5
+GPS_TYPE_ALTITUDE = 6
+GPS_TYPE_HDOP = 7
+
+_GPS_DATA_TYPES: list[OneDimenType] = [
+    OneDimenType(type_id=GPS_TYPE_TIME, byte_count=4, support_version=1),
+    OneDimenType(type_id=GPS_TYPE_LONGITUDE, byte_count=4, support_version=1),
+    OneDimenType(type_id=GPS_TYPE_LATITUDE, byte_count=4, support_version=1),
+    OneDimenType(type_id=GPS_TYPE_ACCURACY, byte_count=4, support_version=2),
+    OneDimenType(type_id=GPS_TYPE_SPEED, byte_count=2, support_version=2),
+    OneDimenType(type_id=GPS_TYPE_GPS_SOURCE, byte_count=0, support_version=2),
+    OneDimenType(type_id=GPS_TYPE_ALTITUDE, byte_count=4, support_version=3),
+    OneDimenType(type_id=GPS_TYPE_HDOP, byte_count=4, support_version=3),
+]
+
+# Float-type IDs in the GPS schema (read via struct float instead of uint)
+_GPS_FLOAT_TYPES = frozenset({
+    GPS_TYPE_LONGITUDE, GPS_TYPE_LATITUDE, GPS_TYPE_ACCURACY,
+    GPS_TYPE_ALTITUDE, GPS_TYPE_HDOP,
+})
+
+
+# ---------------------------------------------------------------------------
+# GpsSample dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class GpsSample:
+    """One GPS point from an FDS GPS binary."""
+
+    timestamp: int
+    latitude: float
+    longitude: float
+    accuracy: float | None = None
+    speed: float | None = None
+    gps_source: int | None = None
+    altitude: float | None = None
+    hdop: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# GPS record reading (flat OneDimen, with float fields)
+# ---------------------------------------------------------------------------
+
+
+def _read_gps_field(
+    buf: memoryview | bytes, offset: int, dt: OneDimenType,
+) -> tuple[int | float, int]:
+    """Read a single GPS field. Returns (value, new_offset).
+
+    Float types are decoded as IEEE 754 LE float32.
+    """
+    if dt.byte_count == 0:
+        return 0, offset
+    if dt.type_id in _GPS_FLOAT_TYPES and dt.byte_count == 4:
+        return struct.unpack_from("<f", buf, offset)[0], offset + 4
+    return _read_uint(buf, offset, dt.byte_count)
+
+
+def _min_gps_record_bytes(version: int) -> int:
+    """Minimum bytes for one GPS record at the given version."""
+    return sum(
+        dt.byte_count for dt in _GPS_DATA_TYPES
+        if dt.support_version <= version and dt.depends_on is None
+    )
+
+
+def _parse_gps_records(
+    buf: memoryview | bytes,
+    offset: int,
+    record_count: int,
+    version: int,
+    valid_map: dict[int, bool],
+) -> tuple[list[GpsSample], int]:
+    """Parse *record_count* GPS records from *buf*. Returns (samples, new_offset)."""
+    min_bytes = _min_gps_record_bytes(version)
+    samples: list[GpsSample] = []
+
+    for _ in range(record_count):
+        if offset + min_bytes > len(buf):
+            break
+
+        raw: dict[int, int | float] = {}
+        for dt in _GPS_DATA_TYPES:
+            if dt.support_version > version:
+                continue
+            if dt.byte_count == 0:
+                # Virtual field (gpsSource) — derived later from speed
+                continue
+            if offset + dt.byte_count > len(buf):
+                return samples, offset
+            value, offset = _read_gps_field(buf, offset, dt)
+            if valid_map.get(dt.type_id, False):
+                raw[dt.type_id] = value
+
+        timestamp_val = raw.get(GPS_TYPE_TIME)
+        lon_val = raw.get(GPS_TYPE_LONGITUDE)
+        lat_val = raw.get(GPS_TYPE_LATITUDE)
+        if timestamp_val is None or lon_val is None or lat_val is None:
+            continue
+
+        sample = GpsSample(
+            timestamp=int(timestamp_val),
+            longitude=float(lon_val),
+            latitude=float(lat_val),
+        )
+
+        acc_val = raw.get(GPS_TYPE_ACCURACY)
+        if acc_val is not None:
+            sample.accuracy = float(acc_val)
+
+        speed_raw = raw.get(GPS_TYPE_SPEED)
+        if speed_raw is not None:
+            int_speed = int(speed_raw)
+            # Upper 12 bits / 10.0 = speed; lower 4 bits = gpsSource
+            sample.speed = ((int_speed & 0xFFF0) >> 4) / 10.0
+            if valid_map.get(GPS_TYPE_GPS_SOURCE, False):
+                sample.gps_source = int_speed & 0x0F
+
+        alt_val = raw.get(GPS_TYPE_ALTITUDE)
+        if alt_val is not None:
+            sample.altitude = float(alt_val)
+
+        hdop_val = raw.get(GPS_TYPE_HDOP)
+        if hdop_val is not None:
+            sample.hdop = float(hdop_val)
+
+        samples.append(sample)
+
+    return samples, offset
+
+
+# ---------------------------------------------------------------------------
+# GPS record parsing entry point
+# ---------------------------------------------------------------------------
+
+
+def parse_gps_record(decrypted: bytes) -> list[GpsSample]:
+    """Parse decrypted FDS GPS binary into GPS samples.
+
+    The GPS binary uses the same FDS header structure as sport records but
+    the body is a flat list of OneDimen records (no segment/pause structure).
+    Version >= 4 has a record-count header and optional TGC data appended.
+    """
+    if len(decrypted) < _SPORT_SERVER_DATA_ID_LEN + 1:
+        logger.warning("GPS data too short to read header version byte")
+        return []
+
+    version = decrypted[5]
+    data_valid_len = get_gps_data_valid_len(version)
+    if data_valid_len is None:
+        logger.info("No GPS dataValid for version=%d; skipping GPS parse", version)
+        return []
+
+    header = parse_fds_header(decrypted, data_valid_len)
+    valid_map = _parse_one_dimen_valid(_GPS_DATA_TYPES, version, header.data_valid)
+
+    # Required fields must be valid
+    if not (valid_map.get(GPS_TYPE_TIME) and valid_map.get(GPS_TYPE_LONGITUDE)
+            and valid_map.get(GPS_TYPE_LATITUDE)):
+        logger.warning("GPS validity missing required time/lat/lon fields")
+        return []
+
+    buf = memoryview(header.body_data)
+    offset = 0
+
+    if version >= 4:
+        # v4+: record_count (4B LE) + records + featureType(1B) + tgcSize(4B) [+ tgcData]
+        if len(buf) < 4:
+            return []
+        record_count, offset = _read_uint(buf, offset, 4)
+        samples, offset = _parse_gps_records(buf, offset, record_count, version, valid_map)
+        # Skip featureType + tgcSize + tgcData (not needed for our purposes)
+    else:
+        # v1-3: flat loop until buffer exhausted
+        min_bytes = _min_gps_record_bytes(version)
+        if min_bytes == 0:
+            return []
+        record_count = len(buf) // min_bytes
+        samples, _ = _parse_gps_records(buf, offset, record_count, version, valid_map)
+
+    return samples
+
+
+# ---------------------------------------------------------------------------
+# GPS download → decrypt → parse pipeline
+# ---------------------------------------------------------------------------
+
+
+def download_and_parse_gps_record(
+    session: requests.Session,
+    fds_entry: dict[str, Any],
+    *,
+    timeout: int = 30,
+) -> list[GpsSample]:
+    """Download, decrypt, and parse a GPS record from an FDS entry.
+
+    Returns :class:`GpsSample` list, or empty list on failure.
+    """
+    url = fds_entry.get("url")
+    object_key = fds_entry.get("obj_key")
+    if not isinstance(url, str) or not isinstance(object_key, str):
+        logger.debug("FDS GPS entry missing url or obj_key")
+        return []
+
+    try:
+        resp = session.get(url, timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException:
+        logger.warning("Failed to download FDS GPS record from %s", url, exc_info=True)
+        return []
+
+    try:
+        decrypted = decrypt_fds_data(resp.text, object_key)
+    except Exception:
+        logger.warning("Failed to decrypt FDS GPS record", exc_info=True)
+        return []
+
+    try:
+        return parse_gps_record(decrypted)
+    except Exception:
+        logger.warning("Failed to parse FDS GPS binary", exc_info=True)
+        return []

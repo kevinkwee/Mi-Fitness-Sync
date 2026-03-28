@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import requests
 
 from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
-from mi_fitness_sync.fds_parser import download_and_parse_sport_record
+from mi_fitness_sync.fds_parser import download_and_parse_gps_record, download_and_parse_sport_record
 from mi_fitness_sync.region_mapping import region_for_country_code
 from mi_fitness_sync.storage import AuthState
 
@@ -29,6 +29,7 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DETAIL_DATA_KEY = "huami_sport_record"
 ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
 FDS_SPORT_RECORD_FILE_TYPE = 0
+FDS_GPS_FILE_TYPE = 2
 
 
 def parse_cli_time(value: str) -> int:
@@ -373,15 +374,23 @@ class MiFitnessActivitiesClient:
         activity = activity_or_id if isinstance(activity_or_id, Activity) else self.get_activity_by_id(activity_or_id)
         fds_downloads = self._try_get_fds_download_map(activity)
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
+        fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
+
+        # Merge FDS sport sample HR/cadence into GPS track points by timestamp
+        if fds_track_points and fds_samples:
+            _merge_fds_samples_into_track_points(fds_track_points, fds_samples)
 
         fitness_item = self._get_activity_detail_item(activity)
         if fitness_item:
             detail = self._build_activity_detail_from_item(activity, fitness_item, fds_downloads)
             if fds_samples:
                 detail.samples = fds_samples
+            # Prefer FDS GPS track points (per-second, higher quality)
+            if fds_track_points:
+                detail.track_points = fds_track_points
             return detail
 
-        if fds_samples:
+        if fds_samples or fds_track_points:
             return ActivityDetail(
                 activity=activity,
                 detail_sid=activity.sid,
@@ -389,7 +398,7 @@ class MiFitnessActivitiesClient:
                 detail_time=activity.start_time or activity.raw_record.get("time") or 0,
                 zone_name=_coerce_str(activity.raw_record.get("zone_name")),
                 zone_offset_seconds=_coerce_int(activity.raw_record.get("zone_offset")),
-                track_points=[],
+                track_points=fds_track_points,
                 samples=fds_samples,
                 raw_fitness_item={"source": "fds_sport_record"},
                 raw_detail={"source": "fds_sport_record", "fds_downloads": fds_downloads},
@@ -777,6 +786,56 @@ class MiFitnessActivitiesClient:
             for s in sport_samples
         ]
 
+    def _try_download_fds_gps_track_points(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]],
+    ) -> list[TrackPoint]:
+        """Attempt to download, decrypt, and parse the FDS GPS binary.
+
+        Returns GPS track points, or an empty list on failure.
+        """
+        if not fds_downloads:
+            return []
+
+        proto_type = _coerce_int(activity.raw_report.get("proto_type"))
+        timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
+        timezone_offset = _coerce_int(activity.raw_report.get("timezone"))
+        if proto_type is None or timestamp is None or timezone_offset is None or not activity.sid:
+            return []
+
+        gps_suffix = _build_fds_suffix(
+            sid=activity.sid,
+            timestamp=timestamp,
+            timezone_offset=timezone_offset,
+            sport_type=proto_type,
+            file_type=FDS_GPS_FILE_TYPE,
+        )
+
+        fds_entry = _find_fds_entry(fds_downloads, gps_suffix, timestamp)
+        if fds_entry is None:
+            return []
+
+        try:
+            gps_samples = download_and_parse_gps_record(
+                self._session, fds_entry, timeout=self._timeout,
+            )
+        except Exception:
+            return []
+
+        return [
+            TrackPoint(
+                timestamp=g.timestamp,
+                latitude=g.latitude,
+                longitude=g.longitude,
+                altitude_meters=g.altitude,
+                speed_mps=g.speed,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=None,
+                raw_point={"source": "fds_gps"},
+            )
+            for g in gps_samples
+        ]
+
     def _get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
         timestamp = _coerce_int(activity.raw_record.get("time")) or activity.start_time
         proto_type = _coerce_int(activity.raw_report.get("proto_type"))
@@ -786,6 +845,7 @@ class MiFitnessActivitiesClient:
 
         request_items = [
             self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_SPORT_RECORD_FILE_TYPE),
+            self._build_fds_request_item(activity.sid, timestamp, timezone_offset, proto_type, FDS_GPS_FILE_TYPE),
         ]
         request_payload = {"did": activity.sid, "items": request_items}
         nonce = self._generate_nonce(0)
@@ -1170,3 +1230,24 @@ def _dedupe_samples(samples: list[ActivitySample]) -> list[ActivitySample]:
         seen.add(key)
         deduped.append(sample)
     return deduped
+
+
+def _merge_fds_samples_into_track_points(
+    track_points: list[TrackPoint], samples: list[ActivitySample],
+) -> None:
+    """Merge HR/cadence from FDS sport samples into FDS GPS track points.
+
+    Modifies *track_points* in-place. Only fills in fields that are None on
+    the track point (GPS data doesn't carry HR or cadence).
+    """
+    sample_map: dict[int, ActivitySample] = {s.timestamp: s for s in samples}
+    for tp in track_points:
+        sample = sample_map.get(tp.timestamp)
+        if sample is None:
+            continue
+        if tp.heart_rate is None and sample.heart_rate is not None:
+            tp.heart_rate = sample.heart_rate
+        if tp.cadence is None and sample.cadence is not None:
+            tp.cadence = sample.cadence
+        if tp.altitude_meters is None and sample.altitude_meters is not None:
+            tp.altitude_meters = sample.altitude_meters

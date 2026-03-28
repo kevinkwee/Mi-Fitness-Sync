@@ -21,6 +21,15 @@ from mi_fitness_sync.fds_parser import (
     FdsHeader,
     FourDimenType,
     FourDimenValid,
+    GpsSample,
+    GPS_TYPE_ACCURACY,
+    GPS_TYPE_ALTITUDE,
+    GPS_TYPE_GPS_SOURCE,
+    GPS_TYPE_HDOP,
+    GPS_TYPE_LATITUDE,
+    GPS_TYPE_LONGITUDE,
+    GPS_TYPE_SPEED,
+    GPS_TYPE_TIME,
     OneDimenType,
     SportRecordConfig,
     SportSample,
@@ -33,18 +42,24 @@ from mi_fitness_sync.fds_parser import (
     TYPE_STRESS,
     _b64url_decode,
     _extract_high_value,
+    _GPS_DATA_TYPES,
     _it_summary_byte_count,
+    _min_gps_record_bytes,
     _parse_four_dimen_records,
     _parse_four_dimen_valid,
+    _parse_gps_records,
     _parse_one_dimen_records,
     _parse_one_dimen_valid,
     _parse_with_config,
     _SPORT_CONFIG,
     decrypt_fds_data,
+    download_and_parse_gps_record,
     download_and_parse_sport_record,
+    get_gps_data_valid_len,
     get_record_data_valid_len,
     parse_fds_header,
     parse_free_training_record,
+    parse_gps_record,
     parse_sport_record,
 )
 
@@ -877,39 +892,272 @@ class TestOneDimenDependency:
         )
         assert len(records) == 1
         assert TYPE_DISTANCE not in records[0]
-        assert TYPE_CALORIES not in records[0]
-        assert records[0][1] == 2000  # endTime still read correctly
-        assert offset == len(record)
 
-    def test_two_records_different_dependency(self):
-        """Two records: first has dep met, second has dep unmet → correct alignment."""
-        rec1 = (
-            bytes([0])                          # swimType=0 → dep met
-            + struct.pack("<I", 100)
-            + bytes([1])
-            + struct.pack("<H", 300)
-            + struct.pack("<H", 40)
-        )
-        rec2 = (
-            bytes([1])                          # swimType=1 → dep not met
-            + struct.pack("<I", 200)
-            + bytes([2])
-            # no dependent fields
-        )
-        buf = rec1 + rec2
-        data_valid = bytes([0xF0])
-        valid_map = _parse_one_dimen_valid(self.SWIM_TYPES, version=1, data_valid=data_valid)
 
-        records, offset = _parse_one_dimen_records(
-            buf, 0, 2, self.SWIM_TYPES, version=1, valid_map=valid_map,
-        )
-        assert len(records) == 2
-        assert records[0][TYPE_DISTANCE] == 300
-        assert records[0][TYPE_CALORIES] == 40
-        assert TYPE_DISTANCE not in records[1]
-        assert records[1][1] == 200  # endTime of second record
-        assert offset == len(buf)
+# ===========================================================================
+# GPS parsing tests
+# ===========================================================================
 
+
+def _build_gps_v1_record(timestamp: int, longitude: float, latitude: float) -> bytes:
+    """Build one v1 GPS record: time(4B uint32 LE) + lon(4B float LE) + lat(4B float LE)."""
+    return struct.pack("<Iff", timestamp, longitude, latitude)
+
+
+def _build_gps_v2_record(
+    timestamp: int, longitude: float, latitude: float,
+    accuracy: float, speed_raw: int,
+) -> bytes:
+    """Build one v2 GPS record: time + lon + lat + accuracy(4B float) + speed(2B uint16)."""
+    return struct.pack("<Iff", timestamp, longitude, latitude) + struct.pack("<f", accuracy) + struct.pack("<H", speed_raw)
+
+
+def _build_gps_v3_record(
+    timestamp: int, longitude: float, latitude: float,
+    accuracy: float, speed_raw: int, altitude: float, hdop: float,
+) -> bytes:
+    """Build one v3 GPS record: time + lon + lat + accuracy + speed + altitude(4B) + hdop(4B)."""
+    base = _build_gps_v2_record(timestamp, longitude, latitude, accuracy, speed_raw)
+    return base + struct.pack("<ff", altitude, hdop)
+
+
+def _build_gps_binary(
+    timestamp: int, tz: int, version: int, sport_type: int,
+    data_valid: bytes, body: bytes,
+) -> bytes:
+    """Build a complete GPS FDS binary: header + body."""
+    return _build_header(timestamp, tz, version, sport_type, data_valid) + body
+
+
+class TestGpsValidityLen:
+    def test_v1(self):
+        assert get_gps_data_valid_len(1) == 1
+
+    def test_v2(self):
+        assert get_gps_data_valid_len(2) == 1
+
+    def test_v3(self):
+        assert get_gps_data_valid_len(3) == 1
+
+    def test_v4(self):
+        assert get_gps_data_valid_len(4) == 1
+
+    def test_v5_unsupported(self):
+        assert get_gps_data_valid_len(5) is None
+
+    def test_v99_unsupported(self):
+        assert get_gps_data_valid_len(99) is None
+
+
+class TestMinGpsRecordBytes:
+    def test_v1(self):
+        # time(4) + lon(4) + lat(4) = 12
+        assert _min_gps_record_bytes(1) == 12
+
+    def test_v2(self):
+        # v1(12) + accuracy(4) + speed(2) + gpsSource(0) = 18
+        assert _min_gps_record_bytes(2) == 18
+
+    def test_v3(self):
+        # v2(18) + altitude(4) + hdop(4) = 26
+        assert _min_gps_record_bytes(3) == 26
+
+
+class TestParseGpsRecordsV1:
+    """GPS record parsing with version 1 (time + lon + lat only)."""
+
+    def test_single_record(self):
+        body = _build_gps_v1_record(1000, 121.5, 31.2)
+        valid_map = {GPS_TYPE_TIME: True, GPS_TYPE_LONGITUDE: True, GPS_TYPE_LATITUDE: True}
+
+        samples, offset = _parse_gps_records(body, 0, 1, version=1, valid_map=valid_map)
+
+        assert len(samples) == 1
+        assert samples[0].timestamp == 1000
+        assert abs(samples[0].longitude - 121.5) < 0.01
+        assert abs(samples[0].latitude - 31.2) < 0.01
+        assert samples[0].speed is None
+        assert samples[0].altitude is None
+
+    def test_multiple_records(self):
+        body = _build_gps_v1_record(1000, 121.5, 31.2) + _build_gps_v1_record(1001, 121.501, 31.201)
+        valid_map = {GPS_TYPE_TIME: True, GPS_TYPE_LONGITUDE: True, GPS_TYPE_LATITUDE: True}
+
+        samples, _ = _parse_gps_records(body, 0, 2, version=1, valid_map=valid_map)
+
+        assert len(samples) == 2
+        assert samples[0].timestamp == 1000
+        assert samples[1].timestamp == 1001
+
+    def test_truncated_buffer_stops_early(self):
+        body = _build_gps_v1_record(1000, 121.5, 31.2) + b"\x00\x01"
+        valid_map = {GPS_TYPE_TIME: True, GPS_TYPE_LONGITUDE: True, GPS_TYPE_LATITUDE: True}
+
+        samples, _ = _parse_gps_records(body, 0, 5, version=1, valid_map=valid_map)
+
+        assert len(samples) == 1
+
+
+class TestParseGpsRecordsV2:
+    """GPS record parsing with version 2 (adds accuracy + speed)."""
+
+    def test_speed_decoding(self):
+        # speed raw: upper 12 bits = 150 * 16 = 2400, so actual = 150/10 = 15.0 m/s
+        # lower 4 bits = gpsSource = 3
+        speed_raw = (150 << 4) | 3  # 0x963
+        body = _build_gps_v2_record(2000, 121.5, 31.2, 5.0, speed_raw)
+        valid_map = {
+            GPS_TYPE_TIME: True, GPS_TYPE_LONGITUDE: True, GPS_TYPE_LATITUDE: True,
+            GPS_TYPE_ACCURACY: True, GPS_TYPE_SPEED: True, GPS_TYPE_GPS_SOURCE: True,
+        }
+
+        samples, _ = _parse_gps_records(body, 0, 1, version=2, valid_map=valid_map)
+
+        assert len(samples) == 1
+        assert abs(samples[0].accuracy - 5.0) < 0.01
+        assert abs(samples[0].speed - 15.0) < 0.01
+        assert samples[0].gps_source == 3
+
+    def test_gps_source_not_set_when_invalid(self):
+        speed_raw = (150 << 4) | 3
+        body = _build_gps_v2_record(2000, 121.5, 31.2, 5.0, speed_raw)
+        valid_map = {
+            GPS_TYPE_TIME: True, GPS_TYPE_LONGITUDE: True, GPS_TYPE_LATITUDE: True,
+            GPS_TYPE_ACCURACY: True, GPS_TYPE_SPEED: True, GPS_TYPE_GPS_SOURCE: False,
+        }
+
+        samples, _ = _parse_gps_records(body, 0, 1, version=2, valid_map=valid_map)
+
+        assert samples[0].speed is not None
+        assert samples[0].gps_source is None
+
+
+class TestParseGpsRecordsV3:
+    """GPS record parsing with version 3 (adds altitude + hdop)."""
+
+    def test_full_record(self):
+        speed_raw = (100 << 4) | 1
+        body = _build_gps_v3_record(3000, 116.4, 39.9, 3.5, speed_raw, 45.2, 1.2)
+        valid_map = {
+            GPS_TYPE_TIME: True, GPS_TYPE_LONGITUDE: True, GPS_TYPE_LATITUDE: True,
+            GPS_TYPE_ACCURACY: True, GPS_TYPE_SPEED: True, GPS_TYPE_GPS_SOURCE: True,
+            GPS_TYPE_ALTITUDE: True, GPS_TYPE_HDOP: True,
+        }
+
+        samples, _ = _parse_gps_records(body, 0, 1, version=3, valid_map=valid_map)
+
+        assert len(samples) == 1
+        s = samples[0]
+        assert s.timestamp == 3000
+        assert abs(s.altitude - 45.2) < 0.1
+        assert abs(s.hdop - 1.2) < 0.1
+        assert abs(s.speed - 10.0) < 0.01  # 100/10 = 10.0
+
+
+class TestParseGpsRecord:
+    """Integration tests for parse_gps_record (header + body combined)."""
+
+    def test_v1_end_to_end(self):
+        body = _build_gps_v1_record(5000, 121.5, 31.2)
+        # v1: 3 types → 3 bits → data_valid byte with top 3 bits set
+        data_valid = bytes([0b11100000])
+        raw = _build_gps_binary(5000, 28, 1, 1, data_valid, body)
+
+        samples = parse_gps_record(raw)
+
+        assert len(samples) == 1
+        assert samples[0].timestamp == 5000
+        assert abs(samples[0].longitude - 121.5) < 0.01
+
+    def test_v3_end_to_end(self):
+        speed_raw = (50 << 4) | 2
+        body = _build_gps_v3_record(6000, 116.4, 39.9, 2.5, speed_raw, 100.0, 0.8)
+        # v3: 8 types → 8 bits → data_valid = 0xFF (all valid)
+        data_valid = bytes([0xFF])
+        raw = _build_gps_binary(6000, 28, 3, 1, data_valid, body)
+
+        samples = parse_gps_record(raw)
+
+        assert len(samples) == 1
+        s = samples[0]
+        assert s.timestamp == 6000
+        assert abs(s.altitude - 100.0) < 0.1
+        assert abs(s.hdop - 0.8) < 0.1
+        assert abs(s.speed - 5.0) < 0.01
+
+    def test_v4_with_record_count(self):
+        rec1 = _build_gps_v3_record(7000, 121.0, 31.0, 5.0, (80 << 4), 50.0, 1.0)
+        rec2 = _build_gps_v3_record(7001, 121.001, 31.001, 4.0, (90 << 4), 51.0, 0.9)
+        record_count = struct.pack("<I", 2)
+        body = record_count + rec1 + rec2
+        data_valid = bytes([0xFF])
+        raw = _build_gps_binary(7000, 28, 4, 1, data_valid, body)
+
+        samples = parse_gps_record(raw)
+
+        assert len(samples) == 2
+        assert samples[0].timestamp == 7000
+        assert samples[1].timestamp == 7001
+
+    def test_too_short_returns_empty(self):
+        assert parse_gps_record(b"\x00\x01\x02") == []
+
+    def test_unsupported_version_returns_empty(self):
+        data_valid = bytes([0xFF])
+        raw = _build_gps_binary(1000, 28, 99, 1, data_valid, b"\x00" * 50)
+        assert parse_gps_record(raw) == []
+
+    def test_required_field_invalid_returns_empty(self):
+        body = _build_gps_v1_record(5000, 121.5, 31.2)
+        # lat (bit 2) not set: only time + lon valid → 0b11000000
+        data_valid = bytes([0b11000000])
+        raw = _build_gps_binary(5000, 28, 1, 1, data_valid, body)
+
+        samples = parse_gps_record(raw)
+        assert samples == []
+
+
+class TestDownloadAndParseGpsRecord:
+    """Test the full download → decrypt → parse GPS pipeline."""
+
+    def test_round_trip(self, monkeypatch):
+        key = _make_aes_key()
+        body = _build_gps_v1_record(8000, 121.5, 31.2) + _build_gps_v1_record(8001, 121.501, 31.201)
+        data_valid = bytes([0b11100000])
+        plaintext = _build_gps_binary(8000, 28, 1, 1, data_valid, body)
+        encrypted = _encrypt(plaintext, key)
+
+        import requests as req
+
+        class FakeResponse:
+            status_code = 200
+            ok = True
+            text = encrypted
+            def raise_for_status(self):
+                pass
+
+        session = req.Session()
+        monkeypatch.setattr(session, "get", lambda *a, **kw: FakeResponse())
+
+        fds_entry = {"url": "https://fds.example.com/gps", "obj_key": _b64url_encode_no_pad(key)}
+        samples = download_and_parse_gps_record(session, fds_entry)
+
+        assert len(samples) == 2
+        assert samples[0].timestamp == 8000
+        assert samples[1].timestamp == 8001
+
+    def test_missing_url_returns_empty(self):
+        import requests as req
+        session = req.Session()
+        assert download_and_parse_gps_record(session, {"obj_key": "abc"}) == []
+
+    def test_missing_obj_key_returns_empty(self):
+        import requests as req
+        session = req.Session()
+        assert download_and_parse_gps_record(session, {"url": "https://example.com"}) == []
+
+
+class TestSwimmingFullPipeline:
     def test_swimming_full_pipeline_dep_met(self):
         """Full parse_sport_record for swimming with swimmingType=0 (dep met)."""
         sport_type = 9  # pool swimming

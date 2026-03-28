@@ -8,7 +8,11 @@ from mi_fitness_sync.activities import (
     ACTIVITY_LIST_ENDPOINT,
     Activity,
     MiFitnessActivitiesClient,
+    TrackPoint,
+    ActivitySample,
     _build_fds_suffix,
+    _merge_fds_samples_into_track_points,
+    _merge_samples_into_track_points,
     parse_activity_id,
     parse_cli_time,
     render_activities_table,
@@ -144,6 +148,7 @@ def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, mon
 
     monkeypatch.setattr(client, "_try_get_fds_download_map", lambda selected_activity: {})
     monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda activity, fds: [])
+    monkeypatch.setattr(client, "_try_download_fds_gps_track_points", lambda activity, fds: [])
     monkeypatch.setattr(client, "_get_activity_detail_item", lambda selected_activity: fitness_item)
 
     detail = client.get_activity_detail(activity)
@@ -229,6 +234,7 @@ def test_get_activity_detail_uses_fds_samples_as_primary(auth_state, monkeypatch
 
     monkeypatch.setattr(client, "_try_get_fds_download_map", lambda a: {})
     monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda a, f: fds_samples)
+    monkeypatch.setattr(client, "_try_download_fds_gps_track_points", lambda a, f: [])
     monkeypatch.setattr(client, "_get_activity_detail_item", lambda a: fitness_item)
 
     detail = client.get_activity_detail(activity)
@@ -274,6 +280,7 @@ def test_get_activity_detail_fds_only_when_no_json(auth_state, monkeypatch):
 
     monkeypatch.setattr(client, "_try_get_fds_download_map", lambda a: {})
     monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda a, f: fds_samples)
+    monkeypatch.setattr(client, "_try_download_fds_gps_track_points", lambda a, f: [])
     monkeypatch.setattr(client, "_get_activity_detail_item", lambda a: {})
 
     detail = client.get_activity_detail(activity)
@@ -307,6 +314,7 @@ def test_get_activity_detail_raises_when_no_data(auth_state, monkeypatch):
 
     monkeypatch.setattr(client, "_try_get_fds_download_map", lambda a: {})
     monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda a, f: [])
+    monkeypatch.setattr(client, "_try_download_fds_gps_track_points", lambda a, f: [])
     monkeypatch.setattr(client, "_get_activity_detail_item", lambda a: {})
 
     with pytest.raises(MiFitnessError, match="Could not find a detail payload"):
@@ -470,3 +478,67 @@ def test_sample_distance_used_when_summary_missing():
     )
 
     assert detail.total_distance_meters == 550.0
+
+
+# ---------------------------------------------------------------------------
+# GPS track point / sport sample merge
+# ---------------------------------------------------------------------------
+
+
+class TestMergeFdsSamplesIntoTrackPoints:
+    def test_merges_hr_and_cadence_by_timestamp(self):
+        track_points = [
+            TrackPoint(timestamp=1000, latitude=31.2, longitude=121.5, altitude_meters=50.0,
+                       speed_mps=5.0, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+            TrackPoint(timestamp=1001, latitude=31.201, longitude=121.501, altitude_meters=51.0,
+                       speed_mps=5.1, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+        ]
+        samples = [
+            ActivitySample(timestamp=1000, start_time=1000, end_time=1000, duration_seconds=1,
+                           heart_rate=120, cadence=80, speed_mps=None, distance_meters=None,
+                           altitude_meters=None, steps=None, calories=None, raw_sample={}),
+            ActivitySample(timestamp=1001, start_time=1001, end_time=1001, duration_seconds=1,
+                           heart_rate=125, cadence=82, speed_mps=None, distance_meters=None,
+                           altitude_meters=None, steps=None, calories=None, raw_sample={}),
+        ]
+
+        _merge_fds_samples_into_track_points(track_points, samples)
+
+        assert track_points[0].heart_rate == 120
+        assert track_points[0].cadence == 80
+        assert track_points[1].heart_rate == 125
+        assert track_points[1].cadence == 82
+
+    def test_no_overwrite_existing_values(self):
+        track_points = [
+            TrackPoint(timestamp=1000, latitude=31.2, longitude=121.5, altitude_meters=50.0,
+                       speed_mps=5.0, distance_meters=None, heart_rate=115, cadence=None, raw_point={}),
+        ]
+        samples = [
+            ActivitySample(timestamp=1000, start_time=1000, end_time=1000, duration_seconds=1,
+                           heart_rate=120, cadence=80, speed_mps=None, distance_meters=None,
+                           altitude_meters=None, steps=None, calories=None, raw_sample={}),
+        ]
+
+        _merge_fds_samples_into_track_points(track_points, samples)
+
+        assert track_points[0].heart_rate == 115  # NOT overwritten
+        assert track_points[0].cadence == 80
+
+    def test_unmatched_timestamps_left_alone(self):
+        track_points = [
+            TrackPoint(timestamp=1000, latitude=31.2, longitude=121.5, altitude_meters=None,
+                       speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+        ]
+        samples = [
+            ActivitySample(timestamp=9999, start_time=9999, end_time=9999, duration_seconds=1,
+                           heart_rate=150, cadence=90, speed_mps=None, distance_meters=None,
+                           altitude_meters=None, steps=None, calories=None, raw_sample={}),
+        ]
+
+        _merge_fds_samples_into_track_points(track_points, samples)
+
+        assert track_points[0].heart_rate is None
+
+    def test_empty_inputs(self):
+        _merge_fds_samples_into_track_points([], [])  # should not raise
