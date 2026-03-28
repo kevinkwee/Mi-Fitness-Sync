@@ -90,6 +90,163 @@ def test_parse_activity_id_round_trips_list_format():
     assert parse_activity_id("sid-1:key-1:1717200000") == ("sid-1", "key-1", 1717200000)
 
 
+def test_get_activity_by_id_distinguishes_same_sid_different_timestamps(auth_state, monkeypatch):
+    """Two activities sharing the same sid+key but different timestamps must resolve independently."""
+    from mi_fitness_sync.activities import ActivityPage
+
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activity_a = Activity(
+        activity_id="882963223:strength_training:1774351918",
+        sid="882963223",
+        key="strength_training",
+        category="strength_training",
+        sport_type=22,
+        title="Strength Training A",
+        start_time=1774351918,
+        end_time=1774355518,
+        duration_seconds=3600,
+        distance_meters=None,
+        calories=200,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774351918},
+        raw_report={},
+    )
+
+    activity_b = Activity(
+        activity_id="882963223:strength_training:1774241243",
+        sid="882963223",
+        key="strength_training",
+        category="strength_training",
+        sport_type=22,
+        title="Strength Training B",
+        start_time=1774241243,
+        end_time=1774244843,
+        duration_seconds=3600,
+        distance_meters=None,
+        calories=150,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774241243},
+        raw_report={},
+    )
+
+    page = ActivityPage(activities=[activity_a, activity_b], has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result_a = client.get_activity_by_id("882963223:strength_training:1774351918")
+    assert result_a.activity_id == "882963223:strength_training:1774351918"
+    assert result_a.title == "Strength Training A"
+
+    result_b = client.get_activity_by_id("882963223:strength_training:1774241243")
+    assert result_b.activity_id == "882963223:strength_training:1774241243"
+    assert result_b.title == "Strength Training B"
+
+
+def test_get_activity_detail_item_distinguishes_same_sid_different_timestamps(auth_state, monkeypatch):
+    """_get_activity_detail_item must match the correct fitness data item by time when sid+key overlap."""
+    from mi_fitness_sync.activities import FitnessDataPage
+
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activity = Activity(
+        activity_id="882963223:strength_training:1774241243",
+        sid="882963223",
+        key="strength_training",
+        category="strength_training",
+        sport_type=22,
+        title="Strength Training B",
+        start_time=1774241243,
+        end_time=1774244843,
+        duration_seconds=3600,
+        distance_meters=None,
+        calories=150,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774241243},
+        raw_report={},
+    )
+
+    # Two fitness data items sharing sid+key but with different time values
+    fitness_item_wrong = {
+        "sid": "882963223",
+        "key": "strength_training",
+        "time": 1774351918,
+        "value": '{"sport_records": []}',
+    }
+    fitness_item_correct = {
+        "sid": "882963223",
+        "key": "strength_training",
+        "time": 1774241243,
+        "value": '{"sport_records": []}',
+    }
+
+    page = FitnessDataPage(items=[fitness_item_wrong, fitness_item_correct], has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_fitness_data_page", lambda **kwargs: page)
+
+    result = client._get_activity_detail_item(activity)
+    assert result["time"] == 1774241243
+
+
+def test_get_activity_detail_item_paginates_to_find_matching_timestamp(auth_state, monkeypatch):
+    """Regression: correct detail item is on the second page (has_more=True on page 1)."""
+    from mi_fitness_sync.activities import FitnessDataPage
+
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activity = Activity(
+        activity_id="882963223:strength_training:1774241243",
+        sid="882963223",
+        key="strength_training",
+        category="strength_training",
+        sport_type=22,
+        title="Strength Training B",
+        start_time=1774241243,
+        end_time=1774244843,
+        duration_seconds=3600,
+        distance_meters=None,
+        calories=150,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774241243},
+        raw_report={},
+    )
+
+    # Page 1: wrong timestamp — matches sid+key but NOT time
+    page1_item = {
+        "sid": "882963223",
+        "key": "strength_training",
+        "time": 1774351918,
+        "value": '{"sport_records": []}',
+    }
+    page1 = FitnessDataPage(items=[page1_item], has_more=True, next_key="page2-token")
+
+    # Page 2: correct timestamp
+    page2_item = {
+        "sid": "882963223",
+        "key": "strength_training",
+        "time": 1774241243,
+        "value": '{"sport_records": []}',
+    }
+    page2 = FitnessDataPage(items=[page2_item], has_more=False, next_key=None)
+
+    pages = {"__first__": page1, "page2-token": page2}
+
+    def fake_fetch(**kwargs):
+        token = kwargs.get("next_key")
+        return pages[token] if token else pages["__first__"]
+
+    monkeypatch.setattr(client, "_fetch_fitness_data_page", fake_fetch)
+
+    result = client._get_activity_detail_item(activity)
+    assert result["time"] == 1774241243
+
+
 def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, monkeypatch):
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(

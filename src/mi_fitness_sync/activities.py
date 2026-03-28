@@ -362,7 +362,7 @@ class MiFitnessActivitiesClient:
                 next_key=next_key,
             )
             for activity in page.activities:
-                if activity.sid == sid and activity.key == key:
+                if activity.activity_id == activity_id:
                     return activity
             if not page.has_more or not page.next_key:
                 break
@@ -671,6 +671,7 @@ class MiFitnessActivitiesClient:
             else:
                 end_time = start_time + ACTIVITY_ID_SEARCH_WINDOW_SECONDS
 
+        record_time = activity.raw_record.get("time")
         next_key: str | None = None
         while True:
             page = self._fetch_fitness_data_page(
@@ -680,7 +681,11 @@ class MiFitnessActivitiesClient:
                 next_key=next_key,
             )
             for item in page.items:
-                if str(item.get("sid") or "") == activity.sid and str(item.get("key") or "") == activity.key:
+                if (
+                    str(item.get("sid") or "") == activity.sid
+                    and str(item.get("key") or "") == activity.key
+                    and (record_time is None or item.get("time") == record_time)
+                ):
                     return item
             if not page.has_more or not page.next_key:
                 break
