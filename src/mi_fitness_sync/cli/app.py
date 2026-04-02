@@ -9,10 +9,14 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from mi_fitness_sync.activities import ActivityDetail, MiFitnessActivitiesClient, parse_cli_time, render_activities_table
-from mi_fitness_sync.app_dirs import get_exports_dir
-from mi_fitness_sync.auth import DEFAULT_SERVICE_ID, MiFitnessAuthClient
-from mi_fitness_sync.exports import SUPPORTED_EXPORT_FORMATS, render_export
+from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
+from mi_fitness_sync.activity.formatting import parse_cli_time
+from mi_fitness_sync.activity.models import ActivityDetail
+from mi_fitness_sync.activity.utils import render_activities_table
+from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MiFitnessAuthClient
+from mi_fitness_sync.auth.state import utc_now_iso
+from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
+from mi_fitness_sync.export.render import SUPPORTED_EXPORT_FORMATS, render_export
 from mi_fitness_sync.exceptions import (
     AuthStateNotFoundError,
     CaptchaRequiredError,
@@ -21,7 +25,7 @@ from mi_fitness_sync.exceptions import (
     Step2RequiredError,
     XiaomiApiError,
 )
-from mi_fitness_sync.storage import delete_state, load_state, resolve_state_path, save_state, utc_now_iso
+from mi_fitness_sync.paths import get_exports_dir
 
 
 def build_parser() -> argparse.ArgumentParser:

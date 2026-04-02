@@ -9,7 +9,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from mi_fitness_sync.cli import main
+from mi_fitness_sync.cli.app import main
 
 
 if __name__ == "__main__":

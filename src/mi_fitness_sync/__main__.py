@@ -1,4 +1,4 @@
-from mi_fitness_sync.cli import main
+from mi_fitness_sync.cli.app import main
 
 
 if __name__ == "__main__":

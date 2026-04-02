@@ -21,7 +21,7 @@ test = [
 ]
 
 [project.scripts]
-mi-fitness-sync = "mi_fitness_sync.cli:main"
+mi-fitness-sync = "mi_fitness_sync.cli.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

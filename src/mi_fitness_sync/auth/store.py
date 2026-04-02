@@ -2,36 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
-from mi_fitness_sync.app_dirs import get_auth_dir
+from mi_fitness_sync.auth.state import AuthState
+from mi_fitness_sync.paths import get_auth_dir
 
 
 DEFAULT_STATE_PATH = get_auth_dir() / "auth.json"
 STATE_PATH_ENV_VAR = "MI_FITNESS_AUTH_PATH"
-
-
-@dataclass(slots=True)
-class AuthState:
-    email: str
-    user_id: str
-    c_user_id: str
-    service_id: str
-    pass_token: str
-    service_token: str
-    ssecurity: str
-    psecurity: str | None
-    auto_login_url: str
-    device_id: str
-    slh: str | None
-    ph: str | None
-    sts_cookie_header: str
-    cookies: list[dict[str, Any]]
-    created_at: str
-    updated_at: str
 
 
 def resolve_state_path(state_path: str | None = None) -> Path:
@@ -41,10 +20,6 @@ def resolve_state_path(state_path: str | None = None) -> Path:
     if env_value:
         return Path(env_value).expanduser().resolve()
     return DEFAULT_STATE_PATH
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def save_state(state: AuthState, state_path: str | None = None) -> Path:

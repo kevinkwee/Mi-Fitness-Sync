@@ -1,73 +1,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from mi_fitness_sync import cli
-from mi_fitness_sync.activities import Activity, ActivityDetail, ActivitySample, TrackPoint
+from mi_fitness_sync.activity.models import Activity
+from mi_fitness_sync.cli import app as cli
 from mi_fitness_sync.exceptions import CaptchaRequiredError, XiaomiApiError
-
-
-def sample_detail() -> ActivityDetail:
-    activity = Activity(
-        activity_id="sid:key:1",
-        sid="sid",
-        key="key",
-        category="outdoor_run",
-        sport_type=1,
-        title="Morning Run",
-        start_time=1717200000,
-        end_time=1717203600,
-        duration_seconds=3600,
-        distance_meters=10000,
-        calories=700,
-        steps=12000,
-        sync_state="server",
-        next_key=None,
-        raw_record={"sid": "sid", "key": "key"},
-        raw_report={"name": "Morning Run"},
-    )
-    return ActivityDetail(
-        activity=activity,
-        detail_sid="sid",
-        detail_key="key",
-        detail_time=1717200000,
-        zone_name="UTC",
-        zone_offset_seconds=0,
-        track_points=[
-            TrackPoint(
-                timestamp=1717200000,
-                latitude=1.0,
-                longitude=2.0,
-                altitude_meters=10.0,
-                speed_mps=2.5,
-                distance_meters=0.0,
-                heart_rate=120,
-                cadence=160,
-                raw_point={},
-            )
-        ],
-        samples=[
-            ActivitySample(
-                timestamp=1717200000,
-                start_time=1717200000,
-                end_time=1717200000,
-                duration_seconds=0,
-                heart_rate=120,
-                cadence=160,
-                speed_mps=2.5,
-                distance_meters=0.0,
-                altitude_meters=10.0,
-                steps=100,
-                calories=10,
-                raw_sample={},
-            )
-        ],
-        sport_report=None,
-        recovery_rate=None,
-        raw_fitness_item={},
-        raw_detail={},
-    )
 
 
 def test_format_error_includes_xiaomi_api_code():
@@ -148,14 +85,23 @@ def test_list_activities_json_output(monkeypatch, capsys, auth_state):
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
 
-    exit_code = cli.main(["list-activities", "--since", "2024-01-01T00:00:00Z", "--limit", "1", "--country-code", "ID", "--json"])
+    exit_code = cli.main([
+        "list-activities",
+        "--since",
+        "2024-01-01T00:00:00Z",
+        "--limit",
+        "1",
+        "--country-code",
+        "ID",
+        "--json",
+    ])
     output = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
     assert output[0]["title"] == "Morning Run"
 
 
-def test_activity_detail_json_output(monkeypatch, capsys, auth_state):
+def test_activity_detail_json_output(monkeypatch, capsys, auth_state, sample_activity_detail):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
 
     class DummyClient:
@@ -164,7 +110,7 @@ def test_activity_detail_json_output(monkeypatch, capsys, auth_state):
 
         def get_activity_detail(self, activity_id):
             assert activity_id == "sid:key:1"
-            return sample_detail()
+            return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
 
@@ -176,7 +122,7 @@ def test_activity_detail_json_output(monkeypatch, capsys, auth_state):
     assert output["track_points"][0]["heart_rate"] == 120
 
 
-def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, auth_state):
+def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, auth_state, sample_activity_detail):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
 
     class DummyClient:
@@ -185,14 +131,18 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
 
         def get_activity_detail(self, activity_id):
             assert activity_id == "sid:key:1"
-            return sample_detail()
+            return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
-    monkeypatch.setattr(cli, "render_export", lambda detail, file_format, compress: type("Export", (), {
-        "file_format": file_format,
-        "compressed": compress,
-        "payload": b"payload",
-    })())
+    monkeypatch.setattr(
+        cli,
+        "render_export",
+        lambda detail, file_format, compress: type(
+            "Export",
+            (),
+            {"file_format": file_format, "compressed": compress, "payload": b"payload"},
+        )(),
+    )
 
     output_path = tmp_path / "exports" / "run.gpx.gz"
     exit_code = cli.main(["export-activity", "sid:key:1", "--format", "gpx", "--gzip", "--output", str(output_path)])
@@ -203,8 +153,7 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
     assert "Compressed: yes" in captured
 
 
-def test_activity_detail_no_cache_flag(monkeypatch, capsys, auth_state):
-    """--no-cache flag propagates to the client constructor."""
+def test_activity_detail_no_cache_flag(monkeypatch, auth_state, sample_activity_detail):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
     captured_kwargs = {}
 
@@ -213,7 +162,7 @@ def test_activity_detail_no_cache_flag(monkeypatch, capsys, auth_state):
             captured_kwargs.update(kwargs)
 
         def get_activity_detail(self, activity_id):
-            return sample_detail()
+            return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
 
@@ -222,8 +171,7 @@ def test_activity_detail_no_cache_flag(monkeypatch, capsys, auth_state):
     assert captured_kwargs["no_cache"] is True
 
 
-def test_activity_detail_cache_dir_flag(monkeypatch, tmp_path, capsys, auth_state):
-    """--cache-dir flag propagates to the client constructor."""
+def test_activity_detail_cache_dir_flag(monkeypatch, tmp_path, auth_state, sample_activity_detail):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
     captured_kwargs = {}
 
@@ -232,7 +180,7 @@ def test_activity_detail_cache_dir_flag(monkeypatch, tmp_path, capsys, auth_stat
             captured_kwargs.update(kwargs)
 
         def get_activity_detail(self, activity_id):
-            return sample_detail()
+            return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
 

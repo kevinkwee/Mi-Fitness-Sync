@@ -5,8 +5,8 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
-from typing import Any
 from http.cookies import SimpleCookie
+from typing import Any
 
 import requests
 
@@ -16,8 +16,8 @@ from mi_fitness_sync.exceptions import (
     Step2RequiredError,
     XiaomiApiError,
 )
-from mi_fitness_sync.app_dirs import USER_AGENT
-from mi_fitness_sync.storage import AuthState, utc_now_iso
+from mi_fitness_sync.auth.state import AuthState, utc_now_iso
+from mi_fitness_sync.config import USER_AGENT
 
 
 ACCOUNT_BASE = "https://account.xiaomi.com"

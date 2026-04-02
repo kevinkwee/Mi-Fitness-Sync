@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
-from mi_fitness_sync.activities import ActivityDetail, TrackPoint
+from mi_fitness_sync.activity.models import ActivityDetail, TrackPoint
 from mi_fitness_sync.exceptions import MiFitnessError
 
 
