@@ -2,7 +2,7 @@
 
 An unofficial Python CLI for accessing Mi Fitness workout data and manually syncing activities that failed to reach Strava.
 
-## Why This Project Exists
+## Why This Exists
 
 Mi Fitness is the Android app used by Xiaomi wearable devices. When a workout is recorded on the watch, the data is synced to the phone over Bluetooth/BLE and then uploaded to the Mi Fitness cloud under the user's Xiaomi account.
 
@@ -27,11 +27,21 @@ The codebase is set up with:
 2. `pyproject.toml` for project metadata
 3. A Python package named `mi_fitness_sync`
 
-Most of the actual code lives under `src/mi_fitness_sync`.
+Most of the actual code lives under `src/mi_fitness_sync`, organized into subpackages such as:
+
+1. `activity/` for Mi Fitness activity listing, detail lookup, region routing, and normalization
+2. `auth/` for Xiaomi Passport auth state and persistence
+3. `cli/` for the command-line entry point
+4. `export/` for GPX, TCX, and FIT rendering
+5. `fds/` for Mi Fitness FDS binary parsing and caching
+
+Shared helpers such as `config.py`, `exceptions.py`, and `paths.py` live at the package root.
+
+Tests under `tests/` mirror that package structure with per-module test files.
 
 ## Install
 
-Python 3.12+ is recommended.
+Python 3.12+ is required.
 
 Install it in editable mode:
 
@@ -40,6 +50,12 @@ python -m pip install -e .
 ```
 
 Then run it with:
+
+```bash
+mi-fitness-sync --help
+```
+
+You can also run it with:
 
 ```bash
 python -m mi_fitness_sync --help
@@ -80,6 +96,8 @@ python main.py export-activity sid:key:1717200000 --format fit --output exports/
 ```
 
 ## Commands
+
+Every command that reads or writes persisted auth state accepts `--state-path` to override the default auth state file location.
 
 ### `login`
 
@@ -126,6 +144,7 @@ Relevant flags:
 3. `--category` passes a Mi Fitness category filter if you already know the category string
 4. `--country-code` overrides activity routing with a two-letter country code such as `ID`, `GB`, or `US`; the CLI maps that to the Mi Fitness region used by the Android app
 5. `--json` prints the parsed activity list as JSON
+6. `--verbose` enables debug logging
 
 If `--country-code` is omitted, the CLI keeps the existing automatic Mi Fitness region detection behavior.
 
@@ -145,12 +164,17 @@ Relevant flags:
 1. `activity_id` must come from the `activity_id` field emitted by `list-activities`
 2. `--country-code` uses the same region override behavior as `list-activities`
 3. `--json` prints the normalized detail model including parsed track points and samples
+4. `--no-cache` disables the local FDS binary cache
+5. `--cache-dir` overrides the local FDS cache directory
+6. `--verbose` enables debug logging
 
 Detail lookup behavior:
 
 1. The CLI still prefers the richer workout JSON payload when Mi Fitness exposes it.
-2. It now also probes the validated `healthapp/service/gen_download_url` control-plane path and includes any discovered FDS metadata in the raw detail output.
-3. If Mi Fitness does not return the richer JSON blob, the CLI falls back to timestamped fitness timeline samples so TCX and FIT export can still work on a best-effort basis.
+2. It also probes the validated `healthapp/service/gen_download_url` control-plane path and stores any discovered FDS metadata under the normalized detail model's `raw_detail["fds_downloads"]` field.
+3. If Mi Fitness does not return the richer JSON blob, the CLI can still synthesize detail when FDS sport samples or FDS GPS track points are recoverable.
+4. Recoverable FDS sport-report and recovery-rate files are attached to the normalized detail model, although the current exporters do not consume them.
+5. If neither the JSON detail payload nor FDS binary data is available, the command fails instead of inventing a best-effort timeline.
 
 ### `export-activity`
 
@@ -170,12 +194,16 @@ Relevant flags:
 2. `--output` is the destination file path
 3. `--gzip` wraps the generated payload with gzip compression before writing it
 4. `--country-code` uses the same region override behavior as `list-activities`
+5. `--no-cache` disables the local FDS binary cache
+6. `--cache-dir` overrides the local FDS cache directory
+7. `--verbose` enables debug logging
 
 Export behavior:
 
-1. GPX requires GPS track points in the Mi Fitness detail payload
-2. TCX and FIT can fall back to timestamped sport samples when full GPS is missing
+1. GPX requires GPS track points in the normalized detail payload
+2. TCX and FIT use `detail.track_points` first when present and otherwise fall back to timestamped sport samples without latitude/longitude
 3. FIT generation is best-effort and only includes fields that are present in the Mi Fitness source payload
+4. If `--output` is omitted, exports are written under `~/.mi_fitness_sync/exports/` using a sanitized title plus local activity timestamp
 
 ### `logout`
 
@@ -189,12 +217,9 @@ python -m mi_fitness_sync logout
 
 ## Local Auth Storage
 
-By default, auth state is stored in the user profile under `.mi-fitness-strava-sync/auth.json`.
+By default, auth state is stored in the user profile under `~/.mi_fitness_sync/auth/auth.json`.
 
-You can override that location with:
-
-1. `--state-path`
-2. the `MI_FITNESS_AUTH_PATH` environment variable
+You can override that location with `--state-path`.
 
 ## Limitations
 
@@ -203,9 +228,9 @@ You can override that location with:
 3. Xiaomi may change endpoints, cookies, signatures, or response formats at any time.
 4. Some accounts may require captcha, notification approval, or step-2 verification flows that are not fully automated here.
 5. Detail retrieval currently depends on the raw `huami_sport_record` payload shape used by the Android app; Xiaomi may change that format without notice.
-6. Some accounts appear to expose FDS download-url metadata for workouts without actually retaining the corresponding cloud object, so live GPS/blob retrieval is still incomplete.
+6. FDS download-url metadata does not guarantee the corresponding cloud object is still downloadable, so some workouts still cannot be enriched from FDS.
 7. GPX export is unavailable for workouts where Mi Fitness does not expose GPS track points.
-8. TCX and FIT can fall back to timestamped timeline samples, but that fallback does not include route geometry.
+8. TCX and FIT require timestamped export points. The exporter uses GPS track points directly when they are present in the normalized detail and otherwise falls back to timestamped sport samples; if neither source exists, those exports are unavailable.
 9. FIT export is best-effort and may omit fields when Mi Fitness does not provide enough source data for a fuller activity file.
 
 ## Security Notes
