@@ -487,6 +487,35 @@ class TestDownloadAndParseSportRecordApiShape:
         assert samples[0].heart_rate == 80
         assert samples[1].heart_rate == 85
 
+    def test_reads_json_string_wrapped_response_body(self):
+        aes_key = b"\xab" * 16
+        obj_key_b64 = b64url_encode_no_pad(aes_key)
+        encrypted_body = self._make_encrypted_binary(aes_key)
+        fds_entry = {
+            "url": "https://fds.example.com/download/abc123",
+            "obj_key": obj_key_b64,
+        }
+
+        class FakeResponse:
+            status_code = 200
+            text = f'"{encrypted_body}"'
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return encrypted_body
+
+        class FakeSession:
+            def get(self, url, timeout=30):
+                assert url == "https://fds.example.com/download/abc123"
+                return FakeResponse()
+
+        samples = download_and_parse_sport_record(FakeSession(), fds_entry, sport_type=8)
+        assert len(samples) == 2
+        assert samples[0].heart_rate == 80
+        assert samples[1].heart_rate == 85
+
     def test_missing_obj_key_returns_empty(self):
         class FakeSession:
             pass

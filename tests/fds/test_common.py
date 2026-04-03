@@ -33,6 +33,16 @@ class TestB64UrlDecode:
         encoded = b64url_encode_no_pad(data)
         assert b64url_decode(encoded) == data
 
+    @pytest.mark.parametrize(
+        ("data", "encoded"),
+        [
+            (b"f", "Zg"),
+            (b"fo", "Zm8"),
+        ],
+    )
+    def test_decode_without_padding_restores_missing_padding(self, data: bytes, encoded: str):
+        assert b64url_decode(encoded) == data
+
 
 class TestDecryptFds:
     def test_round_trip(self):

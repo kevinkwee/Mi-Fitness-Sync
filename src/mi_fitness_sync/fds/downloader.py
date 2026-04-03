@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 ParserOutput = TypeVar("ParserOutput")
 
 
+def _get_fds_response_body(response: requests.Response) -> str:
+    try:
+        return response.json()
+    except Exception:
+        logger.debug("Response is not JSON, using raw text for FDS body", exc_info=True)
+        return response.text
+
+
 def download_and_parse_fds_file(
     session: requests.Session,
     fds_entry: dict[str, Any],
@@ -51,7 +59,7 @@ def download_and_parse_fds_file(
         return fallback()
 
     try:
-        decrypted = decrypt_fds_data(response.text, object_key)
+        decrypted = decrypt_fds_data(_get_fds_response_body(response), object_key)
     except Exception:
         logger.warning("Failed to decrypt %s", decrypt_label, exc_info=True)
         return fallback()
