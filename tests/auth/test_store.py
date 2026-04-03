@@ -15,14 +15,6 @@ def test_save_and_load_state_round_trip(tmp_path: Path, auth_state):
     assert loaded_state == auth_state
 
 
-def test_resolve_state_path_prefers_explicit_argument_over_env(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv(auth_store.STATE_PATH_ENV_VAR, str(tmp_path / "from-env.json"))
-
-    resolved = auth_store.resolve_state_path(str(tmp_path / "from-arg.json"))
-
-    assert resolved == (tmp_path / "from-arg.json").resolve()
-
-
 def test_delete_state_removes_file(tmp_path: Path, auth_state):
     state_path = tmp_path / "auth.json"
     auth_store.save_state(auth_state, str(state_path))

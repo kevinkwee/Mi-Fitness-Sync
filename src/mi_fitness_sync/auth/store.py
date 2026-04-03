@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -10,15 +9,11 @@ from mi_fitness_sync.paths import get_auth_dir
 
 
 DEFAULT_STATE_PATH = get_auth_dir() / "auth.json"
-STATE_PATH_ENV_VAR = "MI_FITNESS_AUTH_PATH"
 
 
 def resolve_state_path(state_path: str | None = None) -> Path:
     if state_path:
         return Path(state_path).expanduser().resolve()
-    env_value = os.environ.get(STATE_PATH_ENV_VAR)
-    if env_value:
-        return Path(env_value).expanduser().resolve()
     return DEFAULT_STATE_PATH
 
 
