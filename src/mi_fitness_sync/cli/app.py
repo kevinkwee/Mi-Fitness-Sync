@@ -77,7 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
     )
     export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
-    export_parser.add_argument("--output", help="Destination file path (default: ~/.mi_fitness_sync/exports/<activity_id>.<format>)")
+    export_parser.add_argument(
+        "--output",
+        help="Destination file path (default: ~/.mi_fitness_sync/exports/<sanitized_title>_<local_start_time>.<format>)",
+    )
     export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
     export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
     export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")

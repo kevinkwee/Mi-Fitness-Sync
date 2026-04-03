@@ -153,6 +153,38 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
     assert "Compressed: yes" in captured
 
 
+def test_export_activity_uses_sanitized_title_and_local_start_time(monkeypatch, tmp_path, capsys, auth_state, sample_activity_detail):
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+
+    class DummyClient:
+        def __init__(self, state, **kwargs):
+            assert state == auth_state
+
+        def get_activity_detail(self, activity_id):
+            assert activity_id == "sid:key:1"
+            return sample_activity_detail
+
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
+    monkeypatch.setattr(cli, "get_exports_dir", lambda: tmp_path / "exports")
+    monkeypatch.setattr(
+        cli,
+        "render_export",
+        lambda detail, file_format, compress: type(
+            "Export",
+            (),
+            {"file_format": file_format, "compressed": compress, "payload": b"payload"},
+        )(),
+    )
+
+    exit_code = cli.main(["export-activity", "sid:key:1", "--format", "gpx"])
+    captured = capsys.readouterr().out
+    output_path = tmp_path / "exports" / "Morning_Run_20240601_000000.gpx"
+
+    assert exit_code == 0
+    assert output_path.read_bytes() == b"payload"
+    assert str(output_path) in captured
+
+
 def test_activity_detail_no_cache_flag(monkeypatch, auth_state, sample_activity_detail):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
     captured_kwargs = {}
