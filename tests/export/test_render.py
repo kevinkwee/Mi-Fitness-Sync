@@ -587,7 +587,7 @@ class TestGpxCreator:
     def test_creator_contains_barometer_hint_when_altitude_present(self):
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        assert root.attrib["creator"] == "Mi Fitness Sync with barometer"
+        assert root.attrib["creator"] == "Strava with barometer"
 
     def test_creator_omits_barometer_hint_when_no_altitude(self):
         points = [
@@ -595,12 +595,12 @@ class TestGpxCreator:
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        assert root.attrib["creator"] == "Mi Fitness Sync"
+        assert root.attrib["creator"] == "Strava"
 
     def test_creator_starts_with_app_name(self):
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        assert root.attrib["creator"].startswith("Mi Fitness Sync")
+        assert root.attrib["creator"].startswith("Strava")
 
 
 class TestGpxHeartRateAndCadenceBounds:
@@ -1073,7 +1073,7 @@ class TestTcxCreatorElement:
         detail = _tcx_detail()  # default points have altitude
         root = ET.fromstring(render_export(detail, "tcx").payload)
         name = root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP)
-        assert name.text == "Mi Fitness Sync with barometer"
+        assert name.text == "Strava with barometer"
 
     def test_creator_no_barometer_without_altitude(self):
         points = [
@@ -1082,7 +1082,7 @@ class TestTcxCreatorElement:
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
         name = root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP)
-        assert name.text == "Mi Fitness Sync"
+        assert name.text == "Strava"
 
     def test_creator_has_device_type(self):
         detail = _tcx_detail()
@@ -1096,6 +1096,13 @@ class TestTcxCreatorElement:
         creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
         children = _tcx_child_local_names(creator)
         assert children == ["Name", "UnitId", "ProductID", "Version"]
+
+    def test_product_id_equals_102(self):
+        detail = _tcx_detail()
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        product_id = root.find(".//tcx:Activity/tcx:Creator/tcx:ProductID", TCX_NS_MAP)
+        assert product_id is not None
+        assert product_id.text == "102"
 
     def test_creator_after_lap(self):
         """Creator must appear after Lap (and optional Notes/Training) in Activity_t sequence."""

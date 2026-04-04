@@ -54,7 +54,7 @@ def render_gpx(detail: ActivityDetail) -> bytes:
     ET.register_namespace("gpxtpx", GPX_TRACKPOINT_NS)
 
     has_elevation = any(p.altitude_meters is not None for p in valid_points)
-    creator = "Mi Fitness Sync with barometer" if has_elevation else "Mi Fitness Sync"
+    creator = "Strava with barometer" if has_elevation else "Strava"
 
     root = ET.Element(
         f"{{{_GPX}}}gpx",
@@ -583,7 +583,7 @@ def _tcx_sport(sport_type: int | None) -> str:
 
 def _tcx_creator(activity_element: ET.Element, has_elevation: bool) -> None:
     """Append a Creator element to the Activity. Includes barometer hint when altitude data is present."""
-    creator_name = "Mi Fitness Sync with barometer" if has_elevation else "Mi Fitness Sync"
+    creator_name = "Strava with barometer" if has_elevation else "Strava"
     creator = ET.SubElement(
         activity_element,
         f"{{{TCX_NS}}}Creator",
@@ -591,7 +591,7 @@ def _tcx_creator(activity_element: ET.Element, has_elevation: bool) -> None:
     )
     ET.SubElement(creator, f"{{{TCX_NS}}}Name").text = creator_name
     ET.SubElement(creator, f"{{{TCX_NS}}}UnitId").text = "0"
-    ET.SubElement(creator, f"{{{TCX_NS}}}ProductID").text = "0"
+    ET.SubElement(creator, f"{{{TCX_NS}}}ProductID").text = "102"
     version = ET.SubElement(creator, f"{{{TCX_NS}}}Version")
     ET.SubElement(version, f"{{{TCX_NS}}}VersionMajor").text = "0"
     ET.SubElement(version, f"{{{TCX_NS}}}VersionMinor").text = "0"
