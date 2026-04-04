@@ -286,7 +286,16 @@ class ActivityFdsService:
 
     def _build_context(self, activity: Activity) -> ActivityFdsContext | None:
         sid = activity.sid
-        timestamp = coerce_int(activity.raw_record.get("time")) or activity.start_time
+        record_time = coerce_int(activity.raw_record.get("time"))
+        report_time = coerce_int(activity.raw_report.get("time"))
+        logger.debug(
+            "_build_context %s: raw_record[time]=%s  raw_report[time]=%s  (divergent=%s)",
+            activity.activity_id,
+            record_time,
+            report_time,
+            record_time != report_time,
+        )
+        timestamp = report_time or activity.start_time
         proto_type = coerce_int(activity.raw_report.get("proto_type"))
         timezone_offset = coerce_int(activity.raw_report.get("timezone"))
         if not sid or timestamp is None or proto_type is None or timezone_offset is None:

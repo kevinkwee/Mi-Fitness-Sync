@@ -104,7 +104,7 @@ class TestFreeTrainingOneDimen:
     def test_parses_v2_single_segment(self):
         data_valid = bytes([0b11000000])
         record_count = 3
-        start_time = 1774241243
+        start_time = 1700000002
         it_summary = bytes([0x00])
         records = bytes([120, 10, 130, 20, 140, 30])
 
@@ -128,7 +128,7 @@ class TestFreeTrainingFourDimen:
     def test_parses_v3_single_segment(self):
         data_valid = bytes([0xCC, 0xCC])
         record_count = 2
-        start_time = 1774241243
+        start_time = 1700000002
         it_summary = bytes([0x00])
         records = bytes([120, 10, 98, 25, 130, 20, 97, 30])
 
@@ -152,7 +152,7 @@ class TestParseSportRecord:
     def test_free_training_v2_full_pipeline(self):
         data_valid = bytes([0b11000000])
         record_count = 5
-        start_time = 1774241243
+        start_time = 1700000002
         it_summary = bytes([0x00])
         records = bytes(sum(([100 + index, index * 5] for index in range(5)), []))
 
@@ -175,7 +175,7 @@ class TestParseSportRecord:
     def test_strength_training_v2_uses_free_training_parser(self):
         data_valid = bytes([0b11000000])
         record_count = 4
-        start_time = 1774241243
+        start_time = 1700000002
         it_summary = bytes([0x00])
         records = bytes(sum(([105 + index, index * 3] for index in range(4)), []))
 
@@ -192,7 +192,7 @@ class TestParseSportRecord:
     def test_strength_training_v3_fourdimen(self):
         data_valid = bytes([0xCC, 0xCC])
         record_count = 2
-        start_time = 1774241243
+        start_time = 1700000002
         it_summary = bytes([0x00])
         records = bytes([120, 10, 98, 25, 130, 20, 97, 30])
 
@@ -516,9 +516,12 @@ class TestDownloadAndParseSportRecordApiShape:
         assert samples[0].heart_rate == 80
         assert samples[1].heart_rate == 85
 
-    def test_missing_obj_key_returns_empty(self):
+    def test_missing_obj_key_attempts_download(self):
+        import requests
+
         class FakeSession:
-            pass
+            def get(self, url, **kwargs):
+                raise requests.ConnectionError("simulated")
 
         fds_entry = {
             "url": "https://fds.example.com/download/abc123",
@@ -528,16 +531,22 @@ class TestDownloadAndParseSportRecordApiShape:
         }
         assert download_and_parse_sport_record(FakeSession(), fds_entry, sport_type=8) == []
 
-    def test_none_obj_key_returns_empty(self):
+    def test_none_obj_key_attempts_download(self):
+        import requests
+
         class FakeSession:
-            pass
+            def get(self, url, **kwargs):
+                raise requests.ConnectionError("simulated")
 
         fds_entry = {"url": "https://fds.example.com/download/abc123", "obj_key": None, "method": "GET"}
         assert download_and_parse_sport_record(FakeSession(), fds_entry, sport_type=8) == []
 
     def test_camelcase_objectkey_is_not_read(self):
+        import requests
+
         class FakeSession:
-            pass
+            def get(self, url, **kwargs):
+                raise requests.ConnectionError("simulated")
 
         fds_entry = {
             "url": "https://fds.example.com/download/abc123",

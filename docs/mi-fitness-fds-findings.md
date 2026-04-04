@@ -234,6 +234,33 @@ FitnessDataId fitnessDataIdBuild = new FitnessDataId.Builder()
 
 The `sportType` field in `FitnessDataId` is set from `SportBasicReport.getProtoType()`, not `getSportType()`. Confusing the two produces wrong FDS suffixes.
 
+### CRITICAL: timestamp comes from report `time`, not record `time`
+
+`SportBasicReport.getTimeStamp()` has annotation:
+
+```java
+@SerializedName(alternate = {"timestamp"}, value = "time")
+private long timeStamp;
+```
+
+This maps to the JSON field `"time"` (or alternate `"timestamp"`) **inside the report payload** (`SportBasicReport`), NOT the record envelope's `time` field. The `get_sport_records_by_time` API response has two distinct `time` values:
+
+| Source | JSON Path | Description |
+|---|---|---|
+| Record envelope | `sport_records[].time` | Record-level timestamp (may differ from report timestamp) |
+| Report payload | `sport_records[].value` → parsed → `time` | `SportBasicReport.timeStamp` — the value used for FDS suffix |
+
+The bytes 0–3 of the 6-byte FDS key encode the **report-level** `time`. Using the record-level `time` produces wrong suffixes when the two values diverge.
+
+Similarly, `SportBasicReport.getTzIn15Min()` has annotation:
+
+```java
+@SerializedName(alternate = {"time_zone"}, value = "timezone")
+private int tzIn15Min;
+```
+
+This is the `"timezone"` field inside the report payload, in 15-minute increments.
+
 ---
 
 ## Sport Record Parser Dispatch
@@ -357,7 +384,7 @@ When the watch sends data over BLE, the app saves it locally via `FitnessFileUti
 {filesDir}/fitness/d{sid}/sport/p{proto_type}/{timestamp}_{version}_record
 ```
 
-Example: `d882963223/sport/p28/1774241243_8_record` — SID `882963223`, proto_type `28`, timestamp `1774241243`, version `8`.
+Example: `d123456789/sport/p28/1700000002_8_record` — SID `123456789`, proto_type `28`, timestamp `1700000002`, version `8`.
 
 The `dataIdFilePathIgnoreVersion` segment from `FitnessDataId` determines the subdirectory structure based on the data type, while `FitnessFileUtils` resolves the full path under the app's private files directory.
 
@@ -409,7 +436,7 @@ The following areas are partially or incompletely recovered:
 
 - **Binary parser coverage (proto_types > 25):** `FitnessDataParser.getSportRecordParserInstance()` and `FitnessDataValidity.getSportRecordValidityLen()` switch statements cover proto_types 1–25 only. Newer sport types (e.g., proto_type 28 for strength training) return `null` / `-1`, indicating the decompiled APK version (v3.52.0i) predates their explicit support.
 
-- **FDS file types beyond 0–3:** The primary sport record binary (fileType 0), sport report (fileType 1), GPS data (fileType 2), and recovery rate (fileType 3) paths are documented. The value 8 has been observed in local file naming (e.g., `1774241243_8_record`) but its purpose as a version byte vs. file type indicator and associated parser dispatch path are not fully recovered.
+- **FDS file types beyond 0–3:** The primary sport record binary (fileType 0), sport report (fileType 1), GPS data (fileType 2), and recovery rate (fileType 3) paths are documented. The value 8 has been observed in local file naming (e.g., `1700000002_8_record`) but its purpose as a version byte vs. file type indicator and associated parser dispatch path are not fully recovered.
 
 - **Route FDS path:** `FitnessFDSRequest.getRouteFDSUrl()` and `downloadRoute()` exist for a separate route data download flow, but the full request/response format is not recovered.
 

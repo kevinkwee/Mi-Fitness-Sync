@@ -65,7 +65,7 @@ class TestDecryptFds:
 class TestParseFdsHeader:
     def test_parses_header_fields(self):
         data_valid = bytes([0b11000000])
-        timestamp = 1774241243
+        timestamp = 1700000002
         header_bytes = build_header(timestamp, 28, 2, 8, data_valid)
         body = b"\x01\x02\x03\x04"
         raw = header_bytes + body

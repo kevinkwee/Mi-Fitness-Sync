@@ -20,22 +20,22 @@ def test_parse_activity_id_round_trips_list_format():
 
 def test_build_fds_suffix_matches_android_server_key_format():
     assert build_fds_suffix(
-        sid="882963223",
-        timestamp=1774263950,
+        sid="123456789",
+        timestamp=1700000003,
         timezone_offset=28,
         sport_type=22,
         file_type=0,
-    ) == "jh7BaRzY_KdJjWE97g_CXNigsrsLabYEzCPg"
+    ) == "A_FTZRzY_98O8HYCOBHMq32eZZczDTKeuNEE"
 
 
 def test_build_fds_suffix_strength_training_proto_type_28():
     assert build_fds_suffix(
-        sid="882963223",
-        timestamp=1774241243,
+        sid="123456789",
+        timestamp=1700000002,
         timezone_offset=28,
         sport_type=28,
         file_type=0,
-    ) == "28XAaRzw_KdJjWE97g_CXNigsrsLabYEzCPg"
+    ) == "AvFTZRzw_98O8HYCOBHMq32eZZczDTKeuNEE"
 
 
 def test_build_fds_suffix_uses_underscore_separator():

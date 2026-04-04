@@ -57,52 +57,52 @@ def test_get_activity_by_id_distinguishes_same_sid_different_timestamps(auth_sta
     client = MiFitnessActivitiesClient(auth_state)
 
     activity_a = Activity(
-        activity_id="882963223:strength_training:1774351918",
-        sid="882963223",
+        activity_id="123456789:strength_training:1700000001",
+        sid="123456789",
         key="strength_training",
         category="strength_training",
         sport_type=22,
         title="Strength Training A",
-        start_time=1774351918,
-        end_time=1774355518,
+        start_time=1700000001,
+        end_time=1700003601,
         duration_seconds=3600,
         distance_meters=None,
         calories=200,
         steps=None,
         sync_state="server",
         next_key=None,
-        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774351918},
+        raw_record={"sid": "123456789", "key": "strength_training", "time": 1700000001},
         raw_report={},
     )
 
     activity_b = Activity(
-        activity_id="882963223:strength_training:1774241243",
-        sid="882963223",
+        activity_id="123456789:strength_training:1700000002",
+        sid="123456789",
         key="strength_training",
         category="strength_training",
         sport_type=22,
         title="Strength Training B",
-        start_time=1774241243,
-        end_time=1774244843,
+        start_time=1700000002,
+        end_time=1700003602,
         duration_seconds=3600,
         distance_meters=None,
         calories=150,
         steps=None,
         sync_state="server",
         next_key=None,
-        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774241243},
+        raw_record={"sid": "123456789", "key": "strength_training", "time": 1700000002},
         raw_report={},
     )
 
     page = ActivityPage(activities=[activity_a, activity_b], has_more=False, next_key=None)
     monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
 
-    result_a = client.get_activity_by_id("882963223:strength_training:1774351918")
-    result_b = client.get_activity_by_id("882963223:strength_training:1774241243")
+    result_a = client.get_activity_by_id("123456789:strength_training:1700000001")
+    result_b = client.get_activity_by_id("123456789:strength_training:1700000002")
 
-    assert result_a.activity_id == "882963223:strength_training:1774351918"
+    assert result_a.activity_id == "123456789:strength_training:1700000001"
     assert result_a.title == "Strength Training A"
-    assert result_b.activity_id == "882963223:strength_training:1774241243"
+    assert result_b.activity_id == "123456789:strength_training:1700000002"
     assert result_b.title == "Strength Training B"
 
 
@@ -110,34 +110,34 @@ def test_get_activity_detail_item_distinguishes_same_sid_different_timestamps(au
     client = MiFitnessActivitiesClient(auth_state)
 
     activity = Activity(
-        activity_id="882963223:strength_training:1774241243",
-        sid="882963223",
+        activity_id="123456789:strength_training:1700000002",
+        sid="123456789",
         key="strength_training",
         category="strength_training",
         sport_type=22,
         title="Strength Training B",
-        start_time=1774241243,
-        end_time=1774244843,
+        start_time=1700000002,
+        end_time=1700003602,
         duration_seconds=3600,
         distance_meters=None,
         calories=150,
         steps=None,
         sync_state="server",
         next_key=None,
-        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774241243},
+        raw_record={"sid": "123456789", "key": "strength_training", "time": 1700000002},
         raw_report={},
     )
 
     fitness_item_wrong = {
-        "sid": "882963223",
+        "sid": "123456789",
         "key": "strength_training",
-        "time": 1774351918,
+        "time": 1700000001,
         "value": '{"sport_records": []}',
     }
     fitness_item_correct = {
-        "sid": "882963223",
+        "sid": "123456789",
         "key": "strength_training",
-        "time": 1774241243,
+        "time": 1700000002,
         "value": '{"sport_records": []}',
     }
 
@@ -145,43 +145,43 @@ def test_get_activity_detail_item_distinguishes_same_sid_different_timestamps(au
     monkeypatch.setattr(client, "_fetch_fitness_data_page", lambda **kwargs: page)
 
     result = client._get_activity_detail_item(activity)
-    assert result["time"] == 1774241243
+    assert result["time"] == 1700000002
 
 
 def test_get_activity_detail_item_paginates_to_find_matching_timestamp(auth_state, monkeypatch):
     client = MiFitnessActivitiesClient(auth_state)
 
     activity = Activity(
-        activity_id="882963223:strength_training:1774241243",
-        sid="882963223",
+        activity_id="123456789:strength_training:1700000002",
+        sid="123456789",
         key="strength_training",
         category="strength_training",
         sport_type=22,
         title="Strength Training B",
-        start_time=1774241243,
-        end_time=1774244843,
+        start_time=1700000002,
+        end_time=1700003602,
         duration_seconds=3600,
         distance_meters=None,
         calories=150,
         steps=None,
         sync_state="server",
         next_key=None,
-        raw_record={"sid": "882963223", "key": "strength_training", "time": 1774241243},
+        raw_record={"sid": "123456789", "key": "strength_training", "time": 1700000002},
         raw_report={},
     )
 
     page1_item = {
-        "sid": "882963223",
+        "sid": "123456789",
         "key": "strength_training",
-        "time": 1774351918,
+        "time": 1700000001,
         "value": '{"sport_records": []}',
     }
     page1 = FitnessDataPage(items=[page1_item], has_more=True, next_key="page2-token")
 
     page2_item = {
-        "sid": "882963223",
+        "sid": "123456789",
         "key": "strength_training",
-        "time": 1774241243,
+        "time": 1700000002,
         "value": '{"sport_records": []}',
     }
     page2 = FitnessDataPage(items=[page2_item], has_more=False, next_key=None)
@@ -195,7 +195,7 @@ def test_get_activity_detail_item_paginates_to_find_matching_timestamp(auth_stat
     monkeypatch.setattr(client, "_fetch_fitness_data_page", fake_fetch)
 
     result = client._get_activity_detail_item(activity)
-    assert result["time"] == 1774241243
+    assert result["time"] == 1700000002
 
 
 def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, monkeypatch):

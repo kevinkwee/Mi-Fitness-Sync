@@ -244,8 +244,11 @@ class TestDownloadAndParseGpsRecord:
 
         assert download_and_parse_gps_record(FakeSession(), {"obj_key": "abc"}) == []
 
-    def test_missing_obj_key_returns_empty(self):
+    def test_missing_obj_key_attempts_download(self):
+        import requests
+
         class FakeSession:
-            pass
+            def get(self, url, **kwargs):
+                raise requests.ConnectionError("simulated")
 
         assert download_and_parse_gps_record(FakeSession(), {"url": "https://example.com"}) == []
