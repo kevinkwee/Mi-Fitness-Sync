@@ -12,7 +12,7 @@ from fit_tool.profile.profile_type import Sport, SubSport
 import pytest
 
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
-from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate
+from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories
 from mi_fitness_sync.fds.sport_reports import SportReport
 
 GPX_NS = {"gpx": "http://www.topografix.com/GPX/1/1"}
@@ -815,3 +815,337 @@ class TestGpxElementOrdering:
         tpe = root.find(".//gpxtpx:TrackPointExtension", TPX_NS)
         children = self._child_local_names(tpe)
         assert children == ["hr", "cad"]
+
+
+# ---------------------------------------------------------------------------
+# TCX compliance tests
+# ---------------------------------------------------------------------------
+
+TCX_NS_MAP = {"tcx": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
+AEXT_NS_MAP = {"aext": "http://www.garmin.com/xmlschemas/ActivityExtension/v2"}
+ALL_TCX_NS = {**TCX_NS_MAP, **AEXT_NS_MAP}
+
+
+def _tcx_detail(
+    *,
+    sport_type: int = 1,
+    track_points: list[TrackPoint] | None = None,
+    calories: int = 400,
+) -> ActivityDetail:
+    activity = Activity(
+        activity_id="sid:key:1",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=sport_type,
+        title="Test Run",
+        start_time=1717200000,
+        end_time=1717203600,
+        duration_seconds=3600,
+        distance_meters=5000,
+        calories=calories,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={},
+        raw_report={},
+    )
+    if track_points is None:
+        track_points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=80, raw_point={}),
+            TrackPoint(timestamp=1717201800, latitude=1.31, longitude=103.81, altitude_meters=25.0, speed_mps=1.5, distance_meters=2500.0, heart_rate=140, cadence=85, raw_point={}),
+            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=1.3, distance_meters=5000.0, heart_rate=130, cadence=82, raw_point={}),
+        ]
+    return ActivityDetail(
+        activity=activity,
+        detail_sid="sid",
+        detail_key="key",
+        detail_time=1717200000,
+        zone_name="UTC",
+        zone_offset_seconds=0,
+        track_points=track_points,
+        samples=[],
+        sport_report=None,
+        recovery_rate=None,
+        raw_fitness_item={},
+        raw_detail={},
+    )
+
+
+def _tcx_child_local_names(element: ET.Element) -> list[str]:
+    return [child.tag.split("}")[-1] if "}" in child.tag else child.tag for child in element]
+
+
+class TestTcxLapElementOrdering:
+    """Verify Lap children follow ActivityLap_t XSD sequence:
+    TotalTimeSeconds, DistanceMeters, MaximumSpeed, Calories,
+    AverageHeartRateBpm, MaximumHeartRateBpm, Intensity, Cadence,
+    TriggerMethod, Track, Notes, Extensions
+    """
+
+    def test_lap_children_order_with_hr(self):
+        detail = _tcx_detail()
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        lap = root.find(".//tcx:Lap", TCX_NS_MAP)
+        children = _tcx_child_local_names(lap)
+        assert children == [
+            "TotalTimeSeconds", "DistanceMeters", "Calories",
+            "AverageHeartRateBpm", "MaximumHeartRateBpm",
+            "Intensity", "TriggerMethod", "Track",
+        ]
+
+    def test_lap_children_order_without_hr(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=None, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        lap = root.find(".//tcx:Lap", TCX_NS_MAP)
+        children = _tcx_child_local_names(lap)
+        assert children == [
+            "TotalTimeSeconds", "DistanceMeters", "Calories",
+            "Intensity", "TriggerMethod", "Track",
+        ]
+
+
+class TestTcxTrackpointElementOrdering:
+    """Verify Trackpoint children follow Trackpoint_t XSD sequence:
+    Time, Position, AltitudeMeters, DistanceMeters,
+    HeartRateBpm, Cadence, SensorState, Extensions
+    """
+
+    def test_full_trackpoint_order_biking(self):
+        detail = _tcx_detail(sport_type=6)  # Biking
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        tp = root.find(".//tcx:Trackpoint", TCX_NS_MAP)
+        children = _tcx_child_local_names(tp)
+        # Biking: base Cadence, Extensions has Speed only
+        assert children == ["Time", "Position", "AltitudeMeters", "DistanceMeters", "HeartRateBpm", "Cadence", "Extensions"]
+
+    def test_full_trackpoint_order_running(self):
+        detail = _tcx_detail(sport_type=1)  # Running
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        tp = root.find(".//tcx:Trackpoint", TCX_NS_MAP)
+        children = _tcx_child_local_names(tp)
+        # Running: no base Cadence, Extensions has Speed + RunCadence
+        assert children == ["Time", "Position", "AltitudeMeters", "DistanceMeters", "HeartRateBpm", "Extensions"]
+
+
+class TestTcxHeartRateClamping:
+    def test_trackpoint_hr_clamped_to_255(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        val = root.find(".//tcx:Trackpoint/tcx:HeartRateBpm/tcx:Value", TCX_NS_MAP)
+        assert val is not None
+        assert int(val.text) == 255
+
+    def test_trackpoint_hr_zero_omitted(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=0, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        val = root.find(".//tcx:Trackpoint/tcx:HeartRateBpm", TCX_NS_MAP)
+        assert val is None
+
+    def test_lap_avg_hr_clamped(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=None, longitude=None, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        val = root.find(".//tcx:Lap/tcx:AverageHeartRateBpm/tcx:Value", TCX_NS_MAP)
+        assert val is not None
+        assert int(val.text) == 255
+
+    def test_lap_max_hr_clamped(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=None, longitude=None, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        val = root.find(".//tcx:Lap/tcx:MaximumHeartRateBpm/tcx:Value", TCX_NS_MAP)
+        assert val is not None
+        assert int(val.text) == 255
+
+
+class TestTcxCadenceClamping:
+    def test_bike_cadence_clamped_to_254(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=260, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=6, track_points=points)  # Biking
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
+        assert cad is not None
+        assert int(cad.text) == 254
+
+    def test_run_cadence_clamped_in_extension(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=260, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=1, track_points=points)  # Running
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        # Base Cadence should NOT be present for running
+        base_cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
+        assert base_cad is None
+        # RunCadence in Extensions
+        run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        assert run_cad is not None
+        assert int(run_cad.text) == 254
+
+
+class TestTcxCoordinateValidation:
+    def test_invalid_coords_excluded_from_tcx(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+            TrackPoint(timestamp=1717200060, latitude=91.0, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+            TrackPoint(timestamp=1717200120, latitude=1.31, longitude=200.0, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        positions = root.findall(".//tcx:Trackpoint/tcx:Position", TCX_NS_MAP)
+        assert len(positions) == 1
+        lat = positions[0].find("tcx:LatitudeDegrees", TCX_NS_MAP)
+        assert lat.text == "1.30000000"
+
+
+class TestTcxCaloriesBounding:
+    def test_clamp_calories_normal(self):
+        assert _clamp_calories(400) == 400
+
+    def test_clamp_calories_zero(self):
+        assert _clamp_calories(0) == 0
+
+    def test_clamp_calories_max_valid(self):
+        assert _clamp_calories(65535) == 65535
+
+    def test_clamp_calories_over_max(self):
+        assert _clamp_calories(70000) == 65535
+
+    def test_clamp_calories_negative(self):
+        assert _clamp_calories(-5) == 0
+
+    def test_calories_clamped_in_tcx_output(self):
+        detail = _tcx_detail(calories=70000)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        cal = root.find(".//tcx:Lap/tcx:Calories", TCX_NS_MAP)
+        assert int(cal.text) == 65535
+
+
+class TestTcxSportAttribute:
+    def test_running_sport(self):
+        detail = _tcx_detail(sport_type=1)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        assert activity.attrib["Sport"] == "Running"
+
+    def test_biking_sport(self):
+        detail = _tcx_detail(sport_type=6)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        assert activity.attrib["Sport"] == "Biking"
+
+    def test_hiking_maps_to_other(self):
+        detail = _tcx_detail(sport_type=15)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        assert activity.attrib["Sport"] == "Other"
+
+    def test_swimming_maps_to_other(self):
+        detail = _tcx_detail(sport_type=9)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        assert activity.attrib["Sport"] == "Other"
+
+
+class TestTcxCreatorElement:
+    def test_creator_present(self):
+        detail = _tcx_detail()
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
+        assert creator is not None
+
+    def test_creator_barometer_hint_with_altitude(self):
+        detail = _tcx_detail()  # default points have altitude
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        name = root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP)
+        assert name.text == "Mi Fitness Sync with barometer"
+
+    def test_creator_no_barometer_without_altitude(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=120, cadence=None, raw_point={}),
+        ]
+        detail = _tcx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        name = root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP)
+        assert name.text == "Mi Fitness Sync"
+
+    def test_creator_has_device_type(self):
+        detail = _tcx_detail()
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
+        assert creator.attrib.get("{http://www.w3.org/2001/XMLSchema-instance}type") == "Device_t"
+
+    def test_creator_has_required_children(self):
+        detail = _tcx_detail()
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
+        children = _tcx_child_local_names(creator)
+        assert children == ["Name", "UnitId", "ProductID", "Version"]
+
+    def test_creator_after_lap(self):
+        """Creator must appear after Lap (and optional Notes/Training) in Activity_t sequence."""
+        detail = _tcx_detail()
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        children = _tcx_child_local_names(activity)
+        assert children == ["Id", "Lap", "Creator"]
+
+
+class TestTcxRunningCadence:
+    def test_running_cadence_in_extensions(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=1, track_points=points)  # Running
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        assert run_cad is not None
+        assert int(run_cad.text) == 160
+
+    def test_running_no_base_cadence(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=1, track_points=points)  # Running
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        base_cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
+        assert base_cad is None
+
+    def test_biking_uses_base_cadence(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=80, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=6, track_points=points)  # Biking
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        base_cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
+        assert base_cad is not None
+        assert int(base_cad.text) == 80
+        # No RunCadence for biking
+        run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        assert run_cad is None
+
+    def test_running_speed_and_cadence_in_same_tpx(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=2.5, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=1, track_points=points)  # Running
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        tpx = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX", ALL_TCX_NS)
+        assert tpx is not None
+        tpx_children = _tcx_child_local_names(tpx)
+        assert tpx_children == ["Speed", "RunCadence"]

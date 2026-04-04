@@ -125,32 +125,46 @@ def render_tcx(detail: ActivityDetail) -> bytes:
         },
     )
     activities = ET.SubElement(root, f"{{{TCX_NS}}}Activities")
-    activity = ET.SubElement(activities, f"{{{TCX_NS}}}Activity", {"Sport": _tcx_sport(detail.activity.sport_type)})
+    sport = _tcx_sport(detail.activity.sport_type)
+    activity = ET.SubElement(activities, f"{{{TCX_NS}}}Activity", {"Sport": sport})
     ET.SubElement(activity, f"{{{TCX_NS}}}Id").text = _isoformat_utc(detail.start_time)
+    is_running = sport == "Running"
 
+    # ActivityLap_t XSD sequence:
+    # TotalTimeSeconds, DistanceMeters, MaximumSpeed, Calories,
+    # AverageHeartRateBpm, MaximumHeartRateBpm, Intensity, Cadence,
+    # TriggerMethod, Track, Notes, Extensions
     lap = ET.SubElement(activity, f"{{{TCX_NS}}}Lap", {"StartTime": _isoformat_utc(detail.start_time)})
     ET.SubElement(lap, f"{{{TCX_NS}}}TotalTimeSeconds").text = _format_decimal(float(detail.total_duration_seconds))
     ET.SubElement(lap, f"{{{TCX_NS}}}DistanceMeters").text = _format_decimal(detail.total_distance_meters)
-    ET.SubElement(lap, f"{{{TCX_NS}}}Calories").text = str(detail.total_calories or 0)
-    ET.SubElement(lap, f"{{{TCX_NS}}}Intensity").text = "Active"
-    ET.SubElement(lap, f"{{{TCX_NS}}}TriggerMethod").text = "Manual"
+    ET.SubElement(lap, f"{{{TCX_NS}}}Calories").text = str(_clamp_calories(detail.total_calories or 0))
 
     average_heart_rate = _average_heart_rate(export_points)
     if average_heart_rate is not None:
-        average_node = ET.SubElement(lap, f"{{{TCX_NS}}}AverageHeartRateBpm")
-        ET.SubElement(average_node, f"{{{TCX_NS}}}Value").text = str(average_heart_rate)
+        clamped_avg_hr = _clamp_heart_rate(average_heart_rate)
+        if clamped_avg_hr is not None:
+            average_node = ET.SubElement(lap, f"{{{TCX_NS}}}AverageHeartRateBpm")
+            ET.SubElement(average_node, f"{{{TCX_NS}}}Value").text = str(clamped_avg_hr)
 
     maximum_heart_rate = _maximum_heart_rate(export_points)
     if maximum_heart_rate is not None:
-        maximum_node = ET.SubElement(lap, f"{{{TCX_NS}}}MaximumHeartRateBpm")
-        ET.SubElement(maximum_node, f"{{{TCX_NS}}}Value").text = str(maximum_heart_rate)
+        clamped_max_hr = _clamp_heart_rate(maximum_heart_rate)
+        if clamped_max_hr is not None:
+            maximum_node = ET.SubElement(lap, f"{{{TCX_NS}}}MaximumHeartRateBpm")
+            ET.SubElement(maximum_node, f"{{{TCX_NS}}}Value").text = str(clamped_max_hr)
+
+    ET.SubElement(lap, f"{{{TCX_NS}}}Intensity").text = "Active"
+    ET.SubElement(lap, f"{{{TCX_NS}}}TriggerMethod").text = "Manual"
 
     track = ET.SubElement(lap, f"{{{TCX_NS}}}Track")
     for point in export_points:
+        # Trackpoint_t XSD sequence:
+        # Time, Position, AltitudeMeters, DistanceMeters,
+        # HeartRateBpm, Cadence, SensorState, Extensions
         track_point = ET.SubElement(track, f"{{{TCX_NS}}}Trackpoint")
         ET.SubElement(track_point, f"{{{TCX_NS}}}Time").text = _isoformat_utc(point.timestamp)
 
-        if point.latitude is not None and point.longitude is not None:
+        if _is_valid_coordinate(point.latitude, point.longitude):
             position = ET.SubElement(track_point, f"{{{TCX_NS}}}Position")
             ET.SubElement(position, f"{{{TCX_NS}}}LatitudeDegrees").text = _format_coordinate(point.latitude)
             ET.SubElement(position, f"{{{TCX_NS}}}LongitudeDegrees").text = _format_coordinate(point.longitude)
@@ -161,17 +175,30 @@ def render_tcx(detail: ActivityDetail) -> bytes:
         if point.distance_meters is not None:
             ET.SubElement(track_point, f"{{{TCX_NS}}}DistanceMeters").text = _format_decimal(point.distance_meters)
 
-        if point.heart_rate is not None:
+        clamped_hr = _clamp_heart_rate(point.heart_rate) if point.heart_rate is not None else None
+        if clamped_hr is not None:
             heart_rate = ET.SubElement(track_point, f"{{{TCX_NS}}}HeartRateBpm")
-            ET.SubElement(heart_rate, f"{{{TCX_NS}}}Value").text = str(point.heart_rate)
+            ET.SubElement(heart_rate, f"{{{TCX_NS}}}Value").text = str(clamped_hr)
 
-        if point.cadence is not None:
-            ET.SubElement(track_point, f"{{{TCX_NS}}}Cadence").text = str(point.cadence)
+        clamped_cad = _clamp_cadence(point.cadence) if point.cadence is not None else None
+        has_speed = point.speed_mps is not None
+        has_run_cad = is_running and clamped_cad is not None
+        has_bike_cad = not is_running and clamped_cad is not None
 
-        if point.speed_mps is not None:
+        if has_bike_cad:
+            ET.SubElement(track_point, f"{{{TCX_NS}}}Cadence").text = str(clamped_cad)
+
+        if has_speed or has_run_cad:
             extensions = ET.SubElement(track_point, f"{{{TCX_NS}}}Extensions")
             tpx = ET.SubElement(extensions, f"{{{TCX_ACTIVITY_NS}}}TPX")
-            ET.SubElement(tpx, f"{{{TCX_ACTIVITY_NS}}}Speed").text = _format_decimal(point.speed_mps)
+            if has_speed:
+                ET.SubElement(tpx, f"{{{TCX_ACTIVITY_NS}}}Speed").text = _format_decimal(point.speed_mps)
+            if has_run_cad:
+                ET.SubElement(tpx, f"{{{TCX_ACTIVITY_NS}}}RunCadence").text = str(clamped_cad)
+
+    # Activity_t XSD sequence: Id, Lap+, Notes?, Training?, Creator?, Extensions?
+    has_elevation = any(p.altitude_meters is not None for p in export_points)
+    _tcx_creator(activity, has_elevation)
 
     return _xml_bytes(root)
 
@@ -552,6 +579,27 @@ def _tcx_sport(sport_type: int | None) -> str:
     if sport_type in {6, 7, 206, 324}:
         return "Biking"
     return "Other"
+
+
+def _tcx_creator(activity_element: ET.Element, has_elevation: bool) -> None:
+    """Append a Creator element to the Activity. Includes barometer hint when altitude data is present."""
+    creator_name = "Mi Fitness Sync with barometer" if has_elevation else "Mi Fitness Sync"
+    creator = ET.SubElement(
+        activity_element,
+        f"{{{TCX_NS}}}Creator",
+        {f"{{{XML_SCHEMA_INSTANCE_NS}}}type": "Device_t"},
+    )
+    ET.SubElement(creator, f"{{{TCX_NS}}}Name").text = creator_name
+    ET.SubElement(creator, f"{{{TCX_NS}}}UnitId").text = "0"
+    ET.SubElement(creator, f"{{{TCX_NS}}}ProductID").text = "0"
+    version = ET.SubElement(creator, f"{{{TCX_NS}}}Version")
+    ET.SubElement(version, f"{{{TCX_NS}}}VersionMajor").text = "0"
+    ET.SubElement(version, f"{{{TCX_NS}}}VersionMinor").text = "0"
+
+
+def _clamp_calories(value: int) -> int:
+    """Clamp to xsd:unsignedShort [0, 65535]."""
+    return max(0, min(65535, value))
 
 
 def _xml_bytes(root: ET.Element) -> bytes:
