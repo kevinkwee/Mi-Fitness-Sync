@@ -215,8 +215,8 @@ The `SportBasicReport` JSON response contains both `sport_type` and `proto_type`
 
 | Field | Role | Example |
 |---|---|---|
-| `sport_type` | Human-readable category identifier | 22 = strength_training |
-| `proto_type` | Binary protocol type; used for FDS data identification and parser dispatch | 28 = strength training protocol |
+| `sport_type` | Human-readable category identifier | 308 = `STRENGTH_TRAINING` |
+| `proto_type` | Binary protocol type; used for FDS data identification and parser dispatch | 8 = Free Training |
 
 ### CRITICAL: sportType in FitnessDataId comes from proto_type
 
@@ -263,6 +263,336 @@ This is the `"timezone"` field inside the report payload, in 15-minute increment
 
 ---
 
+## Sport Type Constants
+
+### Class: `com.xiaomi.fit.data.common.data.annotation.FitnessSportType`
+
+`FitnessSportType` is a Kotlin annotation (`@Retention(SOURCE)`) whose companion object defines **all** `sport_type` integer constants used by the Mi Fitness API and Android app. It also exposes `getSportRes(sportType)` which maps each constant to a localized display name and icon resource.
+
+`SportBasicReport` carries the `sport_type` value in a field serialized as `"sport_type"` in JSON:
+
+```java
+@SerializedName("sport_type")
+private int sportType;
+```
+
+### Core Sport Types (1–21)
+
+Core sport types have named constants in `FitnessSportType` and correspond 1-to-1 with their `proto_type` counterparts for FDS binary formatting. Every core sport type has a dedicated binary parser and data validity configuration.
+
+> **Note:** Throughout the tables below, the **Label** column contains English shorthand inferred from the Java constant names (e.g., `STRENGTH_TRAINING` → "Strength Training"). These are not recovered display strings — the actual localized names are in Android resource XML files behind obfuscated IDs; see [Sport Name Resolution](#sport-name-resolution) and [Decompilation Gaps](#decompilation-gaps).
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 0 | `NONE` | No sport / unset |
+| 1 | `RUNNING_OUTDOOR` | Outdoor Running |
+| 2 | `HEALTH_WALKING_OUTDOOR` | Outdoor Walking |
+| 3 | `RUNNING_INDOOR` | Indoor Running (Treadmill) |
+| 4 | `MOUNTAINEERING` | Mountaineering |
+| 5 | `CROSS_COUNTRY` | Trail Running / Cross Country |
+| 6 | `BIKING_OUTDOOR` | Outdoor Cycling |
+| 7 | `BIKING_INDOOR` | Indoor Cycling |
+| 8 | `SPORT_FREE_TRAINING` | Free Training |
+| 9 | `SWIMMING_POOL` | Pool Swimming |
+| 10 | `SWIMMING_OPEN_WATER` | Open Water Swimming |
+| 11 | `ELLIPTICAL_MACHINE` | Elliptical Machine |
+| 12 | `YOGA` | Yoga |
+| 13 | `ROWING_MACHINE` | Rowing Machine |
+| 14 | `ROPE_SKIPPING` | Jump Rope |
+| 15 | `HIKING_OUTDOOR` | Hiking |
+| 16 | `HIGH_INTERVAL_TRAINING` | HIIT |
+| 17 | `TRIATHLON` | Triathlon |
+| 19 | `BASKETBALL` | Basketball |
+| 20 | `GOLF` | Golf |
+| 21 | `SKI` | Skiing (Downhill) |
+
+Values 18, 22–25 exist in the `proto_type` space (Ball Sports, Outdoor Step Sports, Outdoor No-Step Sports, Rock Climbing, Diving) but have **no named constant** in `FitnessSportType`. `FitnessSportTypeUtils.supportSport()` accepts 1–24 and the somatosensory game types 810 and 812.
+
+### Extended Sport Types — Water Sports (100–118)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 100 | `SAIL_BOAT` | Sailing |
+| 101 | `PADDLE_BOARD` | Paddle Board |
+| 102 | `WATER_POLO` | Water Polo |
+| 103 | `WATER_SPORTS` | Water Sports (Generic) |
+| 104 | `WATER_SKIING` | Water Skiing |
+| 105 | `KAYAKING` | Kayaking |
+| 106 | `KAYAK_RAFTING` | Kayak Rafting |
+| 107 | `BOATING` | Boating |
+| 108 | `MOTOR_BOAT` | Motor Boat |
+| 109 | `FIN_SWIMMING` | Fin Swimming |
+| 110 | `DIVING` | Diving |
+| 111 | `ARTISTIC_SWIMMING` | Artistic/Synchronized Swimming |
+| 112 | `SNORKELING` | Snorkeling |
+| 113 | `KITE_SURFING` | Kite Surfing |
+| 114 | `INDOOR_SURFING` | Indoor Surfing |
+| 115 | `DRAGON_BOATS` | Dragon Boats |
+| 116 | `FREED_DIVING` | Freediving |
+| 117 | `RECREATIONAL_SCUBA_DIVING` | Recreational Scuba Diving |
+| 118 | `INSTRUMENT_DIVING` | Instrument Diving |
+
+### Extended Sport Types — Adventure & Outdoor (200–207)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 200 | `ROCK_CLIMBING` | Rock Climbing (Generic) |
+| 201 | `SKATE_BOARD` | Skateboarding |
+| 202 | `ROLLER_SKATING` | Roller Skating |
+| 203 | `PARKOUR` | Parkour |
+| 204 | `BEACH_BUGGY` | Beach Buggy |
+| 205 | `PARAGLIDING` | Paragliding |
+| 206 | `BIKE_MOTOCROSS` | BMX / Bike Motocross |
+| 207 | `HEEL_TO_TOE_WALK` | Nordic / Heel-to-Toe Walking |
+
+### Extended Sport Types — Indoor Fitness (300–334, 399)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 300 | `CLIMBING_MACHINE` | Climbing Machine |
+| 301 | `CLIMBING_STAIRS` | Stair Climbing |
+| 302 | `STEPPER` | Stepper |
+| 303 | `CORE_TRAINING` | Core Training |
+| 304 | `FLEXIBILITY_TRAINING` | Flexibility Training |
+| 305 | `PILATES` | Pilates |
+| 306 | `GYMNASTICS` | Gymnastics |
+| 307 | `STRETCH` | Stretching |
+| 308 | `STRENGTH_TRAINING` | Strength Training |
+| 309 | `CROSS_TRAINING` | Cross Training |
+| 310 | `AEROBICS` | Aerobics |
+| 311 | `PHYSICAL_TRAINING` | Physical Training |
+| 312 | `WALL_BALL` | Wall Ball |
+| 313 | `DUMBBELL_TRAINING` | Dumbbell Training |
+| 314 | `BARBELL_TRAINING` | Barbell Training |
+| 315 | `WEIGHT_LIFTING` | Weight Lifting |
+| 316 | `DEAD_LIFT` | Deadlift |
+| 317 | `BOBBY_JUMP` | Burpee / Bobby Jump |
+| 318 | `SIT_UPS` | Sit-Ups |
+| 319 | `FUNCTIONAL_TRAINING` | Functional Training |
+| 320 | `UPPER_LIMB_TRAINING` | Upper Limb Training |
+| 321 | `LOWER_LIMB_TRAINING` | Lower Limb Training |
+| 322 | `WAIST_ABDOMEN_TRAINING` | Waist & Abdomen Training |
+| 323 | `BACK_TRAINING` | Back Training |
+| 324 | `SPINNING` | Spinning |
+| 325 | `STROLLER` | Stroller |
+| 326 | `STEP_TRAINING` | Step Training |
+| 327 | `HIGH_BAR` | High Bar / Pull-Up Bar |
+| 328 | `PARALLEL_BARS` | Parallel Bars |
+| 329 | `GROUP_GYMNASTICS` | Group Gymnastics |
+| 330 | `KICKBOXING` | Kickboxing |
+| 331 | `BATTLE_ROPE` | Battle Rope |
+| 332 | `MIXED_AEROBIC` | Mixed Aerobic |
+| 333 | `WALK_INDOOR` | Indoor Walking |
+| 334 | `ABDWHEEL_TRAINING` | Ab Wheel Training |
+| 399 | `INDOOR_FIT` | Indoor Fitness (Generic) |
+
+### Extended Sport Types — Dance (400–412, 499)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 400 | `SQUARE_DANCE` | Square Dance |
+| 401 | `BELLY_DANCE` | Belly Dance |
+| 402 | `BALLET` | Ballet |
+| 403 | `STREET_DANCE` | Street Dance |
+| 404 | `ZUMBA` | Zumba |
+| 405 | `NATIONAL_DANCE` | Folk / National Dance |
+| 406 | `JAZZ` | Jazz Dance |
+| 407 | `LATIN_DANCE` | Latin Dance |
+| 408 | `HIP_HOP_DANCE` | Hip-Hop Dance |
+| 409 | `POLE_DANCE` | Pole Dance |
+| 410 | `BREAK_DANCE` | Break Dance |
+| 411 | `BALLROOM_DANCE` | Ballroom Dance |
+| 412 | `MODERN_DANCE` | Modern Dance |
+| 499 | `DANCE` | Dance (Generic) |
+
+### Extended Sport Types — Martial Arts (500–511)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 500 | `BOXING` | Boxing |
+| 501 | `WRESTLING` | Wrestling |
+| 502 | `MARTIAL_ARTS` | Martial Arts |
+| 503 | `TAICHI` | Tai Chi |
+| 504 | `MUAY_THAI` | Muay Thai |
+| 505 | `JUDO` | Judo |
+| 506 | `TAEKWONDO` | Taekwondo |
+| 507 | `KARATE` | Karate |
+| 508 | `FREE_SPARRING` | Free Sparring |
+| 509 | `KENDO` | Kendo |
+| 510 | `FENCING` | Fencing |
+| 511 | `JUJITSU` | Jujitsu |
+
+### Extended Sport Types — Ball Sports (600–627)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 600 | `FOOTBALL` | Football / Soccer |
+| 601 | `HUNDRED_BASKETBALL` | Basketball (Alternative) |
+| 602 | `VOLLEYBALL` | Volleyball |
+| 603 | `BASEBALL` | Baseball |
+| 604 | `SOFTBALL` | Softball |
+| 605 | `RUGBY` | Rugby |
+| 606 | `HOCKEY` | Hockey |
+| 607 | `PING_PONG` | Table Tennis |
+| 608 | `BADMINTON` | Badminton |
+| 609 | `TENNIS` | Tennis |
+| 610 | `CRICKET` | Cricket |
+| 611 | `HANDBALL` | Handball |
+| 612 | `BOWLING` | Bowling |
+| 613 | `SQUASH` | Squash |
+| 614 | `BILLIARDS` | Billiards |
+| 615 | `SHUTTLECOCK` | Shuttlecock |
+| 616 | `BEACH_FOOTBALL` | Beach Football |
+| 617 | `BEACH_VOLLEYBALL` | Beach Volleyball |
+| 618 | `SEPAKTAKRAW` | Sepak Takraw |
+| 619 | `HUNDRED_GOLF` | Golf (Alternative) |
+| 620 | `TABLE_FOOTBALL` | Table Football / Foosball |
+| 621 | `INDOOR_FOOTBALL` | Indoor Football / Futsal |
+| 622 | `SAND_BAG` | Punching Bag |
+| 623 | `BOCCE_VOLO` | Bocce |
+| 624 | `JAI_BALL` | Jai Alai |
+| 625 | `DOOR_KICK` | Door Kick |
+| 626 | `DODGE_BALL` | Dodgeball |
+| 627 | `SHUFFLE_BALL` | Shuffleboard |
+
+### Extended Sport Types — Snow & Ice (700–710)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 700 | `OUTDOOR_SKATING` | Outdoor Skating |
+| 701 | `CURLING` | Curling |
+| 702 | `SNOW_SPORTS` | Snow Sports (Generic) |
+| 703 | `SNOW_MOBILE` | Snowmobile |
+| 704 | `PUCK` | Ice Hockey / Puck |
+| 705 | `SNOW_CAR` | Snow Car |
+| 706 | `SLED` | Sled |
+| 707 | `INDOOR_SKATING` | Indoor Skating |
+| 708 | `SNOW_BOARD` | Snowboarding |
+| 709 | `SKIING` | Skiing (Cross-Country / General) |
+| 710 | `CROSS_COUNTRY_SKIING` | Cross-Country Skiing |
+
+### Extended Sport Types — Miscellaneous (800–812)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 800 | `ARCHERY` | Archery |
+| 801 | `DARTS` | Darts |
+| 802 | `HORSE_RIDING` | Horse Riding |
+| 803 | `TUG_OF_WAR` | Tug of War |
+| 804 | `HULA_HOOP` | Hula Hoop |
+| 805 | `FLY_KITE` | Kite Flying |
+| 806 | `FISHING` | Fishing |
+| 807 | `FRISBEE` | Frisbee |
+| 808 | `KICK_SHUTTLECOCK` | Kick Shuttlecock |
+| 809 | `SWING` | Swing |
+| 810 | `SOMATOSENSORY_GAME` | Somatosensory Game |
+| 811 | `E_SPORTS` | E-Sports |
+| 812 | `NINTENDO_JUSTDANCE` | Nintendo Just Dance |
+
+### Extended Sport Types — Board Games (900–904)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 900 | `INTERNATIONAL_CHESS` | Chess |
+| 901 | `CHECKERS` | Checkers |
+| 902 | `GO` | Go (Weiqi) |
+| 903 | `BRIDGE` | Bridge |
+| 904 | `BOARD_GAME` | Board Game |
+
+### Extended Sport Types — Climbing (1000–1001)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 1000 | `INDOOR_ROCK_CLIMBING` | Indoor Rock Climbing |
+| 1001 | `OUTDOOR_ROCK_CLIMBING` | Outdoor Rock Climbing |
+
+### Extended Sport Types — Special (10000+)
+
+| sport_type | Constant | Label |
+|---|---|---|
+| 10000 | `EQUESTRIAN` | Equestrian |
+| 10001 | `ATHLETICS` | Athletics |
+| 10002 | `CAR_RACING` | Car Racing |
+
+### sport_type vs proto_type Mapping
+
+The API returns **both** `sport_type` and `proto_type` as independent fields in the `SportBasicReport` JSON. They are not derived from each other in the app; the server provides both values.
+
+For the core sport types (1–21), the `sport_type` and `proto_type` values often coincide:
+
+| sport_type | proto_type | Label |
+|---|---|---|
+| 1 | 1 | Outdoor Running |
+| 2 | 4 | Outdoor Walking |
+| 3 | 3 | Indoor Running |
+| 4 | 5 | Mountaineering / Trail |
+| 5 | 5 | Cross Country / Trail |
+| 6 | 6 | Outdoor Cycling |
+| 7 | 7 | Indoor Cycling |
+| 8 | 8 | Free Training |
+| 9 | 9 | Pool Swimming |
+| 10 | 10 | Open Water Swimming |
+| 11 | 11 | Elliptical |
+| 12 | 12 | Yoga |
+| 13 | 13 | Rowing Machine |
+| 14 | 14 | Jump Rope |
+| 15 | 15 | Hiking |
+| 16 | 16 | HIIT |
+| 17 | 17 | Triathlon |
+| 19 | 19 | Basketball |
+| 20 | 20 | Golf |
+| 21 | 21 | Skiing |
+
+For extended sport types (100+), the server maps them to one of the core `proto_type` values (1–25) for binary parser dispatch. The exact mapping for each extended type is determined server-side and is not present in the decompiled client code.
+
+### FitnessSportTypeUtils
+
+`FitnessSportTypeUtils` (`com.xiaomi.fit.data.common.data.sport.util`) provides utility methods that classify sport types for display logic. Key methods:
+
+| Method | Input | Logic |
+|---|---|---|
+| `supportSport(sportType)` | `sport_type` | Returns `true` for core types 1–24, plus 810 and 812 |
+| `supportGpsSport(sportType)` | `proto_type` | GPS-capable: 1, 2, 4, 5, 6, 10, 15, 17, 21–25 |
+| `supportGpsSport(SportBasicReport)` | Both | Checks `sport_type == 1001` (Outdoor Rock Climbing) OR `commonGpsSport(proto_type)` |
+| `supportPaceSport(sportType)` | `sport_type` | Pace display: 1, 2, 3, 207 |
+| `supportSpeedSport(sportType)` | `sport_type` | Speed display: 4, 5, 6, 15, 100, 105, 107, 115, 201, 202, 206, 333, 700, 708–710, 10000 |
+| `supportSensorSport(sportType)` | `sport_type` | External sensor: 1, 2, 3 |
+| `supportStepSensorSport(sportType)` | `sport_type` | Step sensor: 1, 2, 3, 8 |
+| `isGroupSport(sportType)` | `sport_type` | Group/set display: 13, 14, 16 |
+| `supportsDynamicTrace(sportType)` | `sport_type` | Live route trace: 1, 2, 4, 5, 6, 10, 17 |
+| `showSpeedAndDistance(sportType)` | `sport_type` | Speed+distance column: same as `supportSpeedSport` |
+
+Note: `supportGpsSport(int)` operates on `proto_type`, while `supportGpsSport(SportBasicReport)` first checks `sport_type` for value 1001 before falling through to `proto_type` check.
+
+### Sport Summary Protocol (sport_summary2.proto)
+
+The binary sport summary exchanged over BLE uses `TypeMessage` to encode the sport type:
+
+```protobuf
+message TypeMessage {
+  required uint32 type = 1;     /* sport_type base value */
+  optional uint32 subtype = 2;  /* 0=invalid, 1=auto-detect, 2=interval,
+                                   3=template, 4=course, 5=PHN */
+}
+```
+
+The `type` field carries the `sport_type` integer. The `subtype` field indicates the workout mode (standard, auto-detected, interval workout, training template, course-guided, or PHN-initiated).
+
+### Sport Name Resolution
+
+`FitnessSportType.Companion.getSportRes(sportType)` returns a `SportRes` object containing the localized display name string resource ID and the sport icon drawable resource ID. The method has a switch statement covering all 150+ sport types. In `ReportAdapter`:
+
+```java
+this.nameView.setText(AppUtil.getApp().getResources()
+    .getString(SportUtilsExtKt.getSportTypeStr(report.getSportType())));
+this.icon.setImageResource(ly5.m68619b(
+    SportUtilsExtKt.convertSportType(report.getSportType())));
+```
+
+The localized display names are in Android string resources (not in decompiled Java constants), resolved at runtime via `ResourceExtKt.getString()`. The actual text values are language-dependent and stored in `res/values-*/strings.xml`.
+
+---
+
 ## Sport Record Parser Dispatch
 
 ### getSportRecordParserInstance(sportType)
@@ -305,16 +635,6 @@ For sport reports (fileType=1), parser dispatch is separate. Notably, proto_type
 `FitnessDataValidity.getSportRecordValidityLen()` returns the expected `dataValid` byte count per sport type and version. Its switch statement covers proto_types 1–25, mirroring the parser dispatch table above.
 
 Of note: proto_types 8 (Free Training), 12 (Yoga), and 16 (HIIT) all share `getFreeTrainingRecordValidityLen()` for their validity length computation.
-
-### proto_type 28 (Strength Training) — Not Dispatched
-
-`getSportRecordParserInstance()` does **not** handle proto_type 28 — it falls through to `default → null`. `FitnessDataValidity.getSportRecordValidityLen()` returns `-1` for sport type 28. This decompiled APK version (v3.52.0i) predates the addition of strength training as a dedicated sport type.
-
-**Observed behavior (not verified from this decompiled source):**
-- Binary data for proto_type 28 activities successfully decodes using the `FreeTrainingRecordParser` format
-- The FreeTraining IT summary (the `it`-prefixed data structure in `SportRecord`, referenced as `ITSportDetailInfo` in `SportRecordConverter` and `getITSummaryDataType()` in `FreeTrainingRecordParser`; exact expansion not spelled out in the decompiled source) (v5+) includes `gymCourseActionTimes`, `gymCourseActionWeight`, `gymCourseActionId` — fields specifically designed for strength/gym workouts
-- Strength training is indoor, no GPS, no step counting — structurally identical to Free Training
-- A newer APK version likely adds explicit dispatch for proto_type 28
 
 ---
 
@@ -381,10 +701,10 @@ Relevant data classes:
 When the watch sends data over BLE, the app saves it locally via `FitnessFileUtils.getFDSDataFile(context, sid, dataId)`:
 
 ```
-{filesDir}/fitness/d{sid}/sport/p{proto_type}/{timestamp}_{version}_record
+{filesDir}/fitness/d{sid}/sport/p{tzIn15Min}/{timestamp}_{proto_type}_record
 ```
 
-Example: `d123456789/sport/p28/1700000002_8_record` — SID `123456789`, proto_type `28`, timestamp `1700000002`, version `8`.
+Example: `d123456789/sport/p28/1700000000_8_record` — SID `123456789`, timezone `28` (= UTC+7), timestamp `1700000000`, proto_type `8` (Free Training).
 
 The `dataIdFilePathIgnoreVersion` segment from `FitnessDataId` determines the subdirectory structure based on the data type, while `FitnessFileUtils` resolves the full path under the app's private files directory.
 
@@ -434,9 +754,9 @@ The following areas are partially or incompletely recovered:
 
 - **`FitnessFDSUploader` internal flow:** Key parts of the upload/download orchestration are in obfuscated classes. The suffix construction algorithm and AES decryption parameters are fully recovered, but intermediate error-handling and retry logic may have additional transformations not visible in the decompiled source.
 
-- **Binary parser coverage (proto_types > 25):** `FitnessDataParser.getSportRecordParserInstance()` and `FitnessDataValidity.getSportRecordValidityLen()` switch statements cover proto_types 1–25 only. Newer sport types (e.g., proto_type 28 for strength training) return `null` / `-1`, indicating the decompiled APK version (v3.52.0i) predates their explicit support.
+- **Binary parser coverage (proto_types > 25):** `FitnessDataParser.getSportRecordParserInstance()` and `FitnessDataValidity.getSportRecordValidityLen()` switch statements cover proto_types 1–25 only. Any proto_type above 25 returns `null` / `-1`, indicating the decompiled APK version (v3.52.0i) does not dispatch them to dedicated parsers.
 
-- **FDS file types beyond 0–3:** The primary sport record binary (fileType 0), sport report (fileType 1), GPS data (fileType 2), and recovery rate (fileType 3) paths are documented. The value 8 has been observed in local file naming (e.g., `1700000002_8_record`) but its purpose as a version byte vs. file type indicator and associated parser dispatch path are not fully recovered.
+- **FDS file types beyond 0–3:** The primary sport record binary (fileType 0), sport report (fileType 1), GPS data (fileType 2), and recovery rate (fileType 3) paths are documented. The file type enumeration in the decompiled source does not extend beyond 0–3.
 
 - **Route FDS path:** `FitnessFDSRequest.getRouteFDSUrl()` and `downloadRoute()` exist for a separate route data download flow, but the full request/response format is not recovered.
 
@@ -444,4 +764,8 @@ The following areas are partially or incompletely recovered:
 
 - **ECG filter processing:** `FitnessFDSDataGetter.getEcgRecordData()` applies `EcgFilterAlgo` post-processing after FDS download. The filter algorithm's internals are in native code.
 
-- **`FitnessDataId.dataIdFilePathIgnoreVersion`:** Referenced for local file path resolution but the property's exact derivation from the data ID fields is spread across several obfuscated helper methods.
+- **`FitnessDataId.dataIdFilePathIgnoreVersion`:** Produces the local file path from the data ID fields, excluding the version byte. The resolved format is `d{sid}/sport/p{tzIn15Min}/{timestamp}_{proto_type}_record` (see [Local File Naming](#local-file-naming-ble-sync)). The property's exact derivation is spread across several obfuscated helper methods.
+
+- **Extended sport_type → proto_type mapping:** The API returns both `sport_type` and `proto_type` independently. The server-side mapping from extended sport_type values (100+) to their corresponding proto_type is not present in the decompiled client code. Only empirical observation of API responses can establish the full mapping.
+
+- **Sport display name strings:** `FitnessSportType.Companion.getSportRes()` references obfuscated resource IDs (e.g., `t2k.f113702J1`) for display names. The actual localized strings are in Android resource XML files and cannot be directly correlated to specific English names from the decompiled Java alone.
