@@ -121,6 +121,11 @@ class MiFitnessActivitiesClient:
     def get_activity_detail(self, activity_or_id: Activity | str) -> ActivityDetail:
         activity = activity_or_id if isinstance(activity_or_id, Activity) else self.get_activity_by_id(activity_or_id)
         fds_downloads = self._try_get_fds_download_map(activity)
+        logger.debug(
+            "get_activity_detail: FDS download map has %d entries for %s",
+            len(fds_downloads),
+            activity.activity_id,
+        )
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
         fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
         fds_sport_report = self._try_download_fds_sport_report(activity, fds_downloads)
@@ -160,7 +165,8 @@ class MiFitnessActivitiesClient:
 
         raise MiFitnessError(
             f"Could not find a detail payload for activity {activity.activity_id} in Mi Fitness. "
-            "The workout summary exists, but neither the JSON detail nor FDS binary data was available."
+            "The workout summary exists, but neither the JSON detail nor FDS binary data was available. "
+            "Run with --verbose for diagnostics."
         )
 
     def _fetch_activity_page(
