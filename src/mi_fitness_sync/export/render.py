@@ -201,7 +201,7 @@ def render_fit(detail: ActivityDetail) -> bytes:
     file_id = FileIdMessage()
     file_id.type = FileType.ACTIVITY
     file_id.manufacturer = Manufacturer.STRAVA
-    file_id.product = 0
+    file_id.product = 102
     file_id.serial_number = 0
     file_id.time_created = end_timestamp_ms
     builder.add(file_id)
