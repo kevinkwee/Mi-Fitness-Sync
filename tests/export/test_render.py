@@ -9,9 +9,15 @@ from fit_tool.profile.messages.lap_message import LapMessage
 from fit_tool.profile.messages.session_message import SessionMessage
 from fit_tool.profile.profile_type import Sport, SubSport
 
+import pytest
+
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
-from mi_fitness_sync.export.render import render_export
+from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate
 from mi_fitness_sync.fds.sport_reports import SportReport
+
+GPX_NS = {"gpx": "http://www.topografix.com/GPX/1/1"}
+TPX_NS = {"gpxtpx": "http://www.garmin.com/xmlschemas/TrackPointExtension/v1"}
+ALL_NS = {**GPX_NS, **TPX_NS}
 
 
 def test_render_export_gpx_contains_track_points(sample_activity_detail):
@@ -511,3 +517,301 @@ class TestFitStridesAndStepLength:
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.total_strides is None
+
+
+# ---------------------------------------------------------------------------
+# GPX compliance tests
+# ---------------------------------------------------------------------------
+
+def _gpx_detail(
+    *,
+    track_points: list[TrackPoint] | None = None,
+) -> ActivityDetail:
+    activity = Activity(
+        activity_id="sid:key:1",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=1,
+        title="Test Run",
+        start_time=1717200000,
+        end_time=1717203600,
+        duration_seconds=3600,
+        distance_meters=5000,
+        calories=400,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={},
+        raw_report={},
+    )
+    if track_points is None:
+        track_points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=80, raw_point={}),
+            TrackPoint(timestamp=1717201800, latitude=1.31, longitude=103.81, altitude_meters=25.0, speed_mps=1.5, distance_meters=2500.0, heart_rate=140, cadence=85, raw_point={}),
+            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=1.3, distance_meters=5000.0, heart_rate=130, cadence=82, raw_point={}),
+        ]
+    return ActivityDetail(
+        activity=activity,
+        detail_sid="sid",
+        detail_key="key",
+        detail_time=1717200000,
+        zone_name="UTC",
+        zone_offset_seconds=0,
+        track_points=track_points,
+        samples=[],
+        sport_report=None,
+        recovery_rate=None,
+        raw_fitness_item={},
+        raw_detail={},
+    )
+
+
+class TestGpxSchemaLocation:
+    def test_garmin_xsd_url_is_correct(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        schema_loc = root.attrib["{http://www.w3.org/2001/XMLSchema-instance}schemaLocation"]
+        assert "http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" in schema_loc
+        # Must NOT contain the old broken path
+        assert "TrackPointExtension/v1/TrackPointExtensionv1.xsd" not in schema_loc
+
+    def test_gpx_schema_location_present(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        schema_loc = root.attrib["{http://www.w3.org/2001/XMLSchema-instance}schemaLocation"]
+        assert "http://www.topografix.com/GPX/1/1/gpx.xsd" in schema_loc
+
+
+class TestGpxCreator:
+    def test_creator_contains_barometer_hint_when_altitude_present(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        assert root.attrib["creator"] == "Mi Fitness Sync with barometer"
+
+    def test_creator_omits_barometer_hint_when_no_altitude(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=80, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        assert root.attrib["creator"] == "Mi Fitness Sync"
+
+    def test_creator_starts_with_app_name(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        assert root.attrib["creator"].startswith("Mi Fitness Sync")
+
+
+class TestGpxHeartRateAndCadenceBounds:
+    """Garmin TrackPointExtension v1 schema bounds:
+    - BeatsPerMinute_t: xsd:unsignedByte, minInclusive=1 → [1, 255]
+    - RevolutionsPerMinute_t: xsd:unsignedByte, maxInclusive=254 → [0, 254]
+    """
+
+    # -- _clamp_heart_rate unit tests --
+
+    def test_hr_normal_value(self):
+        assert _clamp_heart_rate(120) == 120
+
+    def test_hr_min_valid(self):
+        assert _clamp_heart_rate(1) == 1
+
+    def test_hr_max_valid(self):
+        assert _clamp_heart_rate(255) == 255
+
+    def test_hr_zero_returns_none(self):
+        assert _clamp_heart_rate(0) is None
+
+    def test_hr_negative_returns_none(self):
+        assert _clamp_heart_rate(-5) is None
+
+    def test_hr_over_255_clamped(self):
+        assert _clamp_heart_rate(300) == 255
+
+    # -- _clamp_cadence unit tests --
+
+    def test_cad_normal_value(self):
+        assert _clamp_cadence(80) == 80
+
+    def test_cad_zero_valid(self):
+        assert _clamp_cadence(0) == 0
+
+    def test_cad_max_valid(self):
+        assert _clamp_cadence(254) == 254
+
+    def test_cad_over_254_clamped(self):
+        assert _clamp_cadence(260) == 254
+
+    def test_cad_negative_clamped_to_zero(self):
+        assert _clamp_cadence(-5) == 0
+
+    # -- GPX integration tests --
+
+    def test_hr_clamped_in_gpx_output(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        hr = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS)
+        assert hr is not None
+        assert int(hr.text) == 255
+
+    def test_cadence_clamped_in_gpx_output(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=260, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
+        assert cad is not None
+        assert int(cad.text) == 254
+
+    def test_zero_hr_omitted_from_gpx(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=0, cadence=80, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        hr = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS)
+        assert hr is None
+        # cadence should still be present
+        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
+        assert cad is not None
+
+    def test_negative_hr_omitted_from_gpx(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=-10, cadence=80, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        hr = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS)
+        assert hr is None
+
+    def test_zero_cadence_emitted_in_gpx(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=120, cadence=0, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
+        assert cad is not None
+        assert int(cad.text) == 0
+
+
+class TestGpxCoordinateBoundsCheck:
+    def test_valid_coordinate(self):
+        assert _is_valid_coordinate(45.0, 90.0) is True
+
+    def test_none_latitude(self):
+        assert _is_valid_coordinate(None, 90.0) is False
+
+    def test_none_longitude(self):
+        assert _is_valid_coordinate(45.0, None) is False
+
+    def test_lat_too_high(self):
+        assert _is_valid_coordinate(91.0, 0.0) is False
+
+    def test_lat_too_low(self):
+        assert _is_valid_coordinate(-91.0, 0.0) is False
+
+    def test_lon_at_180_excluded(self):
+        assert _is_valid_coordinate(0.0, 180.0) is False
+
+    def test_lon_at_negative_180_included(self):
+        assert _is_valid_coordinate(0.0, -180.0) is True
+
+    def test_lat_boundary_90(self):
+        assert _is_valid_coordinate(90.0, 0.0) is True
+
+    def test_lat_boundary_neg_90(self):
+        assert _is_valid_coordinate(-90.0, 0.0) is True
+
+    def test_lon_just_under_180(self):
+        assert _is_valid_coordinate(0.0, 179.9999999) is True
+
+    def test_invalid_points_excluded_from_gpx(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=None, distance_meters=None, heart_rate=120, cadence=None, raw_point={}),
+            TrackPoint(timestamp=1717200060, latitude=91.0, longitude=103.8, altitude_meters=10.0, speed_mps=None, distance_meters=None, heart_rate=130, cadence=None, raw_point={}),
+            TrackPoint(timestamp=1717200120, latitude=1.31, longitude=200.0, altitude_meters=10.0, speed_mps=None, distance_meters=None, heart_rate=140, cadence=None, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        trkpts = root.findall(".//gpx:trkpt", GPX_NS)
+        assert len(trkpts) == 1
+        assert trkpts[0].attrib["lat"] == "1.30000000"
+
+    def test_all_invalid_coordinates_raises(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=91.0, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        with pytest.raises(Exception, match="GPS track points"):
+            render_export(detail, "gpx")
+
+
+class TestGpxElementOrdering:
+    """Verify all elements are in strict GPX 1.1 XSD sequence order."""
+
+    def _child_local_names(self, element: ET.Element) -> list[str]:
+        """Return local names (without namespace) for all child elements."""
+        return [child.tag.split("}")[-1] if "}" in child.tag else child.tag for child in element]
+
+    def test_gpx_root_children_order(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        children = self._child_local_names(root)
+        # gpxType: metadata, wpt*, rte*, trk*, extensions
+        assert children == ["metadata", "trk"]
+
+    def test_metadata_children_order(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        metadata = root.find("{http://www.topografix.com/GPX/1/1}metadata")
+        children = self._child_local_names(metadata)
+        # metadataType: name, desc, author, copyright, link*, time, keywords, bounds, extensions
+        assert children == ["name", "time"]
+
+    def test_trk_children_order(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        trk = root.find("{http://www.topografix.com/GPX/1/1}trk")
+        children = self._child_local_names(trk)
+        # trkType: name, cmt, desc, src, link*, number, type, extensions, trkseg*
+        assert children == ["name", "type", "trkseg"]
+
+    def test_trkpt_children_order(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        trkpt = root.find(".//gpx:trkpt", GPX_NS)
+        children = self._child_local_names(trkpt)
+        # wptType: ele, time, ..., extensions
+        assert children == ["ele", "time", "extensions"]
+
+    def test_trkpt_without_altitude_order(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=100.0, heart_rate=120, cadence=80, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        trkpt = root.find(".//gpx:trkpt", GPX_NS)
+        children = self._child_local_names(trkpt)
+        # ele omitted, so time then extensions
+        assert children == ["time", "extensions"]
+
+    def test_extension_children_order(self):
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        extensions = root.find(".//gpx:trkpt/gpx:extensions", GPX_NS)
+        children = self._child_local_names(extensions)
+        assert children == ["TrackPointExtension"]
+
+    def test_trackpoint_extension_children_order(self):
+        """hr must come before cad per Garmin TPE v1 XSD."""
+        detail = _gpx_detail()
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        tpe = root.find(".//gpxtpx:TrackPointExtension", TPX_NS)
+        children = self._child_local_names(tpe)
+        assert children == ["hr", "cad"]

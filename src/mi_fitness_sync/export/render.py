@@ -45,51 +45,64 @@ def render_export(detail: ActivityDetail, file_format: str, *, compress: bool = 
 
 
 def render_gpx(detail: ActivityDetail) -> bytes:
-    track_points = detail.track_points
-    if not track_points:
+    valid_points = [p for p in detail.track_points if _is_valid_coordinate(p.latitude, p.longitude)]
+    if not valid_points:
         raise MiFitnessError("This activity detail payload does not contain GPS track points, so GPX export is not available.")
 
-    ET.register_namespace("", "http://www.topografix.com/GPX/1/1")
+    _GPX = "http://www.topografix.com/GPX/1/1"
+    ET.register_namespace("", _GPX)
     ET.register_namespace("gpxtpx", GPX_TRACKPOINT_NS)
 
+    has_elevation = any(p.altitude_meters is not None for p in valid_points)
+    creator = "Mi Fitness Sync with barometer" if has_elevation else "Mi Fitness Sync"
+
     root = ET.Element(
-        "{http://www.topografix.com/GPX/1/1}gpx",
+        f"{{{_GPX}}}gpx",
         {
             "version": "1.1",
-            "creator": "Mi Fitness Sync",
+            "creator": creator,
             "{%s}schemaLocation" % XML_SCHEMA_INSTANCE_NS: (
-                "http://www.topografix.com/GPX/1/1 "
-                "http://www.topografix.com/GPX/1/1/gpx.xsd "
-                f"{GPX_TRACKPOINT_NS} {GPX_TRACKPOINT_NS}/TrackPointExtensionv1.xsd"
+                f"{_GPX} {_GPX}/gpx.xsd "
+                f"{GPX_TRACKPOINT_NS} http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd"
             ),
         },
     )
 
-    metadata = ET.SubElement(root, "{http://www.topografix.com/GPX/1/1}metadata")
-    ET.SubElement(metadata, "{http://www.topografix.com/GPX/1/1}name").text = detail.activity.title
-    ET.SubElement(metadata, "{http://www.topografix.com/GPX/1/1}time").text = _isoformat_utc(detail.start_time)
+    # gpxType sequence: metadata, wpt*, rte*, trk*, extensions
+    metadata = ET.SubElement(root, f"{{{_GPX}}}metadata")
+    # metadataType sequence: name, desc, author, copyright, link*, time, keywords, bounds, extensions
+    ET.SubElement(metadata, f"{{{_GPX}}}name").text = detail.activity.title
+    ET.SubElement(metadata, f"{{{_GPX}}}time").text = _isoformat_utc(detail.start_time)
 
-    track = ET.SubElement(root, "{http://www.topografix.com/GPX/1/1}trk")
-    ET.SubElement(track, "{http://www.topografix.com/GPX/1/1}name").text = detail.activity.title
-    segment = ET.SubElement(track, "{http://www.topografix.com/GPX/1/1}trkseg")
+    track = ET.SubElement(root, f"{{{_GPX}}}trk")
+    # trkType sequence: name, cmt, desc, src, link*, number, type, extensions, trkseg*
+    ET.SubElement(track, f"{{{_GPX}}}name").text = detail.activity.title
+    ET.SubElement(track, f"{{{_GPX}}}type").text = _tcx_sport(detail.activity.sport_type)
+    segment = ET.SubElement(track, f"{{{_GPX}}}trkseg")
 
-    for point in track_points:
+    for point in valid_points:
         track_point = ET.SubElement(
             segment,
-            "{http://www.topografix.com/GPX/1/1}trkpt",
+            f"{{{_GPX}}}trkpt",
             {"lat": _format_coordinate(point.latitude), "lon": _format_coordinate(point.longitude)},
         )
+        # wptType sequence: ele, time, ..., extensions
         if point.altitude_meters is not None:
-            ET.SubElement(track_point, "{http://www.topografix.com/GPX/1/1}ele").text = _format_decimal(point.altitude_meters)
-        ET.SubElement(track_point, "{http://www.topografix.com/GPX/1/1}time").text = _isoformat_utc(point.timestamp)
+            ET.SubElement(track_point, f"{{{_GPX}}}ele").text = _format_decimal(point.altitude_meters)
+        ET.SubElement(track_point, f"{{{_GPX}}}time").text = _isoformat_utc(point.timestamp)
 
-        if point.heart_rate is not None or point.cadence is not None:
-            extensions = ET.SubElement(track_point, "{http://www.topografix.com/GPX/1/1}extensions")
+        clamped_hr = _clamp_heart_rate(point.heart_rate) if point.heart_rate is not None else None
+        clamped_cad = _clamp_cadence(point.cadence) if point.cadence is not None else None
+        has_hr = clamped_hr is not None
+        has_cad = point.cadence is not None
+        if has_hr or has_cad:
+            extensions = ET.SubElement(track_point, f"{{{_GPX}}}extensions")
+            # TrackPointExtension_t sequence (v1): atemp, wtemp, depth, hr, cad, Extensions
             track_extension = ET.SubElement(extensions, f"{{{GPX_TRACKPOINT_NS}}}TrackPointExtension")
-            if point.heart_rate is not None:
-                ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}hr").text = str(point.heart_rate)
-            if point.cadence is not None:
-                ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}cad").text = str(point.cadence)
+            if has_hr:
+                ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}hr").text = str(clamped_hr)
+            if has_cad:
+                ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}cad").text = str(clamped_cad)
 
     return _xml_bytes(root)
 
@@ -560,6 +573,23 @@ _FIT_EPOCH_OFFSET = 631065600
 
 def _fit_local_timestamp(unix_epoch_seconds: int, zone_offset_seconds: int) -> int:
     return unix_epoch_seconds + zone_offset_seconds - _FIT_EPOCH_OFFSET
+
+
+def _is_valid_coordinate(lat: float | None, lon: float | None) -> bool:
+    if lat is None or lon is None:
+        return False
+    return -90.0 <= lat <= 90.0 and -180.0 <= lon < 180.0
+
+
+def _clamp_heart_rate(value: int) -> int | None:
+    """Clamp to Garmin BeatsPerMinute_t [1, 255]. Returns None if out of meaningful range."""
+    clamped = max(0, min(255, value))
+    return clamped if clamped >= 1 else None
+
+
+def _clamp_cadence(value: int) -> int:
+    """Clamp to Garmin RevolutionsPerMinute_t [0, 254]."""
+    return max(0, min(254, value))
 
 
 def _format_coordinate(value: float) -> str:
