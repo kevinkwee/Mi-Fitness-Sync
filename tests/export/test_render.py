@@ -229,138 +229,161 @@ def _outdoor_run_detail(
 
 
 class TestFitSportSubSportMapping:
+    # -- sport_type primary mapping --
+
     def test_outdoor_run_maps_to_running_street(self):
-        detail = _outdoor_run_detail(category="outdoor_run", raw_report={"proto_type": 1})
+        detail = _outdoor_run_detail(sport_type=1)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.STREET.value
 
+    def test_outdoor_walk_maps_to_walking(self):
+        detail = _outdoor_run_detail(sport_type=2)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.WALKING.value
+        assert session.sub_sport == SubSport.CASUAL_WALKING.value
+
     def test_treadmill_maps_to_running_treadmill(self):
-        detail = _outdoor_run_detail(category="indoor_run", raw_report={"proto_type": 3})
+        detail = _outdoor_run_detail(sport_type=3)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.TREADMILL.value
 
+    def test_trail_run_maps_to_running_trail(self):
+        detail = _outdoor_run_detail(sport_type=5)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.RUNNING.value
+        assert session.sub_sport == SubSport.TRAIL.value
+
     def test_indoor_cycling_maps_correctly(self):
-        detail = _outdoor_run_detail(category="indoor_cycle", raw_report={"proto_type": 7})
+        detail = _outdoor_run_detail(sport_type=7)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.CYCLING.value
         assert session.sub_sport == SubSport.INDOOR_CYCLING.value
 
+    def test_free_training_maps_to_training_generic(self):
+        detail = _outdoor_run_detail(sport_type=8)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.TRAINING.value
+        assert session.sub_sport == SubSport.GENERIC.value
+
     def test_pool_swimming_maps_to_lap_swimming(self):
-        detail = _outdoor_run_detail(category="pool_swim", raw_report={"proto_type": 9})
+        detail = _outdoor_run_detail(sport_type=9)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.SWIMMING.value
         assert session.sub_sport == SubSport.LAP_SWIMMING.value
 
     def test_hiking_maps_correctly(self):
-        detail = _outdoor_run_detail(category="hike", raw_report={"proto_type": 15})
+        detail = _outdoor_run_detail(sport_type=15)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.HIKING.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_strength_maps_to_training_strength(self):
-        detail = _outdoor_run_detail(category="strength_training")
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.TRAINING.value
-        assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
-
-    def test_strength_sport_type_308_uses_category_fallback(self):
-        detail = _outdoor_run_detail(
-            sport_type=308,
-            category="strength_training",
-        )
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.TRAINING.value
-        assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
-
-    def test_unknown_proto_type_falls_back_to_category(self):
-        detail = _outdoor_run_detail(sport_type=999, category="outdoor_run", raw_report={"proto_type": 999})
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.RUNNING.value
-        assert session.sub_sport == SubSport.GENERIC.value
-
-    def test_no_proto_type_falls_back_to_category(self):
-        detail = _outdoor_run_detail(sport_type=None, category="cycling")
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.CYCLING.value
-        assert session.sub_sport == SubSport.GENERIC.value
-
-    def test_sport_type_alone_does_not_match_proto_map(self):
-        detail = _outdoor_run_detail(sport_type=1, category="outdoor_run")
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.RUNNING.value
-        assert session.sub_sport == SubSport.GENERIC.value
-
-    def test_sport_type_22_does_not_alias_proto_type_22(self):
-        detail = _outdoor_run_detail(sport_type=22, category="strength_training")
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        # sport_type=22 should NOT hit proto_type map; falls back to category
-        assert session.sport == Sport.TRAINING.value
-        assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
-
-    def test_track_running_maps_to_running_track(self):
-        detail = _outdoor_run_detail(category="outdoor_run", raw_report={"proto_type": 2})
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.RUNNING.value
-        assert session.sub_sport == SubSport.TRACK.value
-
-    def test_outdoor_walk_maps_to_walking(self):
-        detail = _outdoor_run_detail(category="outdoor_walk", raw_report={"proto_type": 4})
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.WALKING.value
-        assert session.sub_sport == SubSport.CASUAL_WALKING.value
-
-    def test_trail_run_maps_to_running_trail(self):
-        detail = _outdoor_run_detail(category="trail_run", raw_report={"proto_type": 5})
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.RUNNING.value
-        assert session.sub_sport == SubSport.TRAIL.value
-
-    def test_free_training_maps_to_training_generic(self):
-        detail = _outdoor_run_detail(category="free_training", raw_report={"proto_type": 8})
-        fit = _parse_fit(render_export(detail, "fit").payload)
-        session = _fit_sessions(fit)[0]
-        assert session.sport == Sport.TRAINING.value
-        assert session.sub_sport == SubSport.GENERIC.value
-
-    def test_jump_rope_maps_to_cardio_training(self):
-        detail = _outdoor_run_detail(category="jump_rope", raw_report={"proto_type": 14})
+    def test_hiit_maps_to_cardio_training(self):
+        detail = _outdoor_run_detail(sport_type=16)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.TRAINING.value
         assert session.sub_sport == SubSport.CARDIO_TRAINING.value
 
-    def test_outdoor_step_sports_maps_to_generic(self):
-        detail = _outdoor_run_detail(category="outdoor_step", raw_report={"proto_type": 22})
+    def test_jump_rope_maps_to_cardio_training(self):
+        detail = _outdoor_run_detail(sport_type=14)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.TRAINING.value
+        assert session.sub_sport == SubSport.CARDIO_TRAINING.value
+
+    def test_strength_training_308(self):
+        detail = _outdoor_run_detail(sport_type=308)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.TRAINING.value
+        assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
+
+    def test_indoor_walking_333(self):
+        detail = _outdoor_run_detail(sport_type=333)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.WALKING.value
+        assert session.sub_sport == SubSport.INDOOR_WALKING.value
+
+    def test_snowboarding_708(self):
+        detail = _outdoor_run_detail(sport_type=708)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.SNOWBOARDING.value
+        assert session.sub_sport == SubSport.GENERIC.value
+
+    def test_soccer_600(self):
+        detail = _outdoor_run_detail(sport_type=600)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.SOCCER.value
+        assert session.sub_sport == SubSport.GENERIC.value
+
+    # -- proto_type fallback --
+
+    def test_proto_type_fallback_when_sport_type_none(self):
+        detail = _outdoor_run_detail(sport_type=None, raw_report={"proto_type": 1})
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.RUNNING.value
+        assert session.sub_sport == SubSport.STREET.value
+
+    def test_proto_type_track_running_fallback(self):
+        detail = _outdoor_run_detail(sport_type=None, raw_report={"proto_type": 2})
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.RUNNING.value
+        assert session.sub_sport == SubSport.TRACK.value
+
+    def test_proto_type_outdoor_step_maps_to_generic(self):
+        detail = _outdoor_run_detail(sport_type=None, raw_report={"proto_type": 22})
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.GENERIC.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_outdoor_no_step_sports_maps_to_generic(self):
-        detail = _outdoor_run_detail(category="outdoor_no_step", raw_report={"proto_type": 23})
+    # -- priority & fallback --
+
+    def test_sport_type_takes_priority_over_proto_type(self):
+        detail = _outdoor_run_detail(sport_type=15, raw_report={"proto_type": 1})
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.HIKING.value
+        assert session.sub_sport == SubSport.GENERIC.value
+
+    def test_unknown_types_fall_to_generic(self):
+        detail = _outdoor_run_detail(sport_type=999, raw_report={"proto_type": 999})
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.GENERIC.value
+        assert session.sub_sport == SubSport.GENERIC.value
+
+    def test_no_sport_type_or_proto_type_falls_to_generic(self):
+        detail = _outdoor_run_detail(sport_type=None)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.sport == Sport.GENERIC.value
+        assert session.sub_sport == SubSport.GENERIC.value
+
+    def test_unmapped_sport_type_22_falls_to_generic(self):
+        detail = _outdoor_run_detail(sport_type=22)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.GENERIC.value
         assert session.sub_sport == SubSport.GENERIC.value
 
     def test_sub_sport_set_on_lap(self):
-        detail = _outdoor_run_detail(raw_report={"proto_type": 1})
+        detail = _outdoor_run_detail(sport_type=1)
         fit = _parse_fit(render_export(detail, "fit").payload)
         lap = _fit_laps(fit)[0]
         assert lap.sport == Sport.RUNNING.value

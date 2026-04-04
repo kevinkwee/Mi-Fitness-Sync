@@ -112,7 +112,7 @@ def render_tcx(detail: ActivityDetail) -> bytes:
         },
     )
     activities = ET.SubElement(root, f"{{{TCX_NS}}}Activities")
-    activity = ET.SubElement(activities, f"{{{TCX_NS}}}Activity", {"Sport": _tcx_sport(detail.activity.category)})
+    activity = ET.SubElement(activities, f"{{{TCX_NS}}}Activity", {"Sport": _tcx_sport(detail.activity.sport_type)})
     ET.SubElement(activity, f"{{{TCX_NS}}}Id").text = _isoformat_utc(detail.start_time)
 
     lap = ET.SubElement(activity, f"{{{TCX_NS}}}Lap", {"StartTime": _isoformat_utc(detail.start_time)})
@@ -181,7 +181,7 @@ def render_fit(detail: ActivityDetail) -> bytes:
     builder = FitFileBuilder(auto_define=True)
     raw_report = detail.activity.raw_report
     proto_type = raw_report.get("proto_type") if isinstance(raw_report.get("proto_type"), int) else None
-    fit_sport, fit_sub_sport = _fit_sport_mapping(detail.activity.sport_type, detail.activity.category, proto_type)
+    fit_sport, fit_sub_sport = _fit_sport_mapping(detail.activity.sport_type, proto_type)
     start_timestamp_ms = _unix_millis(detail.start_time)
     end_timestamp_ms = _unix_millis(detail.end_time)
 
@@ -399,61 +399,144 @@ def _total_strides(detail: "ActivityDetail") -> int | None:
     return None
 
 
-def _fit_sport_mapping(sport_type: int | None, category: str | None, proto_type: int | None = None) -> tuple:
+def _fit_sport_mapping(sport_type: int | None, proto_type: int | None = None) -> tuple:
     from fit_tool.profile.profile_type import Sport, SubSport
 
-    _PROTO_TYPE_MAP: dict[int, tuple] = {
-        1: (Sport.RUNNING, SubSport.STREET),           # Outdoor Run
-        2: (Sport.RUNNING, SubSport.TRACK),             # Track Running
-        3: (Sport.RUNNING, SubSport.TREADMILL),         # Indoor Run
-        4: (Sport.WALKING, SubSport.CASUAL_WALKING),    # Outdoor Walk
-        5: (Sport.RUNNING, SubSport.TRAIL),             # Trail Run
-        6: (Sport.CYCLING, SubSport.ROAD),              # Outdoor Cycling
-        7: (Sport.CYCLING, SubSport.INDOOR_CYCLING),    # Indoor Cycling
-        8: (Sport.TRAINING, SubSport.GENERIC),          # Free Training
-        9: (Sport.SWIMMING, SubSport.LAP_SWIMMING),     # Pool Swimming
-        10: (Sport.SWIMMING, SubSport.OPEN_WATER),      # Open Water Swimming
-        11: (Sport.FITNESS_EQUIPMENT, SubSport.ELLIPTICAL),  # Elliptical
-        12: (Sport.TRAINING, SubSport.YOGA),            # Yoga
-        13: (Sport.ROWING, SubSport.INDOOR_ROWING),     # Rowing Machine
-        14: (Sport.TRAINING, SubSport.CARDIO_TRAINING), # Jump Rope (no FIT sub-sport)
-        15: (Sport.HIKING, SubSport.GENERIC),           # Hiking
-        16: (Sport.TRAINING, SubSport.CARDIO_TRAINING), # HIIT
-        17: (Sport.MULTISPORT, SubSport.GENERIC),       # Triathlon
-        18: (Sport.GENERIC, SubSport.GENERIC),          # Ball Sports
-        19: (Sport.BASKETBALL, SubSport.GENERIC),       # Basketball
-        20: (Sport.GOLF, SubSport.GENERIC),             # Golf
-        21: (Sport.ALPINE_SKIING, SubSport.GENERIC),    # Skiing
-        22: (Sport.GENERIC, SubSport.GENERIC),          # Outdoor Step Sports (no FIT equivalent)
-        23: (Sport.GENERIC, SubSport.GENERIC),          # Outdoor No-Step Sports (no FIT equivalent)
-        24: (Sport.ROCK_CLIMBING, SubSport.GENERIC),    # Rock Climbing
-        25: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING), # Diving
+    _SPORT_TYPE_MAP: dict[int, tuple] = {
+        # Core sport types (1-21)
+        1: (Sport.RUNNING, SubSport.STREET),                     # Outdoor Running
+        2: (Sport.WALKING, SubSport.CASUAL_WALKING),             # Outdoor Walking
+        3: (Sport.RUNNING, SubSport.TREADMILL),                  # Indoor Running
+        4: (Sport.HIKING, SubSport.GENERIC),                     # Mountaineering
+        5: (Sport.RUNNING, SubSport.TRAIL),                      # Trail Running
+        6: (Sport.CYCLING, SubSport.ROAD),                       # Outdoor Cycling
+        7: (Sport.CYCLING, SubSport.INDOOR_CYCLING),             # Indoor Cycling
+        8: (Sport.TRAINING, SubSport.GENERIC),                   # Free Training
+        9: (Sport.SWIMMING, SubSport.LAP_SWIMMING),              # Pool Swimming
+        10: (Sport.SWIMMING, SubSport.OPEN_WATER),               # Open Water Swimming
+        11: (Sport.FITNESS_EQUIPMENT, SubSport.ELLIPTICAL),      # Elliptical
+        12: (Sport.TRAINING, SubSport.YOGA),                     # Yoga
+        13: (Sport.ROWING, SubSport.INDOOR_ROWING),              # Rowing Machine
+        14: (Sport.TRAINING, SubSport.CARDIO_TRAINING),          # Jump Rope
+        15: (Sport.HIKING, SubSport.GENERIC),                    # Hiking
+        16: (Sport.TRAINING, SubSport.CARDIO_TRAINING),          # HIIT
+        17: (Sport.MULTISPORT, SubSport.GENERIC),                # Triathlon
+        19: (Sport.BASKETBALL, SubSport.GENERIC),                # Basketball
+        20: (Sport.GOLF, SubSport.GENERIC),                      # Golf
+        21: (Sport.ALPINE_SKIING, SubSport.GENERIC),             # Skiing
+        # Water sports (100-118)
+        100: (Sport.SAILING, SubSport.GENERIC),                  # Sailing
+        101: (Sport.STAND_UP_PADDLEBOARDING, SubSport.GENERIC),  # Paddle Board
+        104: (Sport.WATER_SKIING, SubSport.GENERIC),             # Water Skiing
+        105: (Sport.KAYAKING, SubSport.GENERIC),                 # Kayaking
+        106: (Sport.RAFTING, SubSport.GENERIC),                  # Kayak Rafting
+        107: (Sport.BOATING, SubSport.GENERIC),                  # Boating
+        108: (Sport.BOATING, SubSport.GENERIC),                  # Motor Boat
+        109: (Sport.SWIMMING, SubSport.GENERIC),                 # Fin Swimming
+        110: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),         # Diving
+        111: (Sport.SWIMMING, SubSport.GENERIC),                 # Artistic Swimming
+        112: (Sport.DIVING, SubSport.APNEA_DIVING),              # Snorkeling
+        113: (Sport.KITESURFING, SubSport.GENERIC),              # Kite Surfing
+        114: (Sport.SURFING, SubSport.GENERIC),                  # Indoor Surfing
+        115: (Sport.ROWING, SubSport.GENERIC),                   # Dragon Boats
+        116: (Sport.DIVING, SubSport.APNEA_DIVING),              # Freediving
+        117: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),         # Recreational Scuba
+        118: (Sport.DIVING, SubSport.MULTI_GAS_DIVING),          # Instrument Diving
+        # Adventure & outdoor (200-207)
+        200: (Sport.ROCK_CLIMBING, SubSport.GENERIC),            # Rock Climbing
+        202: (Sport.INLINE_SKATING, SubSport.GENERIC),           # Roller Skating
+        205: (Sport.HANG_GLIDING, SubSport.GENERIC),             # Paragliding
+        206: (Sport.CYCLING, SubSport.BMX),                      # BMX
+        207: (Sport.WALKING, SubSport.SPEED_WALKING),            # Nordic Walking
+        # Indoor fitness (300-334)
+        301: (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING), # Stair Climbing
+        302: (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING), # Stepper
+        303: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Core Training
+        304: (Sport.TRAINING, SubSport.FLEXIBILITY_TRAINING),    # Flexibility Training
+        305: (Sport.TRAINING, SubSport.PILATES),                 # Pilates
+        307: (Sport.TRAINING, SubSport.FLEXIBILITY_TRAINING),    # Stretching
+        308: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Strength Training
+        310: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Aerobics
+        313: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Dumbbell Training
+        314: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Barbell Training
+        315: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Weight Lifting
+        316: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Deadlift
+        317: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Burpee
+        318: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Sit-Ups
+        320: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Upper Limb Training
+        321: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Lower Limb Training
+        322: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Waist & Abdomen
+        323: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Back Training
+        324: (Sport.CYCLING, SubSport.SPIN),                     # Spinning
+        330: (Sport.BOXING, SubSport.GENERIC),                   # Kickboxing
+        331: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Battle Rope
+        332: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Mixed Aerobic
+        333: (Sport.WALKING, SubSport.INDOOR_WALKING),           # Indoor Walking
+        334: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Ab Wheel
+        # Martial arts (500-511)
+        500: (Sport.BOXING, SubSport.GENERIC),                   # Boxing
+        # Ball sports (600-627)
+        600: (Sport.SOCCER, SubSport.GENERIC),                   # Football
+        601: (Sport.BASKETBALL, SubSport.GENERIC),               # Basketball (Alt)
+        609: (Sport.TENNIS, SubSport.GENERIC),                   # Tennis
+        # Snow & ice (700-710)
+        700: (Sport.ICE_SKATING, SubSport.GENERIC),              # Outdoor Skating
+        703: (Sport.SNOWMOBILING, SubSport.GENERIC),             # Snowmobile
+        707: (Sport.ICE_SKATING, SubSport.GENERIC),              # Indoor Skating
+        708: (Sport.SNOWBOARDING, SubSport.GENERIC),             # Snowboarding
+        709: (Sport.CROSS_COUNTRY_SKIING, SubSport.GENERIC),     # Skiing (General)
+        710: (Sport.CROSS_COUNTRY_SKIING, SubSport.GENERIC),     # Cross-Country Skiing
+        # Misc (800-812)
+        802: (Sport.HORSEBACK_RIDING, SubSport.GENERIC),         # Horse Riding
+        806: (Sport.FISHING, SubSport.GENERIC),                  # Fishing
+        # Climbing (1000-1001)
+        1000: (Sport.ROCK_CLIMBING, SubSport.GENERIC),           # Indoor Rock Climbing
+        1001: (Sport.ROCK_CLIMBING, SubSport.GENERIC),           # Outdoor Rock Climbing
+        # Special (10000+)
+        10000: (Sport.HORSEBACK_RIDING, SubSport.GENERIC),       # Equestrian
     }
+
+    _PROTO_TYPE_MAP: dict[int, tuple] = {
+        1: (Sport.RUNNING, SubSport.STREET),
+        2: (Sport.RUNNING, SubSport.TRACK),
+        3: (Sport.RUNNING, SubSport.TREADMILL),
+        4: (Sport.WALKING, SubSport.CASUAL_WALKING),
+        5: (Sport.RUNNING, SubSport.TRAIL),
+        6: (Sport.CYCLING, SubSport.ROAD),
+        7: (Sport.CYCLING, SubSport.INDOOR_CYCLING),
+        8: (Sport.TRAINING, SubSport.GENERIC),
+        9: (Sport.SWIMMING, SubSport.LAP_SWIMMING),
+        10: (Sport.SWIMMING, SubSport.OPEN_WATER),
+        11: (Sport.FITNESS_EQUIPMENT, SubSport.ELLIPTICAL),
+        12: (Sport.TRAINING, SubSport.YOGA),
+        13: (Sport.ROWING, SubSport.INDOOR_ROWING),
+        14: (Sport.TRAINING, SubSport.CARDIO_TRAINING),
+        15: (Sport.HIKING, SubSport.GENERIC),
+        16: (Sport.TRAINING, SubSport.CARDIO_TRAINING),
+        17: (Sport.MULTISPORT, SubSport.GENERIC),
+        18: (Sport.GENERIC, SubSport.GENERIC),
+        19: (Sport.BASKETBALL, SubSport.GENERIC),
+        20: (Sport.GOLF, SubSport.GENERIC),
+        21: (Sport.ALPINE_SKIING, SubSport.GENERIC),
+        22: (Sport.GENERIC, SubSport.GENERIC),
+        23: (Sport.GENERIC, SubSport.GENERIC),
+        24: (Sport.ROCK_CLIMBING, SubSport.GENERIC),
+        25: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),
+    }
+
+    if sport_type is not None and sport_type in _SPORT_TYPE_MAP:
+        return _SPORT_TYPE_MAP[sport_type]
 
     if proto_type is not None and proto_type in _PROTO_TYPE_MAP:
         return _PROTO_TYPE_MAP[proto_type]
 
-    normalized = (category or "").lower()
-    if "run" in normalized:
-        return (Sport.RUNNING, SubSport.GENERIC)
-    if "ride" in normalized or "bike" in normalized or "cycl" in normalized:
-        return (Sport.CYCLING, SubSport.GENERIC)
-    if "swim" in normalized:
-        return (Sport.SWIMMING, SubSport.GENERIC)
-    if "walk" in normalized:
-        return (Sport.WALKING, SubSport.GENERIC)
-    if "hike" in normalized:
-        return (Sport.HIKING, SubSport.GENERIC)
-    if "strength" in normalized:
-        return (Sport.TRAINING, SubSport.STRENGTH_TRAINING)
     return (Sport.GENERIC, SubSport.GENERIC)
 
 
-def _tcx_sport(category: str | None) -> str:
-    normalized = (category or "").lower()
-    if "run" in normalized:
+def _tcx_sport(sport_type: int | None) -> str:
+    if sport_type in {1, 3, 5}:
         return "Running"
-    if "ride" in normalized or "bike" in normalized or "cycl" in normalized:
+    if sport_type in {6, 7, 206, 324}:
         return "Biking"
     return "Other"
 
