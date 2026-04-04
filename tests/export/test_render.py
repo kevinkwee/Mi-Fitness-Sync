@@ -265,17 +265,16 @@ class TestFitSportSubSportMapping:
         assert session.sub_sport == SubSport.GENERIC.value
 
     def test_strength_maps_to_training_strength(self):
-        detail = _outdoor_run_detail(category="strength_training", raw_report={"proto_type": 28})
+        detail = _outdoor_run_detail(category="strength_training")
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.TRAINING.value
         assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
 
-    def test_strength_sport_type_308_uses_proto_type(self):
+    def test_strength_sport_type_308_uses_category_fallback(self):
         detail = _outdoor_run_detail(
             sport_type=308,
             category="strength_training",
-            raw_report={"proto_type": 28},
         )
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
@@ -308,8 +307,8 @@ class TestFitSportSubSportMapping:
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         # sport_type=22 should NOT hit proto_type map; falls back to category
-        assert session.sport == Sport.GENERIC.value
-        assert session.sub_sport == SubSport.GENERIC.value
+        assert session.sport == Sport.TRAINING.value
+        assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
 
     def test_track_running_maps_to_running_track(self):
         detail = _outdoor_run_detail(category="outdoor_run", raw_report={"proto_type": 2})

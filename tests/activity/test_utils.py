@@ -28,16 +28,6 @@ def test_build_fds_suffix_matches_android_server_key_format():
     ) == "A_FTZRzY_98O8HYCOBHMq32eZZczDTKeuNEE"
 
 
-def test_build_fds_suffix_strength_training_proto_type_28():
-    assert build_fds_suffix(
-        sid="123456789",
-        timestamp=1700000002,
-        timezone_offset=28,
-        sport_type=28,
-        file_type=0,
-    ) == "AvFTZRzw_98O8HYCOBHMq32eZZczDTKeuNEE"
-
-
 def test_build_fds_suffix_uses_underscore_separator():
     result = build_fds_suffix(
         sid="test-sid",

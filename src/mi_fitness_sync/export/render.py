@@ -428,7 +428,6 @@ def _fit_sport_mapping(sport_type: int | None, category: str | None, proto_type:
         23: (Sport.GENERIC, SubSport.GENERIC),          # Outdoor No-Step Sports (no FIT equivalent)
         24: (Sport.ROCK_CLIMBING, SubSport.GENERIC),    # Rock Climbing
         25: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING), # Diving
-        28: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Strength Training
     }
 
     if proto_type is not None and proto_type in _PROTO_TYPE_MAP:
@@ -445,6 +444,8 @@ def _fit_sport_mapping(sport_type: int | None, category: str | None, proto_type:
         return (Sport.WALKING, SubSport.GENERIC)
     if "hike" in normalized:
         return (Sport.HIKING, SubSport.GENERIC)
+    if "strength" in normalized:
+        return (Sport.TRAINING, SubSport.STRENGTH_TRAINING)
     return (Sport.GENERIC, SubSport.GENERIC)
 
 

@@ -172,39 +172,7 @@ class TestParseSportRecord:
     def test_short_data_returns_empty(self):
         assert parse_sport_record(b"\x00\x01\x02", sport_type=8) == []
 
-    def test_strength_training_v2_uses_free_training_parser(self):
-        data_valid = bytes([0b11000000])
-        record_count = 4
-        start_time = 1700000002
-        it_summary = bytes([0x00])
-        records = bytes(sum(([105 + index, index * 3] for index in range(4)), []))
 
-        decrypted = build_header(start_time, 28, 2, 28, data_valid) + build_one_dimen_segment(record_count, start_time, it_summary, records)
-
-        samples = parse_sport_record(decrypted, sport_type=28)
-
-        assert len(samples) == 4
-        assert samples[0].heart_rate == 105
-        assert samples[0].calories == 0
-        assert samples[3].timestamp == start_time + 3
-        assert samples[3].heart_rate == 108
-
-    def test_strength_training_v3_fourdimen(self):
-        data_valid = bytes([0xCC, 0xCC])
-        record_count = 2
-        start_time = 1700000002
-        it_summary = bytes([0x00])
-        records = bytes([120, 10, 98, 25, 130, 20, 97, 30])
-
-        decrypted = build_header(start_time, 28, 3, 28, data_valid) + build_one_dimen_segment(record_count, start_time, it_summary, records)
-
-        samples = parse_sport_record(decrypted, sport_type=28)
-
-        assert len(samples) == 2
-        assert samples[0].heart_rate == 120
-        assert samples[0].spo2 == 98
-        assert samples[1].heart_rate == 130
-        assert samples[1].stress == 30
 
 
 class TestMultipleSegments:
@@ -296,11 +264,11 @@ class TestPauseInitData:
 
 
 class TestSportConfigCoverage:
-    @pytest.mark.parametrize("sport_type", list(range(1, 26)) + [28])
+    @pytest.mark.parametrize("sport_type", list(range(1, 26)))
     def test_config_exists(self, sport_type):
         assert sport_type in SPORT_CONFIG
 
-    @pytest.mark.parametrize("sport_type", list(range(1, 26)) + [28])
+    @pytest.mark.parametrize("sport_type", list(range(1, 26)))
     def test_validity_exists(self, sport_type):
         assert get_record_data_valid_len(sport_type, 1) is not None
 

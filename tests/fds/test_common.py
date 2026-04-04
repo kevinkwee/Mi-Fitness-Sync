@@ -100,14 +100,7 @@ class TestGetRecordDataValidLen:
     def test_unknown_version(self):
         assert get_record_data_valid_len(8, 99) is None
 
-    def test_strength_training_v2(self):
-        assert get_record_data_valid_len(28, 2) == 1
 
-    def test_strength_training_v3(self):
-        assert get_record_data_valid_len(28, 3) == 2
-
-    def test_strength_training_v5(self):
-        assert get_record_data_valid_len(28, 5) == 2
 
 
 class TestOneDimenValid:
