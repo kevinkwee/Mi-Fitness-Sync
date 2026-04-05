@@ -33,7 +33,7 @@ from mi_fitness_sync.fds.cache import DEFAULT_CACHE_DIR, FdsCache
 logger = logging.getLogger(__name__)
 
 ACTIVITY_LIST_ENDPOINT = activity_transport.ACTIVITY_LIST_ENDPOINT
-DEFAULT_PAGE_SIZE = 10
+DEFAULT_PAGE_SIZE = 20
 DEFAULT_TIMEOUT_SECONDS = 30
 DETAIL_DATA_KEY = "huami_sport_record"
 ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
@@ -86,7 +86,14 @@ class MiFitnessActivitiesClient:
                 category=category,
                 next_key=next_key,
             )
-            activities.extend(page.activities)
+            for activity in page.activities:
+                if start_time is not None and activity.start_time is not None and activity.start_time < start_time:
+                    continue
+                if end_time is not None and activity.start_time is not None and activity.start_time > end_time:
+                    continue
+                activities.append(activity)
+                if len(activities) >= limit:
+                    break
             if not page.has_more or not page.next_key:
                 break
             next_key = page.next_key

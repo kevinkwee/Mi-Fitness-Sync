@@ -416,3 +416,181 @@ def test_get_activity_detail_raises_when_no_data(auth_state, monkeypatch):
 
     with pytest.raises(MiFitnessError, match="Could not find a detail payload"):
         client.get_activity_detail(activity)
+
+
+# ---------------------------------------------------------------------------
+# list_activities client-side time filtering
+# ---------------------------------------------------------------------------
+
+
+def _make_activity(start_time: int) -> Activity:
+    return Activity(
+        activity_id=f"sid:key:{start_time}",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=1,
+        title="Run",
+        start_time=start_time,
+        end_time=start_time + 3600,
+        duration_seconds=3600,
+        distance_meters=5000,
+        calories=300,
+        steps=6000,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "sid", "key": "key", "time": start_time},
+        raw_report={},
+    )
+
+
+def test_list_activities_filters_by_end_time(auth_state, monkeypatch):
+    """--until should exclude activities whose start_time exceeds end_time."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activities_from_api = [
+        _make_activity(1000),
+        _make_activity(2000),
+        _make_activity(3000),
+    ]
+    page = ActivityPage(activities=activities_from_api, has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result = client.list_activities(start_time=None, end_time=2000, limit=20)
+
+    assert len(result) == 2
+    assert result[0].start_time == 1000
+    assert result[1].start_time == 2000
+
+
+def test_list_activities_filters_by_start_time(auth_state, monkeypatch):
+    """--since should exclude activities whose start_time is before start_time."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activities_from_api = [
+        _make_activity(1000),
+        _make_activity(2000),
+        _make_activity(3000),
+    ]
+    page = ActivityPage(activities=activities_from_api, has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result = client.list_activities(start_time=2000, end_time=None, limit=20)
+
+    assert len(result) == 2
+    assert result[0].start_time == 2000
+    assert result[1].start_time == 3000
+
+
+def test_list_activities_filters_by_both_start_and_end_time(auth_state, monkeypatch):
+    """--since + --until should keep only activities within the range."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activities_from_api = [
+        _make_activity(1000),
+        _make_activity(2000),
+        _make_activity(3000),
+        _make_activity(4000),
+    ]
+    page = ActivityPage(activities=activities_from_api, has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result = client.list_activities(start_time=2000, end_time=3000, limit=20)
+
+    assert len(result) == 2
+    assert result[0].start_time == 2000
+    assert result[1].start_time == 3000
+
+
+def test_list_activities_no_filter_returns_all(auth_state, monkeypatch):
+    """No --since/--until should return all activities."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activities_from_api = [
+        _make_activity(1000),
+        _make_activity(2000),
+        _make_activity(3000),
+    ]
+    page = ActivityPage(activities=activities_from_api, has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result = client.list_activities(start_time=None, end_time=None, limit=20)
+
+    assert len(result) == 3
+
+
+def test_list_activities_filter_respects_limit(auth_state, monkeypatch):
+    """Limit should be enforced after filtering."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    activities_from_api = [
+        _make_activity(1000),
+        _make_activity(2000),
+        _make_activity(3000),
+    ]
+    page = ActivityPage(activities=activities_from_api, has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result = client.list_activities(start_time=None, end_time=3000, limit=2)
+
+    assert len(result) == 2
+
+
+def test_list_activities_paginates_when_filtering_reduces_count(auth_state, monkeypatch):
+    """Should fetch additional pages when filtering reduces the count below limit."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    page1 = ActivityPage(
+        activities=[_make_activity(500), _make_activity(2000)],
+        has_more=True,
+        next_key="page2",
+    )
+    page2 = ActivityPage(
+        activities=[_make_activity(600), _make_activity(3000)],
+        has_more=False,
+        next_key=None,
+    )
+
+    def fake_fetch(**kwargs):
+        if kwargs.get("next_key") == "page2":
+            return page2
+        return page1
+
+    monkeypatch.setattr(client, "_fetch_activity_page", fake_fetch)
+
+    # Only activities with start_time >= 1000 should pass
+    result = client.list_activities(start_time=1000, end_time=None, limit=20)
+
+    assert len(result) == 2
+    assert result[0].start_time == 2000
+    assert result[1].start_time == 3000
+
+
+def test_list_activities_includes_activity_with_none_start_time(auth_state, monkeypatch):
+    """Activities missing start_time should not be excluded by filters."""
+    client = MiFitnessActivitiesClient(auth_state)
+
+    no_start = Activity(
+        activity_id="sid:key:0",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=1,
+        title="Run",
+        start_time=None,
+        end_time=None,
+        duration_seconds=None,
+        distance_meters=None,
+        calories=None,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "sid", "key": "key", "time": 0},
+        raw_report={},
+    )
+    page = ActivityPage(activities=[no_start, _make_activity(2000)], has_more=False, next_key=None)
+    monkeypatch.setattr(client, "_fetch_activity_page", lambda **kwargs: page)
+
+    result = client.list_activities(start_time=1000, end_time=3000, limit=20)
+
+    assert len(result) == 2
