@@ -11,11 +11,13 @@ import pytest
 from mi_fitness_sync.exceptions import StravaAuthError
 from mi_fitness_sync.strava.auth import (
     STRAVA_AUTH_URL,
+    STRAVA_DEAUTHORIZE_URL,
     _OAuthResult,
     _make_callback_handler,
     build_authorization_url,
     exchange_token,
     refresh_access_token,
+    revoke_access_token,
     run_oauth_flow,
 )
 
@@ -95,6 +97,32 @@ def test_refresh_access_token_failure_raises(mock_post):
 
     with pytest.raises(StravaAuthError, match="Token refresh failed"):
         refresh_access_token("123", "secret", "bad-refresh")
+
+
+@patch("mi_fitness_sync.strava.auth.requests.post")
+def test_revoke_access_token_success(mock_post):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"access_token": "access-abc"}
+    mock_post.return_value = mock_response
+
+    revoke_access_token("access-abc")
+
+    mock_post.assert_called_once()
+    call_kwargs = mock_post.call_args
+    assert call_kwargs[1]["data"]["access_token"] == "access-abc"
+    assert STRAVA_DEAUTHORIZE_URL in call_kwargs[0] or call_kwargs[0][0] == STRAVA_DEAUTHORIZE_URL
+
+
+@patch("mi_fitness_sync.strava.auth.requests.post")
+def test_revoke_access_token_failure_raises(mock_post):
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+    mock_response.text = "Unauthorized"
+    mock_post.return_value = mock_response
+
+    with pytest.raises(StravaAuthError, match="Token revocation failed"):
+        revoke_access_token("bad-token")
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_DEAUTHORIZE_URL = "https://www.strava.com/oauth/deauthorize"
 REQUIRED_SCOPE = "activity:write,activity:read_all,read_all"
 
 
@@ -60,6 +61,17 @@ def refresh_access_token(client_id: str, client_secret: str, refresh_token: str)
     if response.status_code != 200:
         raise StravaAuthError(f"Token refresh failed (HTTP {response.status_code}).")
     return response.json()
+
+
+def revoke_access_token(access_token: str) -> None:
+    """Revoke a Strava access token via the deauthorize endpoint."""
+    response = requests.post(
+        STRAVA_DEAUTHORIZE_URL,
+        data={"access_token": access_token},
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise StravaAuthError(f"Token revocation failed (HTTP {response.status_code}).")
 
 
 class _OAuthResult:

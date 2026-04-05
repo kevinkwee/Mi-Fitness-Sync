@@ -253,6 +253,16 @@ Example:
 python -m mi_fitness_sync strava-status
 ```
 
+### `strava-logout`
+
+Revokes the Strava access token via the Strava API and deletes the local token file. If no tokens exist, it exits cleanly. If the remote revocation fails, local tokens are still deleted.
+
+Example:
+
+```bash
+python -m mi_fitness_sync strava-logout
+```
+
 ### `upload-to-strava`
 
 Uploads one Mi Fitness activity to Strava as a FIT file. The FIT file is also saved locally.

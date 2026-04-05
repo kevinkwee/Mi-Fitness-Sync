@@ -529,6 +529,65 @@ def test_upload_no_duplicates_proceeds_silently(monkeypatch, capsys, tmp_path, a
     assert uploaded
 
 
+# ---------------------------------------------------------------------------
+# strava-logout tests
+# ---------------------------------------------------------------------------
+
+
+def test_strava_logout_revokes_and_deletes(monkeypatch, capsys, tmp_path):
+    import mi_fitness_sync.strava.auth as strava_auth
+    from mi_fitness_sync.strava.store import save_tokens
+
+    state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(state, str(token_path))
+
+    revoked = []
+    monkeypatch.setattr(strava_auth, "revoke_access_token", lambda token: revoked.append(token))
+
+    exit_code = cli.main(["strava-logout", "--strava-token-path", str(token_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert revoked == ["access-abc"]
+    assert "Strava access token revoked" in captured.out
+    assert "Removed Strava tokens" in captured.out
+    assert not token_path.exists()
+
+
+def test_strava_logout_no_tokens(capsys, tmp_path):
+    token_path = tmp_path / "nonexistent.json"
+
+    exit_code = cli.main(["strava-logout", "--strava-token-path", str(token_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "No Strava tokens found" in captured.out
+
+
+def test_strava_logout_revoke_fails_still_deletes(monkeypatch, capsys, tmp_path):
+    import mi_fitness_sync.strava.auth as strava_auth
+    from mi_fitness_sync.exceptions import StravaAuthError
+    from mi_fitness_sync.strava.store import save_tokens
+
+    state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(state, str(token_path))
+
+    def failing_revoke(token):
+        raise StravaAuthError("Token revocation failed (HTTP 401).")
+
+    monkeypatch.setattr(strava_auth, "revoke_access_token", failing_revoke)
+
+    exit_code = cli.main(["strava-logout", "--strava-token-path", str(token_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Warning: Failed to revoke Strava token" in captured.err
+    assert "Removed Strava tokens" in captured.out
+    assert not token_path.exists()
+
+
 def test_upload_duplicate_check_query_window(monkeypatch, capsys, tmp_path, auth_state, sample_activity_detail):
     """Assert that the upload duplicate check queries ±5 minutes around start_time."""
     import mi_fitness_sync.strava.client as strava_client_mod

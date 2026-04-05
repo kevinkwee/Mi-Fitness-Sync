@@ -98,6 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
     strava_status_parser = subparsers.add_parser("strava-status", help="Show Strava auth status")
     strava_status_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
 
+    strava_logout_parser = subparsers.add_parser("strava-logout", help="Revoke Strava access and delete local tokens")
+    strava_logout_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+
     upload_parser = subparsers.add_parser("upload-to-strava", help="Upload a Mi Fitness activity to Strava as FIT")
     upload_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
     upload_parser.add_argument("--state-path", help="Override the persisted Mi Fitness auth state path")
@@ -146,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
             return handle_strava_login(args)
         if args.command == "strava-status":
             return handle_strava_status(args)
+        if args.command == "strava-logout":
+            return handle_strava_logout(args)
         if args.command == "upload-to-strava":
             return handle_upload_to_strava(args)
     except MiFitnessError as exc:
@@ -346,6 +351,27 @@ def handle_strava_status(args: argparse.Namespace) -> int:
     print(f"Token expires at: {datetime.fromtimestamp(state.expires_at, tz=timezone.utc).isoformat()}")
     print(f"Created at: {state.created_at}")
     print(f"Updated at: {state.updated_at}")
+    return 0
+
+
+def handle_strava_logout(args: argparse.Namespace) -> int:
+    from mi_fitness_sync.strava.auth import revoke_access_token
+    from mi_fitness_sync.strava.store import delete_tokens, load_tokens, resolve_token_path
+
+    state = load_tokens(args.strava_token_path)
+    if state is None:
+        print("No Strava tokens found — nothing to do.")
+        return 0
+
+    try:
+        revoke_access_token(state.access_token)
+        print("Strava access token revoked.")
+    except Exception as exc:
+        print(f"Warning: Failed to revoke Strava token ({exc}). Deleting local tokens anyway.", file=sys.stderr)
+
+    path = resolve_token_path(args.strava_token_path)
+    delete_tokens(args.strava_token_path)
+    print(f"Removed Strava tokens at {path}")
     return 0
 
 
