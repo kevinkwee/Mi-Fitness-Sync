@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from dataclasses import asdict
 from pathlib import Path
 
@@ -21,6 +22,10 @@ def save_state(state: AuthState, state_path: str | None = None) -> Path:
     path = resolve_state_path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(state), indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Best-effort; Windows ACLs don't support POSIX modes
     return path
 
 
