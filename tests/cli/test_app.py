@@ -20,6 +20,232 @@ def test_format_error_for_captcha():
     assert cli.format_error(error) == "Login requires a captcha challenge. URL: https://example.com/captcha"
 
 
+# ---------------------------------------------------------------------------
+# Mi login interactive prompt tests
+# ---------------------------------------------------------------------------
+
+
+def test_login_prompts_for_email_and_password(monkeypatch, capsys, tmp_path):
+    inputs = iter(["user@example.com"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+    monkeypatch.setattr("getpass.getpass", lambda prompt="Password: ": "s3cret")
+
+    login_args = {}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            login_args.update(email=email, password=password, device_id=device_id)
+            from mi_fitness_sync.auth.state import AuthState
+
+            return type(
+                "Session",
+                (),
+                {
+                    "to_auth_state": lambda self: AuthState(
+                        email=email,
+                        user_id="uid",
+                        c_user_id="cuid",
+                        service_id="miothealth",
+                        pass_token="pt",
+                        service_token="st",
+                        ssecurity="ss",
+                        psecurity=None,
+                        auto_login_url="https://example.com",
+                        device_id=device_id,
+                        slh=None,
+                        ph=None,
+                        sts_cookie_header="cookie",
+                        cookies=[],
+                        created_at="2026-01-01T00:00:00+00:00",
+                        updated_at="2026-01-01T00:00:00+00:00",
+                    )
+                },
+            )()
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Login succeeded" in captured.out
+    assert login_args["email"] == "user@example.com"
+    assert login_args["password"] == "s3cret"
+
+
+def test_login_uses_cli_args_without_prompt(monkeypatch, capsys, tmp_path):
+    prompt_called = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompt_called.append(True) or "")
+    monkeypatch.setattr("getpass.getpass", lambda prompt="Password: ": prompt_called.append(True) or "")
+
+    login_args = {}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            login_args.update(email=email, password=password)
+            from mi_fitness_sync.auth.state import AuthState
+
+            return type(
+                "Session",
+                (),
+                {
+                    "to_auth_state": lambda self: AuthState(
+                        email=email,
+                        user_id="uid",
+                        c_user_id="cuid",
+                        service_id="miothealth",
+                        pass_token="pt",
+                        service_token="st",
+                        ssecurity="ss",
+                        psecurity=None,
+                        auto_login_url="https://example.com",
+                        device_id=device_id,
+                        slh=None,
+                        ph=None,
+                        sts_cookie_header="cookie",
+                        cookies=[],
+                        created_at="2026-01-01T00:00:00+00:00",
+                        updated_at="2026-01-01T00:00:00+00:00",
+                    )
+                },
+            )()
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "a@b.com", "--password", "pass", "--state-path", state_path])
+
+    assert exit_code == 0
+    assert login_args["email"] == "a@b.com"
+    assert login_args["password"] == "pass"
+    assert not prompt_called
+
+
+def test_login_email_on_cli_password_prompted(monkeypatch, capsys, tmp_path):
+    input_called = []
+    monkeypatch.setattr("builtins.input", lambda prompt: input_called.append(True) or "")
+    monkeypatch.setattr("getpass.getpass", lambda prompt="Password: ": "prompted-pass")
+
+    login_args = {}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            login_args.update(email=email, password=password)
+            from mi_fitness_sync.auth.state import AuthState
+
+            return type(
+                "Session",
+                (),
+                {
+                    "to_auth_state": lambda self: AuthState(
+                        email=email, user_id="uid", c_user_id="cuid",
+                        service_id="miothealth", pass_token="pt", service_token="st",
+                        ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                        device_id=device_id, slh=None, ph=None,
+                        sts_cookie_header="cookie", cookies=[],
+                        created_at="2026-01-01T00:00:00+00:00",
+                        updated_at="2026-01-01T00:00:00+00:00",
+                    )
+                },
+            )()
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "a@b.com", "--state-path", state_path])
+
+    assert exit_code == 0
+    assert login_args["email"] == "a@b.com"
+    assert login_args["password"] == "prompted-pass"
+    assert not input_called  # input() should NOT have been called
+
+
+def test_login_password_on_cli_email_prompted(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr("builtins.input", lambda prompt: "prompted@example.com")
+    getpass_called = []
+    monkeypatch.setattr("getpass.getpass", lambda prompt="Password: ": getpass_called.append(True) or "")
+
+    login_args = {}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            login_args.update(email=email, password=password)
+            from mi_fitness_sync.auth.state import AuthState
+
+            return type(
+                "Session",
+                (),
+                {
+                    "to_auth_state": lambda self: AuthState(
+                        email=email, user_id="uid", c_user_id="cuid",
+                        service_id="miothealth", pass_token="pt", service_token="st",
+                        ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                        device_id=device_id, slh=None, ph=None,
+                        sts_cookie_header="cookie", cookies=[],
+                        created_at="2026-01-01T00:00:00+00:00",
+                        updated_at="2026-01-01T00:00:00+00:00",
+                    )
+                },
+            )()
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--password", "cli-pass", "--state-path", state_path])
+
+    assert exit_code == 0
+    assert login_args["email"] == "prompted@example.com"
+    assert login_args["password"] == "cli-pass"
+    assert not getpass_called  # getpass() should NOT have been called
+
+
+def test_login_whitespace_only_email_prompt(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda prompt: "   ")
+    monkeypatch.setattr("getpass.getpass", lambda prompt="Password: ": "s3cret")
+
+    exit_code = cli.main(["login"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Email and password are required" in captured.err
+
+
+def test_login_missing_credentials(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    monkeypatch.setattr("getpass.getpass", lambda prompt="Password: ": "")
+
+    exit_code = cli.main(["login"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Email and password are required" in captured.err
+
+
 def test_auth_status_json_output(monkeypatch, capsys, auth_state):
     monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
 

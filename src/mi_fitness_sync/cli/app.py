@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import logging
 import re
@@ -34,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     login_parser = subparsers.add_parser("login", help="Authenticate with Mi Fitness via Xiaomi Passport")
-    login_parser.add_argument("--email", required=True, help="Mi / Xiaomi account email")
-    login_parser.add_argument("--password", required=True, help="Mi / Xiaomi account password")
+    login_parser.add_argument("--email", help="Mi / Xiaomi account email")
+    login_parser.add_argument("--password", help="Mi / Xiaomi account password")
     login_parser.add_argument("--state-path", help="Override the persisted auth state path")
 
     logout_parser = subparsers.add_parser("logout", help="Delete the persisted auth state")
@@ -162,13 +163,25 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def handle_login(args: argparse.Namespace) -> int:
+    email = args.email
+    password = args.password
+    if not email:
+        email = input("Mi account email: ").strip()
+    if not password:
+        password = getpass.getpass("Mi account password: ")
+    if not email or not password:
+        raise MiFitnessError(
+            "Email and password are required.\n"
+            "Pass --email and --password or enter them when prompted."
+        )
+
     existing_state = load_state(args.state_path)
     device_id = existing_state.device_id if existing_state else MiFitnessAuthClient.generate_device_id()
 
     client = MiFitnessAuthClient(service_id=DEFAULT_SERVICE_ID)
     session = client.login_with_password(
-        email=args.email,
-        password=args.password,
+        email=email,
+        password=password,
         device_id=device_id,
     )
 
