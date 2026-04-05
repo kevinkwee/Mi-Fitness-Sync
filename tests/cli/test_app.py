@@ -352,7 +352,7 @@ def test_upload_to_strava_success(monkeypatch, capsys, tmp_path, auth_state, sam
         def __init__(self, state, token_path=None):
             pass
 
-        def list_activities(self, *, after, before, per_page=30):
+        def list_activities(self, *, after, before, per_page=30, page=1):
             return []
 
         def upload_activity(self, payload, sport_type=None, external_id=None):
@@ -428,7 +428,7 @@ def _setup_upload_mocks(monkeypatch, tmp_path, auth_state, sample_activity_detai
     class DummyStravaClient:
         def __init__(self, state, token_path=None):
             pass
-        def list_activities(self, *, after, before, per_page=30):
+        def list_activities(self, *, after, before, per_page=30, page=1):
             return strava_activities
         def upload_activity(self, payload, sport_type=None, external_id=None):
             uploaded.append(True)
@@ -527,3 +527,392 @@ def test_upload_no_duplicates_proceeds_silently(monkeypatch, capsys, tmp_path, a
     assert "Potential duplicate" not in captured.out
     assert "Uploaded to Strava successfully" in captured.out
     assert uploaded
+
+
+def test_upload_duplicate_check_query_window(monkeypatch, capsys, tmp_path, auth_state, sample_activity_detail):
+    """Assert that the upload duplicate check queries ±5 minutes around start_time."""
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+
+    class DummyMiFitnessClient:
+        def __init__(self, state, **kwargs):
+            pass
+        def get_activity_detail(self, activity_id):
+            return sample_activity_detail
+
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyMiFitnessClient)
+    monkeypatch.setattr(
+        cli,
+        "render_export",
+        lambda detail, file_format, compress=False: type(
+            "Export", (), {"payload": b"fitdata", "file_format": "fit", "compressed": False},
+        )(),
+    )
+
+    captured_params: list[dict] = []
+
+    class SpyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            captured_params.append({"after": after, "before": before})
+            return []
+        def upload_activity(self, payload, sport_type=None, external_id=None):
+            return {"activity_id": 99999}
+
+    monkeypatch.setattr(strava_client_mod, "StravaClient", SpyStravaClient)
+
+    output_path = tmp_path / "activity.fit"
+    exit_code = cli.main([
+        "upload-to-strava", "sid:key:1",
+        "--strava-token-path", str(token_path),
+        "--output", str(output_path),
+    ])
+
+    assert exit_code == 0
+    assert len(captured_params) == 1
+    expected_start = sample_activity_detail.start_time
+    assert captured_params[0]["after"] == expected_start - 5 * 60
+    assert captured_params[0]["before"] == expected_start + 5 * 60
+
+
+# ---------------------------------------------------------------------------
+# list-activities --strava tests
+# ---------------------------------------------------------------------------
+
+_SAMPLE_ACTIVITY = Activity(
+    activity_id="sid:key:1",
+    sid="sid",
+    key="key",
+    category="outdoor_run",
+    sport_type=1,
+    title="Morning Run",
+    start_time=1717200000,
+    end_time=1717203600,
+    duration_seconds=3600,
+    distance_meters=10000,
+    calories=700,
+    steps=12000,
+    sync_state="server",
+    next_key=None,
+    raw_record={"sid": "sid", "key": "key"},
+    raw_report={"name": "Morning Run"},
+)
+
+
+def _dummy_mi_client(auth_state, activities):
+    class DummyClient:
+        def __init__(self, state, **kwargs):
+            assert state == auth_state
+
+        def list_activities(self, *, start_time, end_time, limit, category=None):
+            return activities
+
+    return DummyClient
+
+
+def test_list_activities_strava_column_matched(monkeypatch, capsys, tmp_path, auth_state):
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", _dummy_mi_client(auth_state, [_SAMPLE_ACTIVITY]))
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+
+    class DummyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            return [{"start_date": "2024-06-01T00:00:00Z", "name": "Matched Run"}]
+
+    monkeypatch.setattr(strava_client_mod, "StravaClient", DummyStravaClient)
+
+    exit_code = cli.main([
+        "list-activities",
+        "--strava",
+        "--strava-token-path", str(token_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Strava" in captured.out
+    assert "\u2713" in captured.out
+
+
+def test_list_activities_strava_column_not_matched(monkeypatch, capsys, tmp_path, auth_state):
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", _dummy_mi_client(auth_state, [_SAMPLE_ACTIVITY]))
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+
+    class DummyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            return [{"start_date": "2024-07-01T12:00:00Z", "name": "Unrelated Run"}]
+
+    monkeypatch.setattr(strava_client_mod, "StravaClient", DummyStravaClient)
+
+    exit_code = cli.main([
+        "list-activities",
+        "--strava",
+        "--strava-token-path", str(token_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Strava" in captured.out
+    assert "\u2717" in captured.out
+
+
+def test_list_activities_strava_no_tokens_warns(monkeypatch, capsys, tmp_path, auth_state):
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", _dummy_mi_client(auth_state, [_SAMPLE_ACTIVITY]))
+
+    token_path = tmp_path / "nonexistent.json"
+
+    exit_code = cli.main([
+        "list-activities",
+        "--strava",
+        "--strava-token-path", str(token_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Warning" in captured.err
+    assert "Strava" not in captured.out
+
+
+def test_list_activities_strava_api_error_warns(monkeypatch, capsys, tmp_path, auth_state):
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", _dummy_mi_client(auth_state, [_SAMPLE_ACTIVITY]))
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+
+    class FailingStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            from mi_fitness_sync.exceptions import StravaError
+            raise StravaError("Token expired")
+
+    monkeypatch.setattr(strava_client_mod, "StravaClient", FailingStravaClient)
+
+    exit_code = cli.main([
+        "list-activities",
+        "--strava",
+        "--strava-token-path", str(token_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Warning" in captured.err
+    assert "Strava" not in captured.out
+
+
+def test_list_activities_strava_json_includes_in_strava(monkeypatch, capsys, tmp_path, auth_state):
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", _dummy_mi_client(auth_state, [_SAMPLE_ACTIVITY]))
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+
+    class DummyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            return [{"start_date": "2024-06-01T00:00:00Z", "name": "Matched Run"}]
+
+    monkeypatch.setattr(strava_client_mod, "StravaClient", DummyStravaClient)
+
+    exit_code = cli.main([
+        "list-activities",
+        "--strava",
+        "--strava-token-path", str(token_path),
+        "--json",
+    ])
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output[0]["in_strava"] is True
+
+
+def test_list_activities_without_strava_flag_no_column(monkeypatch, capsys, auth_state):
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", _dummy_mi_client(auth_state, [_SAMPLE_ACTIVITY]))
+
+    exit_code = cli.main(["list-activities"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Strava" not in captured.out
+
+
+def test_fetch_strava_status_computes_correct_range(monkeypatch, tmp_path, auth_state):
+    """Assert that _fetch_strava_status passes after = min(start_time) - 1 and before = max(start_time) + 1."""
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    activity_a = Activity(
+        activity_id="a:b:1", sid="a", key="b", category="outdoor_run", sport_type=1,
+        title="First", start_time=1000000, end_time=1003600, duration_seconds=3600,
+        distance_meters=5000, calories=300, steps=6000, sync_state="server",
+        next_key=None, raw_record={}, raw_report={},
+    )
+    activity_b = Activity(
+        activity_id="a:b:2", sid="a", key="b", category="outdoor_run", sport_type=1,
+        title="Second", start_time=2000000, end_time=2003600, duration_seconds=3600,
+        distance_meters=5000, calories=300, steps=6000, sync_state="server",
+        next_key=None, raw_record={}, raw_report={},
+    )
+
+    captured_params: list[dict] = []
+
+    class SpyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            captured_params.append({"after": after, "before": before, "per_page": per_page, "page": page})
+            return []
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+    monkeypatch.setattr(strava_client_mod, "StravaClient", SpyStravaClient)
+
+    result = cli._fetch_strava_status([activity_a, activity_b], str(token_path))
+
+    assert captured_params[0]["after"] == 1000000 - 1
+    assert captured_params[0]["before"] == 2000000 + 1
+
+
+def test_fetch_strava_status_offset_1800s_no_match(monkeypatch, tmp_path):
+    """A Strava activity 1800 s away from a Mi Fitness activity should NOT match under exact-match policy."""
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    mi_start = 1717200000
+    strava_dt_1800_after = "2024-06-01T00:30:00Z"  # mi_start + 1800
+
+    activity = Activity(
+        activity_id="s:k:1", sid="s", key="k", category="outdoor_run", sport_type=1,
+        title="Run", start_time=mi_start, end_time=mi_start + 3600, duration_seconds=3600,
+        distance_meters=10000, calories=700, steps=12000, sync_state="server",
+        next_key=None, raw_record={}, raw_report={},
+    )
+
+    class DummyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            return [{"start_date": strava_dt_1800_after}]
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+    monkeypatch.setattr(strava_client_mod, "StravaClient", DummyStravaClient)
+
+    result = cli._fetch_strava_status([activity], str(token_path))
+
+    assert result["s:k:1"] is False
+
+
+def test_fetch_strava_status_offset_1801s_no_match(monkeypatch, tmp_path):
+    """A Strava activity 1801 s away should NOT match under exact-match policy."""
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    mi_start = 1717200000
+    strava_dt_1801_after = "2024-06-01T00:30:01Z"  # mi_start + 1801
+
+    activity = Activity(
+        activity_id="s:k:1", sid="s", key="k", category="outdoor_run", sport_type=1,
+        title="Run", start_time=mi_start, end_time=mi_start + 3600, duration_seconds=3600,
+        distance_meters=10000, calories=700, steps=12000, sync_state="server",
+        next_key=None, raw_record={}, raw_report={},
+    )
+
+    class DummyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            return [{"start_date": strava_dt_1801_after}]
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+    monkeypatch.setattr(strava_client_mod, "StravaClient", DummyStravaClient)
+
+    result = cli._fetch_strava_status([activity], str(token_path))
+
+    assert result["s:k:1"] is False
+
+
+def test_fetch_strava_status_paginates(monkeypatch, tmp_path):
+    """When the first Strava page is full (200 results), a second page is requested."""
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    mi_start = 1717200000
+
+    activity = Activity(
+        activity_id="s:k:1", sid="s", key="k", category="outdoor_run", sport_type=1,
+        title="Run", start_time=mi_start, end_time=mi_start + 3600, duration_seconds=3600,
+        distance_meters=10000, calories=700, steps=12000, sync_state="server",
+        next_key=None, raw_record={}, raw_report={},
+    )
+
+    page_1 = [{"start_date": "2024-07-01T00:00:00Z"}] * 200  # full page, no match
+    page_2 = [{"start_date": "2024-06-01T00:00:00Z"}]          # partial page, exact match
+
+    pages_requested: list[int] = []
+
+    class PaginatingStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+
+        def list_activities(self, *, after, before, per_page=30, page=1):
+            pages_requested.append(page)
+            if page == 1:
+                return page_1
+            return page_2
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+    monkeypatch.setattr(strava_client_mod, "StravaClient", PaginatingStravaClient)
+
+    result = cli._fetch_strava_status([activity], str(token_path))
+
+    assert pages_requested == [1, 2]
+    assert result["s:k:1"] is True

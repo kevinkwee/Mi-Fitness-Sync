@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-REQUIRED_SCOPE = "activity:write,read"
+REQUIRED_SCOPE = "activity:write,activity:read_all,read_all"
 
 
 def build_authorization_url(client_id: str, redirect_uri: str, state: str) -> str:

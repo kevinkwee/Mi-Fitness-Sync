@@ -11,7 +11,7 @@ from pathlib import Path
 
 from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
 from mi_fitness_sync.activity.formatting import parse_cli_time
-from mi_fitness_sync.activity.models import ActivityDetail
+from mi_fitness_sync.activity.models import Activity, ActivityDetail
 from mi_fitness_sync.activity.utils import render_activities_table
 from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MiFitnessAuthClient
 from mi_fitness_sync.auth.state import utc_now_iso
@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
     )
     activities_parser.add_argument("--json", action="store_true", help="Print activities as JSON")
+    activities_parser.add_argument("--strava", action="store_true", help="Show whether each activity is already uploaded to Strava")
+    activities_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
     activities_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     detail_parser = subparsers.add_parser("activity-detail", help="Fetch normalized detail for a listed Mi Fitness activity")
@@ -226,11 +228,21 @@ def handle_list_activities(args: argparse.Namespace) -> int:
         category=args.category,
     )
 
+    strava_status = None
+    if args.strava:
+        strava_status = _fetch_strava_status(activities, args.strava_token_path)
+
     if args.json:
-        print(json.dumps([activity.to_json_dict() for activity in activities], indent=2, sort_keys=True))
+        items = []
+        for activity in activities:
+            item = activity.to_json_dict()
+            if strava_status is not None:
+                item["in_strava"] = strava_status.get(activity.activity_id, False)
+            items.append(item)
+        print(json.dumps(items, indent=2, sort_keys=True))
         return 0
 
-    print(render_activities_table(activities))
+    print(render_activities_table(activities, strava_status=strava_status))
     return 0
 
 
@@ -395,6 +407,61 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
     if activity_id:
         print(f"Strava activity: https://www.strava.com/activities/{activity_id}")
     return 0
+
+
+def _fetch_strava_status(
+    activities: list[Activity],
+    strava_token_path: str | None,
+) -> dict[str, bool] | None:
+    """Query Strava and return a map of activity_id → matched boolean.
+
+    Returns ``None`` (and prints a warning) when Strava auth is unavailable.
+    """
+    from mi_fitness_sync.strava.client import StravaClient
+    from mi_fitness_sync.strava.store import load_tokens
+
+    token_state = load_tokens(strava_token_path)
+    if token_state is None:
+        print("Warning: No Strava token state found — skipping Strava column.", file=sys.stderr)
+        return None
+
+    start_times = [a.start_time for a in activities if a.start_time is not None]
+    if not start_times:
+        return {a.activity_id: False for a in activities}
+
+    after_ts = min(start_times) - 1
+    before_ts = max(start_times) + 1
+
+    try:
+        strava = StravaClient(token_state, token_path=strava_token_path)
+        per_page = 200
+        strava_activities: list[dict] = []
+        page = 1
+        while True:
+            batch = strava.list_activities(after=after_ts, before=before_ts, per_page=per_page, page=page)
+            strava_activities.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+    except (StravaError, Exception) as exc:
+        print(f"Warning: Failed to query Strava — skipping Strava column. ({exc})", file=sys.stderr)
+        return None
+
+    strava_starts: list[int] = []
+    for sa in strava_activities:
+        start_str = sa.get("start_date")
+        if start_str:
+            dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            strava_starts.append(int(dt.timestamp()))
+
+    status: dict[str, bool] = {}
+    for activity in activities:
+        if activity.start_time is None:
+            status[activity.activity_id] = False
+            continue
+        matched = activity.start_time in strava_starts
+        status[activity.activity_id] = matched
+    return status
 
 
 def _sanitize_filename(title: str) -> str:

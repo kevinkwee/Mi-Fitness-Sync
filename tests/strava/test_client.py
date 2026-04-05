@@ -156,7 +156,7 @@ def test_list_activities_returns_results(mock_requests):
     assert result == activities
     mock_requests.get.assert_called_once()
     call_kwargs = mock_requests.get.call_args
-    assert call_kwargs[1]["params"] == {"after": 1000, "before": 2000, "per_page": 30}
+    assert call_kwargs[1]["params"] == {"after": 1000, "before": 2000, "per_page": 30, "page": 1}
 
 
 @patch("mi_fitness_sync.strava.client.requests")

@@ -48,13 +48,13 @@ class StravaClient:
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._state.access_token}"}
 
-    def list_activities(self, *, after: int, before: int, per_page: int = 30) -> list[dict]:
+    def list_activities(self, *, after: int, before: int, per_page: int = 30, page: int = 1) -> list[dict]:
         """Return athlete activities with start dates in the given epoch range."""
         self._ensure_valid_token()
         response = requests.get(
             STRAVA_ACTIVITIES_URL,
             headers=self._auth_headers(),
-            params={"after": after, "before": before, "per_page": per_page},
+            params={"after": after, "before": before, "per_page": per_page, "page": page},
             timeout=30,
         )
         if response.status_code != 200:

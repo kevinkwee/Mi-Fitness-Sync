@@ -188,3 +188,46 @@ class TestMergeFdsSamplesIntoTrackPoints:
 
     def test_empty_inputs(self):
         merge_fds_samples_into_track_points([], [])
+
+
+def _make_activity(**overrides) -> Activity:
+    defaults = dict(
+        activity_id="sid:key:1",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=1,
+        title="Run",
+        start_time=1717200000,
+        end_time=1717203600,
+        duration_seconds=3600,
+        distance_meters=10000,
+        calories=700,
+        steps=12000,
+        sync_state="server",
+        next_key=None,
+        raw_record={},
+        raw_report={},
+    )
+    defaults.update(overrides)
+    return Activity(**defaults)
+
+
+def test_render_activities_table_with_strava_matched():
+    activities = [_make_activity()]
+    result = render_activities_table(activities, strava_status={"sid:key:1": True})
+    assert "Strava" in result
+    assert "\u2713" in result
+
+
+def test_render_activities_table_with_strava_not_matched():
+    activities = [_make_activity()]
+    result = render_activities_table(activities, strava_status={"sid:key:1": False})
+    assert "Strava" in result
+    assert "\u2717" in result
+
+
+def test_render_activities_table_without_strava():
+    activities = [_make_activity()]
+    result = render_activities_table(activities)
+    assert "Strava" not in result

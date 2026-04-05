@@ -10,26 +10,33 @@ from mi_fitness_sync.activity.models import Activity, ActivitySample, TrackPoint
 from mi_fitness_sync.exceptions import MiFitnessError
 
 
-def render_activities_table(activities: list[Activity]) -> str:
+def render_activities_table(
+    activities: list[Activity],
+    strava_status: dict[str, bool] | None = None,
+) -> str:
     if not activities:
         return "No activities matched the requested time window."
 
     headers = ["ID", "Start", "Title", "Type", "Duration", "Km", "Cal", "Steps", "State"]
+    if strava_status is not None:
+        headers.append("Strava")
     rows = []
     for activity in activities:
-        rows.append(
-            [
-                activity.activity_id,
-                format_terminal_time(activity.start_time),
-                activity.title,
-                "-" if activity.sport_type is None else str(activity.sport_type),
-                format_duration(activity.duration_seconds),
-                format_distance_km(activity.distance_meters),
-                "-" if activity.calories is None else str(activity.calories),
-                "-" if activity.steps is None else str(activity.steps),
-                activity.sync_state or "-",
-            ]
-        )
+        row = [
+            activity.activity_id,
+            format_terminal_time(activity.start_time),
+            activity.title,
+            "-" if activity.sport_type is None else str(activity.sport_type),
+            format_duration(activity.duration_seconds),
+            format_distance_km(activity.distance_meters),
+            "-" if activity.calories is None else str(activity.calories),
+            "-" if activity.steps is None else str(activity.steps),
+            activity.sync_state or "-",
+        ]
+        if strava_status is not None:
+            matched = strava_status.get(activity.activity_id)
+            row.append("\u2713" if matched else ("\u2717" if matched is False else "-"))
+        rows.append(row)
 
     widths = [len(header) for header in headers]
     for row in rows:
