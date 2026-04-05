@@ -34,6 +34,7 @@ Most of the actual code lives under `src/mi_fitness_sync`, organized into subpac
 3. `cli/` for the command-line entry point
 4. `export/` for GPX, TCX, and FIT rendering
 5. `fds/` for Mi Fitness FDS binary parsing and caching
+6. `strava/` for Strava OAuth2 authentication and upload
 
 Shared helpers such as `config.py`, `exceptions.py`, and `paths.py` live at the package root.
 
@@ -74,6 +75,7 @@ python main.py --help
 3. List recent workouts from the Mi Fitness cloud
 4. Fetch normalized activity detail for one workout
 5. Export a workout to GPX, TCX, or FIT
+6. Upload a workout directly to Strava
 
 Examples:
 
@@ -83,6 +85,8 @@ python -m mi_fitness_sync auth-status
 python -m mi_fitness_sync list-activities --limit 10
 python -m mi_fitness_sync activity-detail sid:key:1717200000 --json
 python -m mi_fitness_sync export-activity sid:key:1717200000 --format gpx --output exports/run.gpx
+python -m mi_fitness_sync strava-login --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
+python -m mi_fitness_sync upload-to-strava sid:key:1717200000
 ```
 
 If you want to use the wrapper instead:
@@ -205,6 +209,82 @@ Export behavior:
 3. FIT generation is best-effort and only includes fields that are present in the Mi Fitness source payload
 4. If `--output` is omitted, exports are written under `~/.mi_fitness_sync/exports/` using a sanitized title plus local activity timestamp
 
+### `strava-login`
+
+Authenticates with Strava using the OAuth2 authorization code flow. This opens a browser window for you to authorize the application, then stores the resulting tokens locally.
+
+Before using this command:
+
+1. Create a Strava API application at https://www.strava.com/settings/api
+2. Set the **Authorization Callback Domain** to `localhost` (just the domain — no protocol, no port, no path)
+
+The redirect URI used by the CLI is `http://localhost:{port}/callback`, but Strava only matches on the domain portion, so the callback domain setting must be exactly `localhost`.
+
+```bash
+python -m mi_fitness_sync strava-login --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
+```
+
+If you omit `--client-id` or `--client-secret`, the CLI will prompt you to enter them interactively.
+
+Relevant flags:
+
+1. `--client-id` is your Strava API application client ID
+2. `--client-secret` is your Strava API application client secret
+3. `--port` changes the local OAuth callback port (default: 5478)
+4. `--strava-token-path` overrides the default Strava token file path
+
+The OAuth flow works as follows:
+
+1. The CLI starts a temporary local HTTP server on `localhost:{port}`
+2. Your browser opens the Strava authorization page
+3. After you authorize, Strava redirects back to the local server with an authorization code
+4. The CLI exchanges the code for access and refresh tokens
+5. Tokens are saved to `~/.mi_fitness_sync/strava/tokens.json`
+
+Access tokens expire after six hours. The CLI automatically refreshes them using the stored refresh token when needed.
+
+### `strava-status`
+
+Shows the currently saved Strava auth state.
+
+Example:
+
+```bash
+python -m mi_fitness_sync strava-status
+```
+
+### `upload-to-strava`
+
+Uploads one Mi Fitness activity to Strava as a FIT file. The FIT file is also saved locally.
+
+Examples:
+
+```bash
+python -m mi_fitness_sync upload-to-strava sid:key:1717200000
+python -m mi_fitness_sync upload-to-strava sid:key:1717200000 --output exports/run.fit
+python -m mi_fitness_sync upload-to-strava sid:key:1717200000 --country-code ID
+```
+
+Relevant flags:
+
+1. `activity_id` must come from the `activity_id` field emitted by `list-activities`
+2. `--output` sets the local FIT file save path (default: `~/.mi_fitness_sync/exports/<title>_<time>.fit`)
+3. `--country-code` uses the same region override behavior as `list-activities`
+4. `--strava-token-path` overrides the default Strava token file path
+5. `--no-cache` disables the local FDS binary cache
+6. `--cache-dir` overrides the local FDS cache directory
+7. `--verbose` enables debug logging
+
+Upload behavior:
+
+1. Fetches the activity detail from Mi Fitness using the saved Mi Fitness auth state
+2. Renders the activity to FIT format
+3. Saves the FIT file locally
+4. Uploads the FIT file to Strava using the saved Strava tokens
+5. Polls Strava until processing completes, then prints the Strava activity URL
+6. The activity name is not set explicitly — Strava auto-generates it from time and location
+7. The sport type is mapped from the Mi Fitness sport type to the closest Strava equivalent
+
 ### `logout`
 
 Deletes the saved local auth state.
@@ -217,9 +297,13 @@ python -m mi_fitness_sync logout
 
 ## Local Auth Storage
 
-By default, auth state is stored in the user profile under `~/.mi_fitness_sync/auth/auth.json`.
+By default, Mi Fitness auth state is stored in the user profile under `~/.mi_fitness_sync/auth/auth.json`.
 
 You can override that location with `--state-path`.
+
+Strava tokens are stored under `~/.mi_fitness_sync/strava/tokens.json`. You can override that location with `--strava-token-path`.
+
+Both files contain sensitive credentials and should not be shared or committed to version control.
 
 ## Limitations
 

@@ -37,3 +37,11 @@ class Step2RequiredError(MiFitnessError):
 
 class AuthStateNotFoundError(MiFitnessError):
     """No local auth state exists."""
+
+
+class StravaError(MiFitnessError):
+    """Base error for Strava API or OAuth failures."""
+
+
+class StravaAuthError(StravaError):
+    """Strava OAuth authentication failure."""

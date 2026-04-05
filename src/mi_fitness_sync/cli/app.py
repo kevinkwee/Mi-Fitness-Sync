@@ -23,6 +23,7 @@ from mi_fitness_sync.exceptions import (
     MiFitnessError,
     NotificationRequiredError,
     Step2RequiredError,
+    StravaError,
     XiaomiApiError,
 )
 from mi_fitness_sync.paths import get_exports_dir
@@ -86,6 +87,31 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
     export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
+    strava_login_parser = subparsers.add_parser("strava-login", help="Authenticate with Strava via OAuth2")
+    strava_login_parser.add_argument("--client-id", help="Strava API client ID")
+    strava_login_parser.add_argument("--client-secret", help="Strava API client secret")
+    strava_login_parser.add_argument("--port", type=int, default=5478, help="Local port for OAuth callback (default: 5478)")
+    strava_login_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+
+    strava_status_parser = subparsers.add_parser("strava-status", help="Show Strava auth status")
+    strava_status_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+
+    upload_parser = subparsers.add_parser("upload-to-strava", help="Upload a Mi Fitness activity to Strava as FIT")
+    upload_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
+    upload_parser.add_argument("--state-path", help="Override the persisted Mi Fitness auth state path")
+    upload_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+    upload_parser.add_argument(
+        "--country-code",
+        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+    )
+    upload_parser.add_argument(
+        "--output",
+        help="Destination file path for the local FIT copy (default: ~/.mi_fitness_sync/exports/<title>_<time>.fit)",
+    )
+    upload_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    upload_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
+    upload_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+
     return parser
 
 
@@ -109,6 +135,12 @@ def main(argv: list[str] | None = None) -> int:
             return handle_activity_detail(args)
         if args.command == "export-activity":
             return handle_export_activity(args)
+        if args.command == "strava-login":
+            return handle_strava_login(args)
+        if args.command == "strava-status":
+            return handle_strava_status(args)
+        if args.command == "upload-to-strava":
+            return handle_upload_to_strava(args)
     except MiFitnessError as exc:
         print(format_error(exc), file=sys.stderr)
         return 1
@@ -247,6 +279,100 @@ def handle_export_activity(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_strava_login(args: argparse.Namespace) -> int:
+    from mi_fitness_sync.strava.auth import run_oauth_flow
+    from mi_fitness_sync.strava.store import StravaTokenState, save_tokens
+
+    client_id = args.client_id
+    client_secret = args.client_secret
+    if not client_id:
+        client_id = input("Strava client ID: ").strip()
+    if not client_secret:
+        client_secret = input("Strava client secret: ").strip()
+    if not client_id or not client_secret:
+        raise MiFitnessError(
+            "Strava client_id and client_secret are required.\n"
+            "Pass --client-id and --client-secret or enter them when prompted."
+        )
+
+    token_data = run_oauth_flow(client_id, client_secret, port=args.port)
+
+    athlete = token_data.get("athlete", {})
+    state = StravaTokenState(
+        client_id=client_id,
+        client_secret=client_secret,
+        access_token=token_data["access_token"],
+        refresh_token=token_data["refresh_token"],
+        expires_at=token_data["expires_at"],
+        athlete_id=athlete.get("id"),
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+    )
+    path = save_tokens(state, args.strava_token_path)
+
+    print("Strava login succeeded.")
+    print(f"Token path: {path}")
+    print(f"Athlete ID: {state.athlete_id}")
+    return 0
+
+
+def handle_strava_status(args: argparse.Namespace) -> int:
+    from mi_fitness_sync.strava.store import load_tokens, resolve_token_path
+
+    state = load_tokens(args.strava_token_path)
+    if state is None:
+        raise MiFitnessError("No Strava token state found. Run 'strava-login' first.")
+
+    print("Strava auth state found.")
+    print(f"Token path: {resolve_token_path(args.strava_token_path)}")
+    print(f"Athlete ID: {state.athlete_id}")
+    print(f"Token expires at: {datetime.fromtimestamp(state.expires_at, tz=timezone.utc).isoformat()}")
+    print(f"Created at: {state.created_at}")
+    print(f"Updated at: {state.updated_at}")
+    return 0
+
+
+def handle_upload_to_strava(args: argparse.Namespace) -> int:
+    from mi_fitness_sync.strava.client import StravaClient
+    from mi_fitness_sync.strava.sport_mapping import strava_sport_type
+    from mi_fitness_sync.strava.store import load_tokens
+
+    token_state = load_tokens(args.strava_token_path)
+    if token_state is None:
+        raise MiFitnessError("No Strava token state found. Run 'strava-login' first.")
+
+    client = _activities_client(
+        args.state_path, args.country_code,
+        no_cache=args.no_cache, cache_dir=args.cache_dir,
+    )
+    detail = client.get_activity_detail(args.activity_id)
+    export = render_export(detail, "fit")
+
+    # Save FIT file locally
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        safe_title = _sanitize_filename(detail.activity.title)
+        start_dt = _activity_local_datetime(detail)
+        date_str = start_dt.strftime("%Y%m%d_%H%M%S")
+        output_path = get_exports_dir() / f"{safe_title}_{date_str}.fit"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(export.payload)
+
+    print(f"Saved FIT file to {output_path} ({len(export.payload)} bytes)")
+
+    # Upload to Strava
+    sport = strava_sport_type(detail.activity.sport_type)
+    strava = StravaClient(token_state, token_path=args.strava_token_path)
+    result = strava.upload_activity(export.payload, sport_type=sport, external_id=args.activity_id)
+
+    activity_id = result.get("activity_id")
+    print(f"Uploaded to Strava successfully.")
+    if activity_id:
+        print(f"Strava activity: https://www.strava.com/activities/{activity_id}")
+    return 0
+
+
 def _sanitize_filename(title: str) -> str:
     """Replace spaces with underscores and strip non-alphanumeric/underscore chars."""
     name = title.replace(" ", "_")
@@ -293,6 +419,8 @@ def format_error(exc: MiFitnessError) -> str:
         return f"Login requires additional verification in a browser or app. URL: {exc.notification_url}"
     if isinstance(exc, Step2RequiredError):
         return "Login requires a Xiaomi Passport step-2 verification flow that this CLI does not automate yet."
+    if isinstance(exc, StravaError):
+        return str(exc)
     if isinstance(exc, XiaomiApiError):
         if exc.code is None:
             return str(exc)

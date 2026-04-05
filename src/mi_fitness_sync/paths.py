@@ -21,3 +21,7 @@ def get_cache_dir() -> Path:
 
 def get_exports_dir() -> Path:
     return _ensure_dir(APP_DIR / "exports")
+
+
+def get_strava_dir() -> Path:
+    return _ensure_dir(APP_DIR / "strava")
