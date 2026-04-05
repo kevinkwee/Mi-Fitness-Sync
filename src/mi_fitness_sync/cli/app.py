@@ -468,8 +468,10 @@ def _fetch_strava_status(
     if not start_times:
         return {a.activity_id: False for a in activities}
 
-    after_ts = min(start_times) - 2
-    before_ts = max(start_times) + 2
+    _MATCH_WINDOW_SECONDS = 6
+
+    after_ts = min(start_times) - _MATCH_WINDOW_SECONDS
+    before_ts = max(start_times) + _MATCH_WINDOW_SECONDS
 
     try:
         strava = StravaClient(token_state, token_path=strava_token_path)
@@ -498,7 +500,7 @@ def _fetch_strava_status(
         if activity.start_time is None:
             status[activity.activity_id] = False
             continue
-        matched = any(abs(activity.start_time - ss) <= 1 for ss in strava_starts)
+        matched = any(abs(activity.start_time - ss) <= _MATCH_WINDOW_SECONDS for ss in strava_starts)
         status[activity.activity_id] = matched
     return status
 

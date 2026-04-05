@@ -1061,7 +1061,7 @@ def test_list_activities_without_strava_flag_no_column(monkeypatch, capsys, auth
 
 
 def test_fetch_strava_status_computes_correct_range(monkeypatch, tmp_path, auth_state):
-    """Assert that _fetch_strava_status passes after = min(start_time) - 2 and before = max(start_time) + 2."""
+    """Assert that _fetch_strava_status passes after = min(start_time) - 6 and before = max(start_time) + 6."""
     import mi_fitness_sync.strava.client as strava_client_mod
     from mi_fitness_sync.strava.store import save_tokens
 
@@ -1095,8 +1095,8 @@ def test_fetch_strava_status_computes_correct_range(monkeypatch, tmp_path, auth_
 
     result = cli._fetch_strava_status([activity_a, activity_b], str(token_path))
 
-    assert captured_params[0]["after"] == 1000000 - 2
-    assert captured_params[0]["before"] == 2000000 + 2
+    assert captured_params[0]["after"] == 1000000 - 6
+    assert captured_params[0]["before"] == 2000000 + 6
 
 
 def test_fetch_strava_status_offset_1800s_no_match(monkeypatch, tmp_path):
