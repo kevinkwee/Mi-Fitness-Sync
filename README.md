@@ -17,287 +17,312 @@ This is mainly useful if you want to:
 1. Confirm that your workouts really exist in Mi Fitness cloud storage
 2. Inspect recent activities when Mi Fitness fails to push them to Strava
 3. Pull activity data yourself instead of waiting for the official sync to work
-4. Export workouts to GPX, TCX, or FIT for manual backup and re-upload workflows
-
-## Project Layout
-
-The codebase is set up with:
-
-1. A `src/` layout
-2. `pyproject.toml` for project metadata
-3. A Python package named `mi_fitness_sync`
-
-Most of the actual code lives under `src/mi_fitness_sync`, organized into subpackages such as:
-
-1. `activity/` for Mi Fitness activity listing, detail lookup, region routing, and normalization
-2. `auth/` for Xiaomi Passport auth state and persistence
-3. `cli/` for the command-line entry point
-4. `export/` for GPX, TCX, and FIT rendering
-5. `fds/` for Mi Fitness FDS binary parsing and caching
-6. `strava/` for Strava OAuth2 authentication and upload
-
-Shared helpers such as `config.py`, `exceptions.py`, and `paths.py` live at the package root.
-
-Tests under `tests/` mirror that package structure with per-module test files.
+4. Export workouts to GPX, TCX, or FIT for manual backup or re-upload
+5. Upload workouts directly to Strava with duplicate detection
 
 ## Install
 
 Python 3.12+ is required.
 
-Install it in editable mode:
+Install in editable mode:
 
 ```bash
 python -m pip install -e .
 ```
 
-Then run it with:
+Then run with:
 
 ```bash
 mi-fitness-sync --help
 ```
 
-You can also run it with:
-
-```bash
-python -m mi_fitness_sync --help
-```
-
-If you do not want to install it yet, there is also a simple wrapper at the repo root:
+Or without installing:
 
 ```bash
 python main.py --help
 ```
 
+## Strava API Setup
+
+Before using any Strava commands you need a Strava API application:
+
+1. Go to https://www.strava.com/settings/api and create an application
+2. Set the **Authorization Callback Domain** to `localhost` (just the domain — no protocol, no port, no path)
+
+The CLI uses `http://localhost:{port}/callback` as the redirect URI. Strava only matches on the domain portion, so the callback domain setting must be exactly `localhost`.
+
 ## Quick Start
 
-1. Authenticate with your Xiaomi / Mi account
-2. Verify the saved auth state
-3. List recent workouts from the Mi Fitness cloud
-4. Fetch normalized activity detail for one workout
-5. Export a workout to GPX, TCX, or FIT
-6. Upload a workout directly to Strava
+```bash
+# 1. Log in to your Mi / Xiaomi account (prompts for email and password)
+mi-fitness-sync login
+
+# 2. Check auth status
+mi-fitness-sync auth-status
+
+# 3. List recent workouts
+mi-fitness-sync list-activities --limit 10
+
+# 4. List activities and show which ones are already on Strava
+mi-fitness-sync list-activities --limit 10 --strava
+
+# 5. View normalized detail for one activity
+mi-fitness-sync activity-detail sid:key:1717200000 --json
+
+# 6. Export a workout
+mi-fitness-sync export-activity sid:key:1717200000 --format gpx --output run.gpx
+
+# 7. Authenticate with Strava (prompts for client ID and secret)
+mi-fitness-sync strava-login
+
+# 8. Upload a workout to Strava
+mi-fitness-sync upload-to-strava sid:key:1717200000
+```
+
+All credentials are entered via CLI arguments or interactive prompts — there are no environment variables.
+
+## Commands
+
+Commands that access Mi Fitness accept `--state-path` to override the default auth state file location. Commands that access Strava accept `--strava-token-path` to override the default Strava token file location.
+
+### `login`
+
+Logs into Xiaomi Passport for the Mi Fitness service and saves the auth state locally. Email and password can be passed as arguments or entered interactively when omitted. The password prompt does not echo input.
 
 Examples:
 
 ```bash
-python -m mi_fitness_sync login --email you@example.com --password your-password
-python -m mi_fitness_sync auth-status
-python -m mi_fitness_sync list-activities --limit 10
-python -m mi_fitness_sync activity-detail sid:key:1717200000 --json
-python -m mi_fitness_sync export-activity sid:key:1717200000 --format gpx --output exports/run.gpx
-python -m mi_fitness_sync strava-login --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
-python -m mi_fitness_sync upload-to-strava sid:key:1717200000
+mi-fitness-sync login
+mi-fitness-sync login --email you@example.com --password your-password
 ```
 
-If you want to use the wrapper instead:
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--email` | Mi / Xiaomi account email (prompted if omitted) |
+| `--password` | Mi / Xiaomi account password (prompted securely if omitted) |
+| `--state-path` | Override the persisted auth state file path |
+
+### `logout`
+
+Deletes the saved local Mi Fitness auth state.
 
 ```bash
-python main.py login --email you@example.com --password your-password
-python main.py auth-status
-python main.py list-activities --limit 10
-python main.py activity-detail sid:key:1717200000 --json
-python main.py export-activity sid:key:1717200000 --format fit --output exports/run.fit
+mi-fitness-sync logout
 ```
 
-## Commands
+Flags:
 
-Every command that reads or writes persisted auth state accepts `--state-path` to override the default auth state file location.
-
-### `login`
-
-Logs into Xiaomi Passport for the Mi Fitness service and saves the auth state locally.
-
-Example:
-
-```bash
-python -m mi_fitness_sync login --email you@example.com --password your-password
-```
-
-Relevant flags:
-
-1. `--state-path` to override the default auth state file path
+| Flag | Description |
+|------|-------------|
+| `--state-path` | Override the persisted auth state file path |
 
 ### `auth-status`
 
 Shows the currently saved Mi Fitness auth state.
 
-Examples:
-
 ```bash
-python -m mi_fitness_sync auth-status
-python -m mi_fitness_sync auth-status --json
+mi-fitness-sync auth-status
+mi-fitness-sync auth-status --json
 ```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the full auth state as JSON |
+| `--state-path` | Override the persisted auth state file path |
 
 ### `list-activities`
 
-Lists workout activities from the Mi Fitness cloud using the saved auth state.
-
-Examples:
+Lists workout activities from the Mi Fitness cloud.
 
 ```bash
-python -m mi_fitness_sync list-activities --limit 10
-python -m mi_fitness_sync list-activities --since 2024-01-01 --json
-python -m mi_fitness_sync list-activities --since 1717200000 --until 1719800000 --limit 50
-python -m mi_fitness_sync list-activities --since 2026-03-20 --country-code ID
+mi-fitness-sync list-activities --limit 10
+mi-fitness-sync list-activities --since 2024-01-01 --json
+mi-fitness-sync list-activities --since 2026-03-20 --strava
+mi-fitness-sync list-activities --since 1717200000 --until 1719800000 --limit 50
 ```
 
-Relevant flags:
+Flags:
 
-1. `--since` and `--until` accept unix seconds or ISO-8601 timestamps
-2. `--limit` controls how many activities are returned
-3. `--category` passes a Mi Fitness category filter if you already know the category string
-4. `--country-code` overrides activity routing with a two-letter country code such as `ID`, `GB`, or `US`; the CLI maps that to the Mi Fitness region used by the Android app
-5. `--json` prints the parsed activity list as JSON
-6. `--verbose` enables debug logging
+| Flag | Description |
+|------|-------------|
+| `--since` | Inclusive start time (unix seconds or ISO-8601) |
+| `--until` | Inclusive end time (unix seconds or ISO-8601) |
+| `--limit` | Maximum activities to return (default: 20) |
+| `--category` | Mi Fitness category filter string |
+| `--country-code` | Two-letter country override (e.g. `ID`, `GB`, `US`); mapped to the Mi Fitness region automatically |
+| `--strava` | Show whether each activity is already uploaded to Strava |
+| `--strava-token-path` | Override the Strava token file path (used with `--strava`) |
+| `--json` | Print activities as JSON |
+| `--verbose` | Enable debug logging |
+| `--state-path` | Override the persisted auth state file path |
 
-If `--country-code` is omitted, the CLI keeps the existing automatic Mi Fitness region detection behavior.
+When `--country-code` is omitted, the CLI uses automatic Mi Fitness region detection.
 
 ### `activity-detail`
 
-Fetches the richer normalized detail payload for one activity ID returned by `list-activities`.
-
-Examples:
+Fetches the normalized detail payload for one activity.
 
 ```bash
-python -m mi_fitness_sync activity-detail sid:key:1717200000
-python -m mi_fitness_sync activity-detail sid:key:1717200000 --country-code ID --json
+mi-fitness-sync activity-detail sid:key:1717200000
+mi-fitness-sync activity-detail sid:key:1717200000 --country-code ID --json
 ```
 
-Relevant flags:
+Flags:
 
-1. `activity_id` must come from the `activity_id` field emitted by `list-activities`
-2. `--country-code` uses the same region override behavior as `list-activities`
-3. `--json` prints the normalized detail model including parsed track points and samples
-4. `--no-cache` disables the local FDS binary cache
-5. `--cache-dir` overrides the local FDS cache directory
-6. `--verbose` enables debug logging
+| Flag | Description |
+|------|-------------|
+| `activity_id` | Activity ID from `list-activities` (positional, required) |
+| `--country-code` | Two-letter country override |
+| `--json` | Print normalized detail as JSON |
+| `--no-cache` | Disable the local FDS binary cache |
+| `--cache-dir` | Override the local FDS cache directory |
+| `--verbose` | Enable debug logging |
+| `--state-path` | Override the persisted auth state file path |
 
 Detail lookup behavior:
 
-1. The CLI still prefers the richer workout JSON payload when Mi Fitness exposes it.
-2. It also probes the validated `healthapp/service/gen_download_url` control-plane path and stores any discovered FDS metadata under the normalized detail model's `raw_detail["fds_downloads"]` field.
-3. If Mi Fitness does not return the richer JSON blob, the CLI can still synthesize detail when FDS sport samples or FDS GPS track points are recoverable.
-4. Recoverable FDS sport-report and recovery-rate files are attached to the normalized detail model, although the current exporters do not consume them.
-5. If neither the JSON detail payload nor FDS binary data is available, the command fails instead of inventing a best-effort timeline.
+1. Prefers the richer workout JSON payload when Mi Fitness exposes it
+2. Checks the Mi Fitness cloud for downloadable binary workout data (FDS files containing GPS tracks, heart rate, etc.)
+3. Can synthesize detail from FDS sport samples or GPS track points when the JSON payload is missing
+4. Attaches recoverable FDS sport-report and recovery-rate data (not consumed by exporters)
+5. Fails if neither the JSON detail nor FDS binary data is available
 
 ### `export-activity`
 
-Exports one activity to a standard file format using the normalized detail payload.
-
-Examples:
+Exports one activity to GPX, TCX, or FIT.
 
 ```bash
-python -m mi_fitness_sync export-activity sid:key:1717200000 --format gpx --output exports/run.gpx
-python -m mi_fitness_sync export-activity sid:key:1717200000 --format tcx --output exports/run.tcx.gz --gzip
-python -m mi_fitness_sync export-activity sid:key:1717200000 --format fit --output exports/run.fit
+mi-fitness-sync export-activity sid:key:1717200000 --format gpx --output run.gpx
+mi-fitness-sync export-activity sid:key:1717200000 --format tcx --output run.tcx.gz --gzip
+mi-fitness-sync export-activity sid:key:1717200000 --format fit
 ```
 
-Relevant flags:
+Flags:
 
-1. `--format` must be one of `gpx`, `tcx`, or `fit`
-2. `--output` is the destination file path
-3. `--gzip` wraps the generated payload with gzip compression before writing it
-4. `--country-code` uses the same region override behavior as `list-activities`
-5. `--no-cache` disables the local FDS binary cache
-6. `--cache-dir` overrides the local FDS cache directory
-7. `--verbose` enables debug logging
+| Flag | Description |
+|------|-------------|
+| `activity_id` | Activity ID from `list-activities` (positional, required) |
+| `--format` | Export format: `gpx`, `tcx`, or `fit` (required) |
+| `--output` | Destination file path (default: `~/.mi_fitness_sync/exports/<title>_<time>.<format>`) |
+| `--gzip` | Gzip-compress the output |
+| `--country-code` | Two-letter country override |
+| `--no-cache` | Disable the local FDS binary cache |
+| `--cache-dir` | Override the local FDS cache directory |
+| `--verbose` | Enable debug logging |
+| `--state-path` | Override the persisted auth state file path |
 
 Export behavior:
 
-1. GPX requires GPS track points in the normalized detail payload
-2. TCX and FIT use `detail.track_points` first when present and otherwise fall back to timestamped sport samples without latitude/longitude
-3. FIT generation is best-effort and only includes fields that are present in the Mi Fitness source payload
-4. If `--output` is omitted, exports are written under `~/.mi_fitness_sync/exports/` using a sanitized title plus local activity timestamp
+1. GPX requires GPS track points in the detail payload
+2. TCX and FIT prefer track points but fall back to timestamped sport samples without coordinates
+3. FIT generation is best-effort — only fields present in the Mi Fitness source are included
 
 ### `strava-login`
 
-Authenticates with Strava using the OAuth2 authorization code flow. This opens a browser window for you to authorize the application, then stores the resulting tokens locally.
-
-Before using this command:
-
-1. Create a Strava API application at https://www.strava.com/settings/api
-2. Set the **Authorization Callback Domain** to `localhost` (just the domain — no protocol, no port, no path)
-
-The redirect URI used by the CLI is `http://localhost:{port}/callback`, but Strava only matches on the domain portion, so the callback domain setting must be exactly `localhost`.
+Authenticates with Strava using the OAuth2 authorization code flow. Opens a browser for authorization, then stores the tokens locally. Client ID and secret can be passed as arguments or entered interactively.
 
 ```bash
-python -m mi_fitness_sync strava-login --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
+mi-fitness-sync strava-login
+mi-fitness-sync strava-login --client-id YOUR_ID --client-secret YOUR_SECRET
 ```
 
-If you omit `--client-id` or `--client-secret`, the CLI will prompt you to enter them interactively.
+Flags:
 
-Relevant flags:
+| Flag | Description |
+|------|-------------|
+| `--client-id` | Strava API client ID (prompted if omitted) |
+| `--client-secret` | Strava API client secret (prompted if omitted) |
+| `--port` | Local port for the OAuth callback server (default: 5478) |
+| `--strava-token-path` | Override the Strava token file path |
 
-1. `--client-id` is your Strava API application client ID
-2. `--client-secret` is your Strava API application client secret
-3. `--port` changes the local OAuth callback port (default: 5478)
-4. `--strava-token-path` overrides the default Strava token file path
+The flow:
 
-The OAuth flow works as follows:
+1. Starts a temporary local HTTP server on `localhost:{port}`
+2. Opens the Strava authorization page in your browser
+3. After authorization, Strava redirects to the local server with an auth code
+4. Exchanges the code for access and refresh tokens
+5. Saves tokens to `~/.mi_fitness_sync/strava/tokens.json`
 
-1. The CLI starts a temporary local HTTP server on `localhost:{port}`
-2. Your browser opens the Strava authorization page
-3. After you authorize, Strava redirects back to the local server with an authorization code
-4. The CLI exchanges the code for access and refresh tokens
-5. Tokens are saved to `~/.mi_fitness_sync/strava/tokens.json`
-
-Access tokens expire after six hours. The CLI automatically refreshes them using the stored refresh token when needed.
+Access tokens expire after six hours. The CLI refreshes them automatically using the stored refresh token.
 
 ### `strava-status`
 
 Shows the currently saved Strava auth state.
 
-Example:
-
 ```bash
-python -m mi_fitness_sync strava-status
+mi-fitness-sync strava-status
 ```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--strava-token-path` | Override the Strava token file path |
 
 ### `strava-logout`
 
-Revokes the Strava access token via the Strava API and deletes the local token file. If no tokens exist, it exits cleanly. If the remote revocation fails, local tokens are still deleted.
-
-Example:
+Revokes the Strava access token via the Strava API and deletes the local token file. Exits cleanly if no tokens exist. Deletes local tokens even if remote revocation fails.
 
 ```bash
-python -m mi_fitness_sync strava-logout
+mi-fitness-sync strava-logout
 ```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--strava-token-path` | Override the Strava token file path |
 
 ### `upload-to-strava`
 
 Uploads one Mi Fitness activity to Strava as a FIT file. The FIT file is also saved locally.
 
-Examples:
-
 ```bash
-python -m mi_fitness_sync upload-to-strava sid:key:1717200000
-python -m mi_fitness_sync upload-to-strava sid:key:1717200000 --output exports/run.fit
-python -m mi_fitness_sync upload-to-strava sid:key:1717200000 --country-code ID
+mi-fitness-sync upload-to-strava sid:key:1717200000
+mi-fitness-sync upload-to-strava sid:key:1717200000 --output run.fit
+mi-fitness-sync upload-to-strava sid:key:1717200000 --skip-duplicate-check
 ```
 
-Relevant flags:
+Flags:
 
-1. `activity_id` must come from the `activity_id` field emitted by `list-activities`
-2. `--output` sets the local FIT file save path (default: `~/.mi_fitness_sync/exports/<title>_<time>.fit`)
-3. `--country-code` uses the same region override behavior as `list-activities`
-4. `--strava-token-path` overrides the default Strava token file path
-5. `--no-cache` disables the local FDS binary cache
-6. `--cache-dir` overrides the local FDS cache directory
-7. `--verbose` enables debug logging
+| Flag | Description |
+|------|-------------|
+| `activity_id` | Activity ID from `list-activities` (positional, required) |
+| `--output` | Local FIT file save path (default: `~/.mi_fitness_sync/exports/<title>_<time>.fit`) |
+| `--country-code` | Two-letter country override |
+| `--skip-duplicate-check` | Skip checking Strava for existing activities with a similar start time |
+| `--strava-token-path` | Override the Strava token file path |
+| `--no-cache` | Disable the local FDS binary cache |
+| `--cache-dir` | Override the local FDS cache directory |
+| `--verbose` | Enable debug logging |
+| `--state-path` | Override the persisted Mi Fitness auth state file path |
 
 Upload behavior:
 
-1. Fetches the activity detail from Mi Fitness using the saved Mi Fitness auth state
-2. Renders the activity to FIT format
-3. Saves the FIT file locally
-4. Uploads the FIT file to Strava using the saved Strava tokens
-5. Polls Strava until processing completes, then prints the Strava activity URL
-6. The activity name is not set explicitly — Strava auto-generates it from time and location
-7. The sport type is mapped from the Mi Fitness sport type to the closest Strava equivalent
+1. Fetches the activity detail from Mi Fitness
+2. Renders to FIT format and saves the file locally
+3. Checks Strava for existing activities within ±5 minutes of the start time (unless `--skip-duplicate-check` is set)
+4. If potential duplicates are found, prompts for confirmation before uploading
+5. Uploads the FIT file to Strava and polls until processing completes
+6. Prints the Strava activity URL on success
+7. The sport type is mapped from Mi Fitness to the closest Strava equivalent; unmapped types let Strava auto-detect
 
-### `logout`
+## Project Layout
 
-Deletes the saved local auth state.
+```
+src/mi_fitness_sync/
+  activity/    Activity listing, detail, region routing, normalization
+  auth/        Xiaomi Passport auth and persistence
+  cli/         Command-line entry point
+  export/      GPX, TCX, and FIT rendering
+  fds/         Mi Fitness FDS binary parsing and caching
+  strava/      Strava OAuth2 auth and upload
+tests/         Per-module test files mirroring the package structure
+```
 
 Example:
 
