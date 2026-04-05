@@ -14,6 +14,7 @@ from mi_fitness_sync.strava.store import StravaTokenState, save_tokens
 logger = logging.getLogger(__name__)
 
 STRAVA_UPLOADS_URL = "https://www.strava.com/api/v3/uploads"
+STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 _TOKEN_EXPIRY_MARGIN_SECONDS = 60
 _POLL_INTERVAL_SECONDS = 2
 _MAX_POLL_ATTEMPTS = 30
@@ -46,6 +47,21 @@ class StravaClient:
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._state.access_token}"}
+
+    def list_activities(self, *, after: int, before: int, per_page: int = 30) -> list[dict]:
+        """Return athlete activities with start dates in the given epoch range."""
+        self._ensure_valid_token()
+        response = requests.get(
+            STRAVA_ACTIVITIES_URL,
+            headers=self._auth_headers(),
+            params={"after": after, "before": before, "per_page": per_page},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise StravaError(
+                f"Failed to list Strava activities (HTTP {response.status_code}): {response.text}"
+            )
+        return response.json()
 
     def upload_activity(
         self,

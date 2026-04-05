@@ -137,3 +137,48 @@ def test_upload_no_sport_type(mock_requests):
 
     post_data = mock_requests.post.call_args[1]["data"]
     assert "sport_type" not in post_data
+
+
+@patch("mi_fitness_sync.strava.client.requests")
+def test_list_activities_returns_results(mock_requests):
+    activities = [
+        {"id": 1, "name": "Morning Run", "start_date": "2026-06-01T00:00:00Z", "sport_type": "Run"},
+        {"id": 2, "name": "Afternoon Ride", "start_date": "2026-06-01T00:10:00Z", "sport_type": "Ride"},
+    ]
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = activities
+    mock_requests.get.return_value = response
+
+    client = StravaClient(_make_token_state())
+    result = client.list_activities(after=1000, before=2000)
+
+    assert result == activities
+    mock_requests.get.assert_called_once()
+    call_kwargs = mock_requests.get.call_args
+    assert call_kwargs[1]["params"] == {"after": 1000, "before": 2000, "per_page": 30}
+
+
+@patch("mi_fitness_sync.strava.client.requests")
+def test_list_activities_http_error_raises(mock_requests):
+    response = MagicMock()
+    response.status_code = 401
+    response.text = "Unauthorized"
+    mock_requests.get.return_value = response
+
+    client = StravaClient(_make_token_state())
+    with pytest.raises(StravaError, match="Failed to list Strava activities"):
+        client.list_activities(after=1000, before=2000)
+
+
+@patch("mi_fitness_sync.strava.client.requests")
+def test_list_activities_empty_list(mock_requests):
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = []
+    mock_requests.get.return_value = response
+
+    client = StravaClient(_make_token_state())
+    result = client.list_activities(after=1000, before=2000)
+
+    assert result == []

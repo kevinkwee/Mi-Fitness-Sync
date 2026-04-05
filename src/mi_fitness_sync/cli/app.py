@@ -110,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upload_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
     upload_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
+    upload_parser.add_argument(
+        "--skip-duplicate-check",
+        action="store_true",
+        help="Skip checking for existing Strava activities with a similar start time",
+    )
     upload_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     return parser
@@ -364,6 +369,25 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
     # Upload to Strava
     sport = strava_sport_type(detail.activity.sport_type)
     strava = StravaClient(token_state, token_path=args.strava_token_path)
+
+    # Duplicate check: look for Strava activities within ±5 minutes of start time
+    if not args.skip_duplicate_check:
+        _DUPLICATE_WINDOW_SECONDS = 5 * 60
+        after_ts = detail.start_time - _DUPLICATE_WINDOW_SECONDS
+        before_ts = detail.start_time + _DUPLICATE_WINDOW_SECONDS
+        existing = strava.list_activities(after=after_ts, before=before_ts)
+        if existing:
+            print("\nPotential duplicate(s) found on Strava:")
+            for act in existing:
+                name = act.get("name", "Untitled")
+                start = act.get("start_date_local", act.get("start_date", "unknown"))
+                stype = act.get("sport_type", "unknown")
+                print(f"  - {name}  |  {start}  |  {stype}")
+            answer = input("\nProceed with upload anyway? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Upload cancelled.")
+                return 0
+
     result = strava.upload_activity(export.payload, sport_type=sport, external_id=args.activity_id)
 
     activity_id = result.get("activity_id")

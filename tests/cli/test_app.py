@@ -352,6 +352,9 @@ def test_upload_to_strava_success(monkeypatch, capsys, tmp_path, auth_state, sam
         def __init__(self, state, token_path=None):
             pass
 
+        def list_activities(self, *, after, before, per_page=30):
+            return []
+
         def upload_activity(self, payload, sport_type=None, external_id=None):
             assert payload == b"fitdata"
             return {"activity_id": 12345}
@@ -384,3 +387,143 @@ def test_upload_to_strava_no_tokens(monkeypatch, capsys, tmp_path, auth_state):
 
     assert exit_code == 1
     assert "No Strava token state found" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Duplicate check tests
+# ---------------------------------------------------------------------------
+
+def _setup_upload_mocks(monkeypatch, tmp_path, auth_state, sample_activity_detail, *, strava_activities):
+    """Helper to wire up all monkeypatches common to upload duplicate-check tests.
+
+    Returns (token_path, output_path, uploaded) where *uploaded* is a list
+    that gets an item appended when upload_activity is called.
+    """
+    import mi_fitness_sync.strava.client as strava_client_mod
+    from mi_fitness_sync.strava.store import save_tokens
+
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+
+    token_state = _make_strava_token_state()
+    token_path = tmp_path / "tokens.json"
+    save_tokens(token_state, str(token_path))
+
+    class DummyMiFitnessClient:
+        def __init__(self, state, **kwargs):
+            pass
+        def get_activity_detail(self, activity_id):
+            return sample_activity_detail
+
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyMiFitnessClient)
+    monkeypatch.setattr(
+        cli,
+        "render_export",
+        lambda detail, file_format, compress=False: type(
+            "Export", (), {"payload": b"fitdata", "file_format": "fit", "compressed": False},
+        )(),
+    )
+
+    uploaded = []
+
+    class DummyStravaClient:
+        def __init__(self, state, token_path=None):
+            pass
+        def list_activities(self, *, after, before, per_page=30):
+            return strava_activities
+        def upload_activity(self, payload, sport_type=None, external_id=None):
+            uploaded.append(True)
+            return {"activity_id": 99999}
+
+    monkeypatch.setattr(strava_client_mod, "StravaClient", DummyStravaClient)
+
+    output_path = tmp_path / "activity.fit"
+    return token_path, output_path, uploaded
+
+
+def test_upload_duplicate_found_user_cancels(monkeypatch, capsys, tmp_path, auth_state, sample_activity_detail):
+    strava_activities = [
+        {"name": "Evening Run", "start_date_local": "2026-06-01T00:05:00", "sport_type": "Run"},
+    ]
+    token_path, output_path, uploaded = _setup_upload_mocks(
+        monkeypatch, tmp_path, auth_state, sample_activity_detail,
+        strava_activities=strava_activities,
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+    exit_code = cli.main([
+        "upload-to-strava", "sid:key:1",
+        "--strava-token-path", str(token_path),
+        "--output", str(output_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Potential duplicate(s) found" in captured.out
+    assert "Evening Run" in captured.out
+    assert "Upload cancelled" in captured.out
+    assert not uploaded
+
+
+def test_upload_duplicate_found_user_confirms(monkeypatch, capsys, tmp_path, auth_state, sample_activity_detail):
+    strava_activities = [
+        {"name": "Evening Run", "start_date_local": "2026-06-01T00:05:00", "sport_type": "Run"},
+    ]
+    token_path, output_path, uploaded = _setup_upload_mocks(
+        monkeypatch, tmp_path, auth_state, sample_activity_detail,
+        strava_activities=strava_activities,
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+    exit_code = cli.main([
+        "upload-to-strava", "sid:key:1",
+        "--strava-token-path", str(token_path),
+        "--output", str(output_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Potential duplicate(s) found" in captured.out
+    assert "Uploaded to Strava successfully" in captured.out
+    assert uploaded
+
+
+def test_upload_skip_duplicate_check_flag(monkeypatch, capsys, tmp_path, auth_state, sample_activity_detail):
+    strava_activities = [
+        {"name": "Evening Run", "start_date_local": "2026-06-01T00:05:00", "sport_type": "Run"},
+    ]
+    token_path, output_path, uploaded = _setup_upload_mocks(
+        monkeypatch, tmp_path, auth_state, sample_activity_detail,
+        strava_activities=strava_activities,
+    )
+
+    exit_code = cli.main([
+        "upload-to-strava", "sid:key:1",
+        "--strava-token-path", str(token_path),
+        "--output", str(output_path),
+        "--skip-duplicate-check",
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Potential duplicate" not in captured.out
+    assert "Uploaded to Strava successfully" in captured.out
+    assert uploaded
+
+
+def test_upload_no_duplicates_proceeds_silently(monkeypatch, capsys, tmp_path, auth_state, sample_activity_detail):
+    token_path, output_path, uploaded = _setup_upload_mocks(
+        monkeypatch, tmp_path, auth_state, sample_activity_detail,
+        strava_activities=[],
+    )
+
+    exit_code = cli.main([
+        "upload-to-strava", "sid:key:1",
+        "--strava-token-path", str(token_path),
+        "--output", str(output_path),
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Potential duplicate" not in captured.out
+    assert "Uploaded to Strava successfully" in captured.out
+    assert uploaded
