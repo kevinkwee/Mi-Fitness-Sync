@@ -12,7 +12,7 @@ from fit_tool.profile.profile_type import Sport, SubSport
 import pytest
 
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
-from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories
+from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories, _cadence_spm_to_rpm
 from mi_fitness_sync.fds.sport_reports import SportReport
 
 GPX_NS = {"gpx": "http://www.topografix.com/GPX/1/1"}
@@ -434,14 +434,14 @@ class TestFitSessionAggregates:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
-        assert session.avg_cadence == 165
+        assert session.avg_cadence == 82  # (160+170+165)/3=165 SPM -> 165//2=82 RPM
 
     def test_avg_cadence_prefers_sport_report(self):
         report = SportReport(avg_cadence=150)
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
-        assert session.avg_cadence == 150
+        assert session.avg_cadence == 75  # 150 SPM -> 150//2=75 RPM
 
     def test_total_ascent_from_sport_report(self):
         report = SportReport(rise_height=120.7)
@@ -660,12 +660,13 @@ class TestGpxHeartRateAndCadenceBounds:
 
     def test_cadence_clamped_in_gpx_output(self):
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=260, raw_point={}),
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=520, raw_point={}),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
         cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
         assert cad is not None
+        # 520 SPM (running) -> 260 RPM -> clamped to 254
         assert int(cad.text) == 254
 
     def test_zero_hr_omitted_from_gpx(self):
@@ -985,14 +986,14 @@ class TestTcxCadenceClamping:
 
     def test_run_cadence_clamped_in_extension(self):
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=260, raw_point={}),
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=520, raw_point={}),
         ]
         detail = _tcx_detail(sport_type=1, track_points=points)  # Running
         root = ET.fromstring(render_export(detail, "tcx").payload)
         # Base Cadence should NOT be present for running
         base_cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
         assert base_cad is None
-        # RunCadence in Extensions
+        # RunCadence in Extensions: 520 SPM -> 260 RPM -> clamped to 254
         run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
         assert run_cad is not None
         assert int(run_cad.text) == 254
@@ -1122,7 +1123,7 @@ class TestTcxRunningCadence:
         root = ET.fromstring(render_export(detail, "tcx").payload)
         run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
         assert run_cad is not None
-        assert int(run_cad.text) == 160
+        assert int(run_cad.text) == 80  # 160 SPM -> 160//2=80 RPM
 
     def test_running_no_base_cadence(self):
         points = [
@@ -1156,3 +1157,164 @@ class TestTcxRunningCadence:
         assert tpx is not None
         tpx_children = _tcx_child_local_names(tpx)
         assert tpx_children == ["Speed", "RunCadence"]
+
+
+# ---------------------------------------------------------------------------
+# Cadence SPM→RPM conversion tests
+# ---------------------------------------------------------------------------
+
+from fit_tool.profile.messages.record_message import RecordMessage
+
+
+def _cycling_detail(*, cadence: int = 80) -> ActivityDetail:
+    activity = Activity(
+        activity_id="sid:key:1",
+        sid="sid",
+        key="key",
+        category="outdoor_cycling",
+        sport_type=6,
+        title="Test Ride",
+        start_time=1717200000,
+        end_time=1717203600,
+        duration_seconds=3600,
+        distance_meters=20000,
+        calories=500,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={},
+        raw_report={},
+    )
+    return ActivityDetail(
+        activity=activity,
+        detail_sid="sid",
+        detail_key="key",
+        detail_time=1717200000,
+        zone_name="UTC",
+        zone_offset_seconds=0,
+        track_points=[
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=5.0, distance_meters=0.0, heart_rate=120, cadence=cadence, raw_point={}),
+            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=6.0, distance_meters=20000.0, heart_rate=140, cadence=cadence + 10, raw_point={}),
+        ],
+        samples=[],
+        sport_report=None,
+        recovery_rate=None,
+        raw_fitness_item={},
+        raw_detail={},
+    )
+
+
+class TestCadenceSpmToRpm:
+    def test_running_cadence_halved(self):
+        assert _cadence_spm_to_rpm(160, 1) == 80
+
+    def test_walking_cadence_halved(self):
+        assert _cadence_spm_to_rpm(120, 2) == 60
+
+    def test_treadmill_cadence_halved(self):
+        assert _cadence_spm_to_rpm(170, 3) == 85
+
+    def test_trail_run_cadence_halved(self):
+        assert _cadence_spm_to_rpm(150, 5) == 75
+
+    def test_cycling_cadence_unchanged(self):
+        assert _cadence_spm_to_rpm(80, 6) == 80
+
+    def test_indoor_cycling_cadence_unchanged(self):
+        assert _cadence_spm_to_rpm(90, 7) == 90
+
+    def test_bmx_cadence_unchanged(self):
+        assert _cadence_spm_to_rpm(70, 206) == 70
+
+    def test_spinning_cadence_unchanged(self):
+        assert _cadence_spm_to_rpm(95, 324) == 95
+
+    def test_odd_spm_rounds_down(self):
+        assert _cadence_spm_to_rpm(165, 1) == 82
+
+    def test_zero_cadence(self):
+        assert _cadence_spm_to_rpm(0, 1) == 0
+
+    def test_none_sport_type_treated_as_step_based(self):
+        assert _cadence_spm_to_rpm(160, None) == 80
+
+
+class TestFitCadenceConversion:
+    def test_running_record_cadence_is_rpm(self):
+        detail = _outdoor_run_detail()
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
+        # First point: 160 SPM -> 80 RPM
+        assert records[0].cadence == 80
+        # Second point: 170 SPM -> 85 RPM
+        assert records[1].cadence == 85
+        # Third point: 165 SPM -> 82 RPM
+        assert records[2].cadence == 82
+
+    def test_cycling_record_cadence_unchanged(self):
+        detail = _cycling_detail(cadence=80)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
+        assert records[0].cadence == 80
+        assert records[1].cadence == 90  # cadence + 10
+
+    def test_cycling_avg_cadence_unchanged(self):
+        detail = _cycling_detail(cadence=80)
+        fit = _parse_fit(render_export(detail, "fit").payload)
+        session = _fit_sessions(fit)[0]
+        assert session.avg_cadence == 85  # (80 + 90) / 2, no halving
+
+
+class TestGpxCadenceConversion:
+    def test_running_gpx_cadence_is_rpm(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+        ]
+        detail = _gpx_detail(track_points=points)  # sport_type=1 (Running)
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
+        assert cad is not None
+        assert int(cad.text) == 80  # 160 SPM -> 80 RPM
+
+    def test_cycling_gpx_cadence_unchanged(self):
+        activity = Activity(
+            activity_id="sid:key:1", sid="sid", key="key", category="outdoor_cycling",
+            sport_type=6, title="Ride", start_time=1717200000, end_time=1717203600,
+            duration_seconds=3600, distance_meters=20000, calories=500, steps=None,
+            sync_state="server", next_key=None, raw_record={}, raw_report={},
+        )
+        detail = ActivityDetail(
+            activity=activity, detail_sid="sid", detail_key="key",
+            detail_time=1717200000, zone_name="UTC", zone_offset_seconds=0,
+            track_points=[
+                TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=80, raw_point={}),
+            ],
+            samples=[], sport_report=None, recovery_rate=None,
+            raw_fitness_item={}, raw_detail={},
+        )
+        root = ET.fromstring(render_export(detail, "gpx").payload)
+        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
+        assert cad is not None
+        assert int(cad.text) == 80  # Cycling: 80 RPM stays 80
+
+
+class TestTcxCadenceConversion:
+    def test_running_run_cadence_halved(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=170, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=1, track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        assert run_cad is not None
+        assert int(run_cad.text) == 85  # 170 SPM -> 85 RPM
+
+    def test_cycling_base_cadence_unchanged(self):
+        points = [
+            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=90, raw_point={}),
+        ]
+        detail = _tcx_detail(sport_type=6, track_points=points)
+        root = ET.fromstring(render_export(detail, "tcx").payload)
+        cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
+        assert cad is not None
+        assert int(cad.text) == 90  # Cycling: 90 RPM stays 90

@@ -16,6 +16,8 @@ TCX_NS = "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
 TCX_ACTIVITY_NS = "http://www.garmin.com/xmlschemas/ActivityExtension/v2"
 XML_SCHEMA_INSTANCE_NS = "http://www.w3.org/2001/XMLSchema-instance"
 
+_CYCLING_SPORT_TYPES = frozenset({6, 7, 206, 324})
+
 
 @dataclass(slots=True)
 class ExportResult:
@@ -92,9 +94,10 @@ def render_gpx(detail: ActivityDetail) -> bytes:
         ET.SubElement(track_point, f"{{{_GPX}}}time").text = _isoformat_utc(point.timestamp)
 
         clamped_hr = _clamp_heart_rate(point.heart_rate) if point.heart_rate is not None else None
-        clamped_cad = _clamp_cadence(point.cadence) if point.cadence is not None else None
+        cadence_rpm = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type) if point.cadence is not None else None
+        clamped_cad = _clamp_cadence(cadence_rpm) if cadence_rpm is not None else None
         has_hr = clamped_hr is not None
-        has_cad = point.cadence is not None
+        has_cad = cadence_rpm is not None
         if has_hr or has_cad:
             extensions = ET.SubElement(track_point, f"{{{_GPX}}}extensions")
             # TrackPointExtension_t sequence (v1): atemp, wtemp, depth, hr, cad, Extensions
@@ -180,7 +183,8 @@ def render_tcx(detail: ActivityDetail) -> bytes:
             heart_rate = ET.SubElement(track_point, f"{{{TCX_NS}}}HeartRateBpm")
             ET.SubElement(heart_rate, f"{{{TCX_NS}}}Value").text = str(clamped_hr)
 
-        clamped_cad = _clamp_cadence(point.cadence) if point.cadence is not None else None
+        cadence_rpm = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type) if point.cadence is not None else None
+        clamped_cad = _clamp_cadence(cadence_rpm) if cadence_rpm is not None else None
         has_speed = point.speed_mps is not None
         has_run_cad = is_running and clamped_cad is not None
         has_bike_cad = not is_running and clamped_cad is not None
@@ -254,7 +258,7 @@ def render_fit(detail: ActivityDetail) -> bytes:
         if point.heart_rate is not None:
             record.heart_rate = point.heart_rate
         if point.cadence is not None:
-            record.cadence = point.cadence
+            record.cadence = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type)
         builder.add(record)
 
     lap = LapMessage()
@@ -311,7 +315,7 @@ def render_fit(detail: ActivityDetail) -> bytes:
     max_speed = _max_speed(report, export_points)
     if max_speed is not None:
         session.max_speed = max_speed
-    avg_cadence = _avg_cadence(report, export_points)
+    avg_cadence = _avg_cadence(report, export_points, detail.activity.sport_type)
     if avg_cadence is not None:
         session.avg_cadence = avg_cadence
     if ascent is not None:
@@ -395,13 +399,15 @@ def _max_speed(report: SportReport | None, points: list[TrackPoint]) -> float | 
     return None
 
 
-def _avg_cadence(report: SportReport | None, points: list[TrackPoint]) -> int | None:
+def _avg_cadence(report: SportReport | None, points: list[TrackPoint], sport_type: int | None) -> int | None:
     if report is not None and report.avg_cadence is not None:
-        return report.avg_cadence
-    values = [p.cadence for p in points if p.cadence is not None]
-    if values:
-        return round(sum(values) / len(values))
-    return None
+        raw = report.avg_cadence
+    else:
+        values = [p.cadence for p in points if p.cadence is not None]
+        if not values:
+            return None
+        raw = round(sum(values) / len(values))
+    return _cadence_spm_to_rpm(raw, sport_type)
 
 
 def _total_ascent(report: SportReport | None, points: list[TrackPoint]) -> int | None:
@@ -627,6 +633,17 @@ def _is_valid_coordinate(lat: float | None, lon: float | None) -> bool:
     if lat is None or lon is None:
         return False
     return -90.0 <= lat <= 90.0 and -180.0 <= lon < 180.0
+
+
+def _cadence_spm_to_rpm(spm: int, sport_type: int | None) -> int:
+    """Convert Mi Fitness cadence (SPM) to RPM for export formats.
+
+    Cycling sports already report cadence in RPM from the sensor.
+    Step-based sports (running, walking, etc.) report SPM which is 2x RPM.
+    """
+    if sport_type is not None and sport_type in _CYCLING_SPORT_TYPES:
+        return spm
+    return spm // 2
 
 
 def _clamp_heart_rate(value: int) -> int | None:
