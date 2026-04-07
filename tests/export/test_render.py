@@ -13,6 +13,7 @@ import pytest
 
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
 from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories, _cadence_spm_to_rpm
+from mi_fitness_sync.export.smoothing import smooth_track, total_haversine_distance
 from mi_fitness_sync.fds.sport_reports import SportReport
 
 GPX_NS = {"gpx": "http://www.topografix.com/GPX/1/1"}
@@ -1318,3 +1319,153 @@ class TestTcxCadenceConversion:
         cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
         assert cad is not None
         assert int(cad.text) == 90  # Cycling: 90 RPM stays 90
+
+
+# ---------------------------------------------------------------------------
+# Smoothing integration — verify smoothed coordinates propagate to all formats
+# ---------------------------------------------------------------------------
+
+
+def _noisy_gps_detail(distance_meters: float) -> ActivityDetail:
+    """Activity with a zigzagging GPS track whose haversine distance exceeds *distance_meters*."""
+    n = 40
+    points = [
+        TrackPoint(
+            timestamp=1717200000 + i * 10,
+            latitude=1.0 + i * 0.001,
+            longitude=103.0 + 0.0005 * (1 if i % 2 == 0 else -1),
+            altitude_meters=10.0,
+            speed_mps=1.5,
+            distance_meters=None,
+            heart_rate=120,
+            cadence=160,
+            raw_point={},
+        )
+        for i in range(n)
+    ]
+    activity = Activity(
+        activity_id="sid:key:1",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=1,
+        title="Noisy Run",
+        start_time=1717200000,
+        end_time=1717200000 + (n - 1) * 10,
+        duration_seconds=(n - 1) * 10,
+        distance_meters=distance_meters,
+        calories=200,
+        steps=5000,
+        sync_state="server",
+        next_key=None,
+        raw_record={},
+        raw_report={},
+    )
+    return ActivityDetail(
+        activity=activity,
+        detail_sid="sid",
+        detail_key="key",
+        detail_time=1717200000,
+        zone_name="UTC",
+        zone_offset_seconds=0,
+        track_points=points,
+        samples=[],
+        sport_report=None,
+        recovery_rate=None,
+        raw_fitness_item={},
+        raw_detail={},
+    )
+
+
+class TestSmoothingIntegration:
+    """Smoothed coordinates must propagate into GPX, TCX, and FIT outputs."""
+
+    def _make_detail(self) -> ActivityDetail:
+        """Detail whose noisy GPS distance exceeds the summary distance."""
+        raw_points = [
+            TrackPoint(
+                timestamp=1717200000 + i * 10,
+                latitude=1.0 + i * 0.001,
+                longitude=103.0 + 0.0005 * (1 if i % 2 == 0 else -1),
+                altitude_meters=10.0,
+                speed_mps=1.5,
+                distance_meters=None,
+                heart_rate=120,
+                cadence=160,
+                raw_point={},
+            )
+            for i in range(40)
+        ]
+        noisy_distance = total_haversine_distance(raw_points)
+        # Clean distance (straight line) is used as the summary distance
+        clean_points = [
+            TrackPoint(
+                timestamp=1717200000 + i * 10,
+                latitude=1.0 + i * 0.001, longitude=103.0,
+                altitude_meters=None, speed_mps=None, distance_meters=None,
+                heart_rate=None, cadence=None, raw_point={},
+            )
+            for i in range(40)
+        ]
+        clean_distance = total_haversine_distance(clean_points)
+        assert noisy_distance > clean_distance * 1.01  # sanity
+        return _noisy_gps_detail(clean_distance), raw_points
+
+    def test_gpx_uses_smoothed_coords(self):
+        detail, original_points = self._make_detail()
+        export = render_export(detail, "gpx")
+        root = ET.fromstring(export.payload)
+        ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+        trkpts = root.findall(".//gpx:trkpt", ns)
+        assert len(trkpts) == 40
+        # At least one interior point's longitude should differ from the original zigzag
+        changed = any(
+            float(tp.attrib["lon"]) != original_points[i].longitude
+            for i, tp in enumerate(trkpts)
+        )
+        assert changed, "GPX output should contain smoothed (different) coordinates"
+
+    def test_tcx_uses_smoothed_coords(self):
+        detail, original_points = self._make_detail()
+        export = render_export(detail, "tcx")
+        root = ET.fromstring(export.payload)
+        ns = {"tcx": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
+        positions = root.findall(".//tcx:Trackpoint/tcx:Position", ns)
+        assert len(positions) == 40
+        changed = any(
+            float(pos.find("tcx:LongitudeDegrees", ns).text) != original_points[i].longitude
+            for i, pos in enumerate(positions)
+        )
+        assert changed, "TCX output should contain smoothed (different) coordinates"
+
+    def test_fit_uses_smoothed_coords(self):
+        detail, original_points = self._make_detail()
+        # Independently compute expected smoothed coordinates
+        expected_smoothed = smooth_track(detail.track_points, detail.activity.distance_meters)
+        assert expected_smoothed is not detail.track_points, "smooth_track should have modified coords"
+
+        export = render_export(detail, "fit")
+        fit = FitFile.from_bytes(export.payload)
+        records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
+        assert len(records) == 40
+
+        # Decoded FIT coords should be closer to the smoothed coords than to the originals
+        closer_to_smoothed = 0
+        total_compared = 0
+        for i in range(len(records)):
+            if records[i].position_long is None:
+                continue
+            fit_lon = records[i].position_long
+            original_lon = original_points[i].longitude
+            smoothed_lon = expected_smoothed[i].longitude
+            if abs(original_lon - smoothed_lon) < 1e-12:
+                continue  # skip points where smoothing didn't change the value
+            total_compared += 1
+            if abs(fit_lon - smoothed_lon) < abs(fit_lon - original_lon):
+                closer_to_smoothed += 1
+
+        assert total_compared > 0, "At least some points should differ between original and smoothed"
+        assert closer_to_smoothed == total_compared, (
+            f"All compared FIT coords should be closer to smoothed than original, "
+            f"but only {closer_to_smoothed}/{total_compared} were"
+        )

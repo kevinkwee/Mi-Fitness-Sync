@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import gzip
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
 from mi_fitness_sync.activity.models import ActivityDetail, TrackPoint
 from mi_fitness_sync.exceptions import MiFitnessError
+from mi_fitness_sync.export.smoothing import smooth_track
 from mi_fitness_sync.fds.sport_reports import SportReport
 
 
@@ -32,6 +33,10 @@ def render_export(detail: ActivityDetail, file_format: str, *, compress: bool = 
         raise MiFitnessError(
             f"Unsupported export format: {file_format}. Expected one of: {', '.join(SUPPORTED_EXPORT_FORMATS)}."
         )
+
+    smoothed_points = smooth_track(detail.track_points, detail.total_distance_meters)
+    if smoothed_points is not detail.track_points:
+        detail = _dc_replace(detail, track_points=smoothed_points)
 
     if normalized_format == "gpx":
         payload = render_gpx(detail)
