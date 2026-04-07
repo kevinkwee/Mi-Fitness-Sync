@@ -27,16 +27,28 @@ class ExportResult:
     payload: bytes
 
 
-def render_export(detail: ActivityDetail, file_format: str, *, compress: bool = False) -> ExportResult:
+def render_export(
+    detail: ActivityDetail,
+    file_format: str,
+    *,
+    compress: bool = False,
+    smooth: bool = True,
+    outlier_speed_mps: float | None = None,
+    smooth_mode: str = "match",
+) -> ExportResult:
     normalized_format = file_format.strip().lower()
     if normalized_format not in SUPPORTED_EXPORT_FORMATS:
         raise MiFitnessError(
             f"Unsupported export format: {file_format}. Expected one of: {', '.join(SUPPORTED_EXPORT_FORMATS)}."
         )
 
-    smoothed_points = smooth_track(detail.track_points, detail.total_distance_meters)
-    if smoothed_points is not detail.track_points:
-        detail = _dc_replace(detail, track_points=smoothed_points)
+    if smooth:
+        kwargs: dict[str, object] = {"match_target": smooth_mode == "match"}
+        if outlier_speed_mps is not None:
+            kwargs["max_speed_mps"] = outlier_speed_mps
+        smoothed_points = smooth_track(detail.track_points, detail.total_distance_meters, **kwargs)  # type: ignore[arg-type]
+        if smoothed_points is not detail.track_points:
+            detail = _dc_replace(detail, track_points=smoothed_points)
 
     if normalized_format == "gpx":
         payload = render_gpx(detail)

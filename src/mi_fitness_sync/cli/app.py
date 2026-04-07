@@ -17,6 +17,7 @@ from mi_fitness_sync.activity.utils import render_activities_table
 from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MiFitnessAuthClient
 from mi_fitness_sync.auth.state import utc_now_iso
 from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
+from mi_fitness_sync.cli.speed_parser import parse_speed_input
 from mi_fitness_sync.export.render import SUPPORTED_EXPORT_FORMATS, render_export
 from mi_fitness_sync.exceptions import (
     AuthStateNotFoundError,
@@ -88,6 +89,17 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
     export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
     export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
+    export_parser.add_argument("--no-smooth", action="store_true", help="Disable GPS smoothing entirely")
+    export_parser.add_argument(
+        "--outlier-speed",
+        help="Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30'). Default: 180 km/h",
+    )
+    export_parser.add_argument(
+        "--smooth-mode",
+        choices=("match", "full"),
+        default="match",
+        help="Smoothing strategy: 'match' converges on summary distance (default), 'full' applies maximum smoothing",
+    )
     export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     strava_login_parser = subparsers.add_parser("strava-login", help="Authenticate with Strava via OAuth2")
@@ -120,6 +132,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-duplicate-check",
         action="store_true",
         help="Skip checking for existing Strava activities with a similar start time",
+    )
+    upload_parser.add_argument("--no-smooth", action="store_true", help="Disable GPS smoothing entirely")
+    upload_parser.add_argument(
+        "--outlier-speed",
+        help="Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30'). Default: 180 km/h",
+    )
+    upload_parser.add_argument(
+        "--smooth-mode",
+        choices=("match", "full"),
+        default="match",
+        help="Smoothing strategy: 'match' converges on summary distance (default), 'full' applies maximum smoothing",
     )
     upload_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
@@ -294,7 +317,9 @@ def handle_export_activity(args: argparse.Namespace) -> int:
         no_cache=args.no_cache, cache_dir=args.cache_dir,
     )
     detail = client.get_activity_detail(args.activity_id)
-    export = render_export(detail, args.format, compress=args.gzip)
+
+    smooth_kwargs = _smoothing_kwargs(args)
+    export = render_export(detail, args.format, compress=args.gzip, **smooth_kwargs)
 
     if args.output:
         output_path = Path(args.output)
@@ -402,7 +427,9 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
         no_cache=args.no_cache, cache_dir=args.cache_dir,
     )
     detail = client.get_activity_detail(args.activity_id)
-    export = render_export(detail, "fit")
+
+    smooth_kwargs = _smoothing_kwargs(args)
+    export = render_export(detail, "fit", **smooth_kwargs)
 
     # Save FIT file locally
     if args.output:
@@ -509,6 +536,18 @@ def _sanitize_filename(title: str) -> str:
     """Replace spaces with underscores and strip non-alphanumeric/underscore chars."""
     name = title.replace(" ", "_")
     return re.sub(r"[^\w]", "", name)
+
+
+def _smoothing_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    """Build keyword arguments for ``render_export`` from CLI smoothing flags."""
+    kwargs: dict[str, object] = {}
+    if args.no_smooth:
+        kwargs["smooth"] = False
+    if args.outlier_speed:
+        kwargs["outlier_speed_mps"] = parse_speed_input(args.outlier_speed)
+    if args.smooth_mode:
+        kwargs["smooth_mode"] = args.smooth_mode
+    return kwargs
 
 
 def _activity_local_datetime(detail: ActivityDetail) -> datetime:

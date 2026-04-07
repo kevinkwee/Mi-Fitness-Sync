@@ -64,13 +64,29 @@ def total_haversine_distance(points: list[TrackPoint]) -> float:
     )
 
 
-def smooth_track(track_points: list[TrackPoint], target_distance_meters: float) -> list[TrackPoint]:
+def smooth_track(
+    track_points: list[TrackPoint],
+    target_distance_meters: float,
+    *,
+    max_speed_mps: float = _MAX_SPEED_MPS,
+    match_target: bool = True,
+) -> list[TrackPoint]:
     """Smooth GPS coordinates so total haversine distance approaches *target_distance_meters*.
+
+    Parameters
+    ----------
+    max_speed_mps:
+        Speed threshold for outlier detection (m/s).
+    match_target:
+        When *True* (default, ``match`` mode), iteratively pick the SG window
+        that best converges on *target_distance_meters*.  When *False*
+        (``full`` mode), apply the largest valid SG window unconditionally
+        after outlier removal.
 
     Returns the original list unchanged when:
     - fewer than two GPS points exist
     - ``target_distance_meters`` is non-positive
-    - the track distance already matches the target within tolerance
+    - the track distance already matches the target within tolerance (match mode only)
     """
     gps_points = [p for p in track_points if _has_valid_gps(p)]
     if len(gps_points) < 2 or target_distance_meters <= 0:
@@ -80,21 +96,22 @@ def smooth_track(track_points: list[TrackPoint], target_distance_meters: float) 
     if original_distance <= 0:
         return track_points
 
-    if abs(original_distance - target_distance_meters) <= _distance_tolerance(target_distance_meters):
+    if match_target and abs(original_distance - target_distance_meters) <= _distance_tolerance(target_distance_meters):
         return track_points
 
     # Step 1: interpolate outlier positions
-    fixed = _fix_outliers(track_points, _MAX_SPEED_MPS)
+    fixed = _fix_outliers(track_points, max_speed_mps)
 
     valid_fixed = [p for p in fixed if _has_valid_gps(p)]
     fixed_distance = total_haversine_distance(valid_fixed)
 
-    if fixed_distance <= 0 or abs(fixed_distance - target_distance_meters) <= _distance_tolerance(target_distance_meters):
-        return fixed
+    if match_target:
+        if fixed_distance <= 0 or abs(fixed_distance - target_distance_meters) <= _distance_tolerance(target_distance_meters):
+            return fixed
 
-    # Step 2: Savitzky-Golay – only useful when GPS distance > target
-    if fixed_distance <= target_distance_meters:
-        return fixed
+        # Step 2: Savitzky-Golay – only useful when GPS distance > target
+        if fixed_distance <= target_distance_meters:
+            return fixed
 
     gps_indices = [i for i, p in enumerate(fixed) if _has_valid_gps(p)]
     if len(gps_indices) < _MIN_WINDOW:
@@ -103,20 +120,56 @@ def smooth_track(track_points: list[TrackPoint], target_distance_meters: float) 
     lats = [fixed[i].latitude for i in gps_indices]
     lons = [fixed[i].longitude for i in gps_indices]
 
-    best_result = fixed
-    best_diff = abs(fixed_distance - target_distance_meters)
+    if match_target:
+        # --- match mode: pick the window that best converges on target ---
+        best_result = fixed
+        best_diff = abs(fixed_distance - target_distance_meters)
 
-    for window in range(_MIN_WINDOW, min(_MAX_WINDOW + 1, len(gps_indices) + 1), 2):
-        if window <= _POLYORDER:
-            continue
+        for window in range(_MIN_WINDOW, min(_MAX_WINDOW + 1, len(gps_indices) + 1), 2):
+            if window <= _POLYORDER:
+                continue
 
-        smoothed_lats = _apply_savgol(lats, window, _POLYORDER)
-        smoothed_lons = _apply_savgol(lons, window, _POLYORDER)
+            smoothed_lats = _apply_savgol(lats, window, _POLYORDER)
+            smoothed_lons = _apply_savgol(lons, window, _POLYORDER)
 
-        candidate = list(fixed)
+            candidate = list(fixed)
+            for j, idx in enumerate(gps_indices):
+                p = fixed[idx]
+                candidate[idx] = TrackPoint(
+                    timestamp=p.timestamp,
+                    latitude=smoothed_lats[j],
+                    longitude=smoothed_lons[j],
+                    altitude_meters=p.altitude_meters,
+                    speed_mps=p.speed_mps,
+                    distance_meters=p.distance_meters,
+                    heart_rate=p.heart_rate,
+                    cadence=p.cadence,
+                    raw_point=p.raw_point,
+                )
+
+            dist = total_haversine_distance([candidate[i] for i in gps_indices])
+            diff = abs(dist - target_distance_meters)
+
+            if diff < best_diff:
+                best_diff = diff
+                best_result = candidate
+
+        return best_result
+    else:
+        # --- full mode: apply the largest valid SG window ---
+        max_window = min(_MAX_WINDOW, len(gps_indices))
+        if max_window % 2 == 0:
+            max_window -= 1
+        if max_window <= _POLYORDER:
+            return fixed
+
+        smoothed_lats = _apply_savgol(lats, max_window, _POLYORDER)
+        smoothed_lons = _apply_savgol(lons, max_window, _POLYORDER)
+
+        result = list(fixed)
         for j, idx in enumerate(gps_indices):
             p = fixed[idx]
-            candidate[idx] = TrackPoint(
+            result[idx] = TrackPoint(
                 timestamp=p.timestamp,
                 latitude=smoothed_lats[j],
                 longitude=smoothed_lons[j],
@@ -128,14 +181,7 @@ def smooth_track(track_points: list[TrackPoint], target_distance_meters: float) 
                 raw_point=p.raw_point,
             )
 
-        dist = total_haversine_distance([candidate[i] for i in gps_indices])
-        diff = abs(dist - target_distance_meters)
-
-        if diff < best_diff:
-            best_diff = diff
-            best_result = candidate
-
-    return best_result
+        return result
 
 
 # ---------------------------------------------------------------------------

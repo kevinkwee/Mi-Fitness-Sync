@@ -328,3 +328,81 @@ class TestDistanceTolerance:
         noisy_err = sum((data[i] - clean[i]) ** 2 for i in range(half, 50 - half))
         smooth_err = sum((result[i] - clean[i]) ** 2 for i in range(half, 50 - half))
         assert smooth_err < noisy_err
+
+
+# ---------------------------------------------------------------------------
+# smooth_track – custom max_speed_mps
+# ---------------------------------------------------------------------------
+
+
+class TestSmoothTrackCustomMaxSpeed:
+    def test_lower_max_speed_catches_more_outliers(self):
+        """A lower max_speed_mps threshold should interpolate more points."""
+        pts = [
+            _tp(0, 1.0, 103.0),
+            _tp(10, 1.001, 103.001),
+            # ~1.5 km in 1 s ≈ 1500 m/s jump — always an outlier
+            _tp(11, 1.015, 103.015),
+            _tp(20, 1.002, 103.002),
+            _tp(30, 1.003, 103.003),
+        ]
+        target = total_haversine_distance(pts) * 0.5
+
+        # With strict speed limit (1 m/s) the spike is caught
+        result_strict = smooth_track(pts, target, max_speed_mps=1.0)
+        # The outlier point should have been interpolated
+        assert result_strict[2].latitude != 1.015
+
+
+# ---------------------------------------------------------------------------
+# smooth_track – full mode
+# ---------------------------------------------------------------------------
+
+
+class TestSmoothTrackFullMode:
+    def _noisy_track(self, n: int = 40) -> list[TrackPoint]:
+        return [
+            _tp(
+                1000 + i * 10,
+                1.0 + i * 0.001,
+                103.0 + 0.0005 * (1 if i % 2 == 0 else -1),
+            )
+            for i in range(n)
+        ]
+
+    def test_full_mode_applies_smoothing(self):
+        """full mode should still apply SG smoothing (largest window)."""
+        pts = self._noisy_track(40)
+        noisy_distance = total_haversine_distance(pts)
+        target = noisy_distance * 0.5  # doesn't matter, full ignores target convergence
+
+        result = smooth_track(pts, target, match_target=False)
+        smoothed_distance = total_haversine_distance(result)
+        # Smoothing should reduce the distance
+        assert smoothed_distance < noisy_distance
+
+    def test_full_mode_does_not_match_target(self):
+        """full mode should not iterate to converge on the target distance."""
+        pts = self._noisy_track(40)
+        noisy_distance = total_haversine_distance(pts)
+        # Use a very specific target – full mode shouldn't try to hit it
+        target = noisy_distance * 0.95
+
+        result_match = smooth_track(pts, target, match_target=True)
+        result_full = smooth_track(pts, target, match_target=False)
+
+        match_dist = total_haversine_distance(result_match)
+        full_dist = total_haversine_distance(result_full)
+        # match mode should be closer to target than full mode
+        assert abs(match_dist - target) <= abs(full_dist - target)
+
+    def test_full_mode_skips_tolerance_check(self):
+        """full mode should still apply smoothing even when within tolerance."""
+        pts = self._noisy_track(40)
+        noisy_distance = total_haversine_distance(pts)
+        # Target within tolerance of noisy distance
+        target = noisy_distance + 5.0
+
+        result = smooth_track(pts, target, match_target=False)
+        # Should not be the original list (match mode would return original)
+        assert result is not pts

@@ -364,7 +364,7 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
     monkeypatch.setattr(
         cli,
         "render_export",
-        lambda detail, file_format, compress: type(
+        lambda detail, file_format, compress=False, **kwargs: type(
             "Export",
             (),
             {"file_format": file_format, "compressed": compress, "payload": b"payload"},
@@ -396,7 +396,7 @@ def test_export_activity_uses_sanitized_title_and_local_start_time(monkeypatch, 
     monkeypatch.setattr(
         cli,
         "render_export",
-        lambda detail, file_format, compress: type(
+        lambda detail, file_format, compress=False, **kwargs: type(
             "Export",
             (),
             {"file_format": file_format, "compressed": compress, "payload": b"payload"},
@@ -569,7 +569,7 @@ def test_upload_to_strava_success(monkeypatch, capsys, tmp_path, auth_state, sam
     monkeypatch.setattr(
         cli,
         "render_export",
-        lambda detail, file_format, compress=False: type(
+        lambda detail, file_format, compress=False, **kwargs: type(
             "Export", (), {"payload": b"fitdata", "file_format": "fit", "compressed": False},
         )(),
     )
@@ -644,7 +644,7 @@ def _setup_upload_mocks(monkeypatch, tmp_path, auth_state, sample_activity_detai
     monkeypatch.setattr(
         cli,
         "render_export",
-        lambda detail, file_format, compress=False: type(
+        lambda detail, file_format, compress=False, **kwargs: type(
             "Export", (), {"payload": b"fitdata", "file_format": "fit", "compressed": False},
         )(),
     )
@@ -835,7 +835,7 @@ def test_upload_duplicate_check_query_window(monkeypatch, capsys, tmp_path, auth
     monkeypatch.setattr(
         cli,
         "render_export",
-        lambda detail, file_format, compress=False: type(
+        lambda detail, file_format, compress=False, **kwargs: type(
             "Export", (), {"payload": b"fitdata", "file_format": "fit", "compressed": False},
         )(),
     )
@@ -1201,3 +1201,79 @@ def test_fetch_strava_status_paginates(monkeypatch, tmp_path):
 
     assert pages_requested == [1, 2]
     assert result["s:k:1"] is True
+
+
+# ---------------------------------------------------------------------------
+# CLI smoothing flag parsing
+# ---------------------------------------------------------------------------
+
+
+class TestSmoothingFlagParsing:
+    def test_export_activity_accepts_no_smooth(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["export-activity", "sid:key:1", "--format", "gpx", "--no-smooth"])
+        assert args.no_smooth is True
+
+    def test_export_activity_default_smooth_enabled(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["export-activity", "sid:key:1", "--format", "gpx"])
+        assert args.no_smooth is False
+
+    def test_export_activity_accepts_outlier_speed(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["export-activity", "sid:key:1", "--format", "gpx", "--outlier-speed", "7:30"])
+        assert args.outlier_speed == "7:30"
+
+    def test_export_activity_accepts_smooth_mode_full(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["export-activity", "sid:key:1", "--format", "gpx", "--smooth-mode", "full"])
+        assert args.smooth_mode == "full"
+
+    def test_export_activity_default_smooth_mode_match(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["export-activity", "sid:key:1", "--format", "gpx"])
+        assert args.smooth_mode == "match"
+
+    def test_upload_to_strava_accepts_no_smooth(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["upload-to-strava", "sid:key:1", "--no-smooth"])
+        assert args.no_smooth is True
+
+    def test_upload_to_strava_accepts_outlier_speed(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["upload-to-strava", "sid:key:1", "--outlier-speed", "180kmh"])
+        assert args.outlier_speed == "180kmh"
+
+    def test_upload_to_strava_accepts_smooth_mode_full(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["upload-to-strava", "sid:key:1", "--smooth-mode", "full"])
+        assert args.smooth_mode == "full"
+
+
+class TestSmoothingKwargsHelper:
+    def test_no_smooth_sets_smooth_false(self):
+        import argparse
+        args = argparse.Namespace(no_smooth=True, outlier_speed=None, smooth_mode="match")
+        kwargs = cli._smoothing_kwargs(args)
+        assert kwargs["smooth"] is False
+
+    def test_outlier_speed_parsed(self):
+        import argparse
+        args = argparse.Namespace(no_smooth=False, outlier_speed="180", smooth_mode="match")
+        kwargs = cli._smoothing_kwargs(args)
+        assert "outlier_speed_mps" in kwargs
+        assert abs(kwargs["outlier_speed_mps"] - 50.0) < 0.1
+
+    def test_smooth_mode_passed(self):
+        import argparse
+        args = argparse.Namespace(no_smooth=False, outlier_speed=None, smooth_mode="full")
+        kwargs = cli._smoothing_kwargs(args)
+        assert kwargs["smooth_mode"] == "full"
+
+    def test_defaults_produce_minimal_kwargs(self):
+        import argparse
+        args = argparse.Namespace(no_smooth=False, outlier_speed=None, smooth_mode="match")
+        kwargs = cli._smoothing_kwargs(args)
+        assert "smooth" not in kwargs
+        assert "outlier_speed_mps" not in kwargs
+        assert kwargs["smooth_mode"] == "match"

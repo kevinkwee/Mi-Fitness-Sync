@@ -1469,3 +1469,28 @@ class TestSmoothingIntegration:
             f"All compared FIT coords should be closer to smoothed than original, "
             f"but only {closer_to_smoothed}/{total_compared} were"
         )
+
+
+# ---------------------------------------------------------------------------
+# render_export smoothing options
+# ---------------------------------------------------------------------------
+
+
+class TestRenderExportSmoothingOptions:
+    def test_no_smooth_skips_smoothing(self, sample_activity_detail):
+        """When smooth=False, track_points should pass through unchanged."""
+        export = render_export(sample_activity_detail, "gpx", smooth=False)
+        assert export.file_format == "gpx"
+        # Should still produce valid output
+        root = ET.fromstring(export.payload)
+        assert len(root.findall(".//gpx:trkpt", GPX_NS)) == 1
+
+    def test_smooth_mode_full_accepted(self, sample_activity_detail):
+        """smooth_mode='full' should not raise."""
+        export = render_export(sample_activity_detail, "gpx", smooth_mode="full")
+        assert export.file_format == "gpx"
+
+    def test_outlier_speed_mps_accepted(self, sample_activity_detail):
+        """Custom outlier_speed_mps should not raise."""
+        export = render_export(sample_activity_detail, "gpx", outlier_speed_mps=10.0)
+        assert export.file_format == "gpx"
