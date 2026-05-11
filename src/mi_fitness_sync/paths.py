@@ -23,5 +23,9 @@ def get_exports_dir() -> Path:
     return _ensure_dir(APP_DIR / "exports")
 
 
+def get_captcha_dir() -> Path:
+    return _ensure_dir(APP_DIR / "captcha")
+
+
 def get_strava_dir() -> Path:
     return _ensure_dir(APP_DIR / "strava")

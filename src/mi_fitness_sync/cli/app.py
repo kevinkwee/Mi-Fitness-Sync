@@ -4,8 +4,11 @@ import argparse
 import getpass
 import json
 import logging
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -28,7 +31,10 @@ from mi_fitness_sync.exceptions import (
     StravaError,
     XiaomiApiError,
 )
-from mi_fitness_sync.paths import get_exports_dir
+from mi_fitness_sync.paths import get_captcha_dir, get_exports_dir
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -301,36 +307,116 @@ def _handle_captcha_challenge(
             "Server requires a captcha but did not provide a captcha URL."
         ) from exc
 
-    print(f"Captcha required. Fetching captcha image...")
+    print("Captcha required. Fetching captcha image...")
     image_bytes, ick = client.fetch_captcha_image(captcha_url)
 
+    _cleanup_stale_captcha_images()
     captcha_path = _save_captcha_image(image_bytes)
+    opened_automatically = _open_captcha_image(captcha_path)
     print(f"Captcha image saved to: {captcha_path}")
-    print("Open the file to view the captcha, then enter the code below.")
-
-    captcha_code = input("Captcha code: ").strip()
-    if not captcha_code:
-        raise MiFitnessError("Captcha code is required.")
+    if not opened_automatically:
+        print("Open the file to view the captcha, then enter the code below.")
+    else:
+        print("Captcha image opened automatically. Enter the code below.")
 
     try:
-        return client.login_with_password(
-            email=email,
-            password=password,
-            device_id=device_id,
-            captcha_code=captcha_code,
-            ick=ick,
-            meta=meta,
-        )
-    except CaptchaRequiredError:
-        raise MiFitnessError("Captcha code was incorrect or expired. Please try logging in again.")
+        captcha_code = input("Captcha code: ").strip()
+        if not captcha_code:
+            raise MiFitnessError("Captcha code is required.")
+
+        try:
+            return client.login_with_password(
+                email=email,
+                password=password,
+                device_id=device_id,
+                captcha_code=captcha_code,
+                ick=ick,
+                meta=meta,
+            )
+        except CaptchaRequiredError:
+            raise MiFitnessError("Captcha code was incorrect or expired. Please try logging in again.")
+    finally:
+        _cleanup_captcha_artifacts(captcha_path)
 
 
 def _save_captcha_image(image_bytes: bytes) -> Path:
-    import tempfile
-    tmp_dir = Path(tempfile.gettempdir())
-    captcha_path = tmp_dir / "mi_fitness_captcha.png"
-    captcha_path.write_bytes(image_bytes)
-    return captcha_path
+    suffix = _captcha_image_suffix(image_bytes)
+    with tempfile.NamedTemporaryFile(
+        dir=get_captcha_dir(),
+        prefix="mi_fitness_captcha_",
+        suffix=suffix,
+        delete=False,
+    ) as handle:
+        handle.write(image_bytes)
+        return Path(handle.name)
+
+
+def _captcha_image_suffix(image_bytes: bytes) -> str:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if image_bytes.startswith(b"BM"):
+        return ".bmp"
+    return ".img"
+
+
+def _cleanup_stale_captcha_images() -> None:
+    """Delete leftover captcha files from previous login attempts when possible."""
+    for stale_path in get_captcha_dir().glob("mi_fitness_captcha_*"):
+        if not stale_path.is_file():
+            continue
+
+        try:
+            stale_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to delete stale captcha image %s: %s", stale_path, exc)
+
+
+def _open_captcha_image(captcha_path: Path) -> bool:
+    """Try to open the captcha with the platform default app."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(captcha_path))
+            return True
+
+        if sys.platform == "darwin":
+            subprocess.run(
+                ["open", str(captcha_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+
+        if sys.platform.startswith("linux"):
+            subprocess.run(
+                ["xdg-open", str(captcha_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Failed to auto-open captcha image %s: %s", captcha_path, exc)
+        return False
+
+    logger.warning("Unsupported OS for captcha auto-open: %s", sys.platform)
+    return False
+
+
+def _cleanup_captcha_artifacts(captcha_path: Path) -> None:
+    try:
+        captcha_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to delete captcha image %s: %s", captcha_path, exc)
+        print(
+            "Warning: Failed to delete captcha image. It may still be open in another app.",
+            file=sys.stderr,
+        )
+        print(f"Delete it manually if needed: {captcha_path}", file=sys.stderr)
 
 
 def handle_auth_status(args: argparse.Namespace) -> int:

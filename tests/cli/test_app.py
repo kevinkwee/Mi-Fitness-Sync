@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.cli import app as cli
 from mi_fitness_sync.exceptions import CaptchaRequiredError, Step2RequiredError, XiaomiApiError
 from mi_fitness_sync.strava.store import StravaTokenState
+
+
+def _patch_captcha_dir(monkeypatch, tmp_path):
+    captcha_dir = tmp_path / "captcha"
+    captcha_dir.mkdir()
+    monkeypatch.setattr(cli, "get_captcha_dir", lambda: captcha_dir)
+    return captcha_dir
+
+
+def _patch_captcha_opener(monkeypatch, *, result: bool, expected_dir: Path | None = None):
+    opened_paths: list[Path] = []
+
+    def open_captcha_image(path: Path) -> bool:
+        if expected_dir is not None:
+            assert path.parent == expected_dir
+        opened_paths.append(path)
+        return result
+
+    monkeypatch.setattr(cli, "_open_captcha_image", open_captcha_image)
+    return opened_paths
 
 
 def test_format_error_includes_xiaomi_api_code():
@@ -1434,6 +1455,9 @@ def test_format_error_step2_message():
 def test_login_captcha_prompts_and_retries(monkeypatch, capsys, tmp_path):
     from mi_fitness_sync.auth.state import AuthState
 
+    captcha_dir = _patch_captcha_dir(monkeypatch, tmp_path)
+    opened_paths = _patch_captcha_opener(monkeypatch, result=True, expected_dir=captcha_dir)
+
     session = type(
         "Session",
         (),
@@ -1471,7 +1495,7 @@ def test_login_captcha_prompts_and_retries(monkeypatch, capsys, tmp_path):
             return session
 
         def fetch_captcha_image(self, captcha_url):
-            return b"fake png", "ick_val"
+            return b"\x89PNG\r\n\x1a\nmock", "ick_val"
 
     monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
     monkeypatch.setattr(cli, "load_state", lambda path: None)
@@ -1483,11 +1507,17 @@ def test_login_captcha_prompts_and_retries(monkeypatch, capsys, tmp_path):
 
     assert exit_code == 0
     assert "Captcha required" in captured.out
+    assert "opened automatically" in captured.out
     assert "Login succeeded" in captured.out
     assert call_count["login"] == 2
+    assert len(opened_paths) == 1
+    assert list(captcha_dir.iterdir()) == []
 
 
 def test_login_captcha_empty_code_fails(monkeypatch, capsys, tmp_path):
+    captcha_dir = _patch_captcha_dir(monkeypatch, tmp_path)
+    _patch_captcha_opener(monkeypatch, result=True, expected_dir=captcha_dir)
+
     class DummyAuthClient:
         generate_device_id = staticmethod(lambda: "DEV123")
 
@@ -1510,9 +1540,13 @@ def test_login_captcha_empty_code_fails(monkeypatch, capsys, tmp_path):
 
     assert exit_code == 1
     assert "Captcha code is required" in captured.err
+    assert list(captcha_dir.iterdir()) == []
 
 
 def test_login_captcha_wrong_code_fails(monkeypatch, capsys, tmp_path):
+    captcha_dir = _patch_captcha_dir(monkeypatch, tmp_path)
+    _patch_captcha_opener(monkeypatch, result=True, expected_dir=captcha_dir)
+
     class DummyAuthClient:
         generate_device_id = staticmethod(lambda: "DEV123")
 
@@ -1535,6 +1569,142 @@ def test_login_captcha_wrong_code_fails(monkeypatch, capsys, tmp_path):
 
     assert exit_code == 1
     assert "incorrect or expired" in captured.err
+    assert list(captcha_dir.iterdir()) == []
+
+
+def test_login_captcha_open_failure_falls_back_to_manual_open(monkeypatch, capsys, tmp_path):
+    from mi_fitness_sync.auth.state import AuthState
+
+    captcha_dir = _patch_captcha_dir(monkeypatch, tmp_path)
+    opened_paths = _patch_captcha_opener(monkeypatch, result=False, expected_dir=captcha_dir)
+
+    session = type(
+        "Session",
+        (),
+        {
+            "to_auth_state": lambda self: AuthState(
+                email="u@x.com", user_id="uid", c_user_id="cuid",
+                service_id="miothealth", pass_token="pt", service_token="st",
+                ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                device_id="DEV123", slh=None, ph=None,
+                sts_cookie_header="cookie", cookies=[],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+        },
+    )()
+
+    call_count = {"login": 0}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            call_count["login"] += 1
+            if call_count["login"] == 1:
+                raise CaptchaRequiredError("/pass/getCode", payload={"_sign": "s", "qs": "q", "callback": "c"})
+            assert captcha_code == "xyzw"
+            return session
+
+        def fetch_captcha_image(self, captcha_url):
+            return b"img", "ick_val"
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "xyzw")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Captcha image saved to:" in captured.out
+    assert "Open the file to view the captcha" in captured.out
+    assert len(opened_paths) == 1
+    assert list(captcha_dir.iterdir()) == []
+
+
+def test_login_captcha_cleans_stale_files_before_open(monkeypatch, capsys, tmp_path):
+    from mi_fitness_sync.auth.state import AuthState
+
+    captcha_dir = _patch_captcha_dir(monkeypatch, tmp_path)
+    stale_path = captcha_dir / "mi_fitness_captcha_stale.png"
+    stale_path.write_bytes(b"stale")
+
+    def open_captcha_image(path: Path) -> bool:
+        assert not stale_path.exists()
+        assert path.parent == captcha_dir
+        return False
+
+    monkeypatch.setattr(cli, "_open_captcha_image", open_captcha_image)
+
+    session = type(
+        "Session",
+        (),
+        {
+            "to_auth_state": lambda self: AuthState(
+                email="u@x.com", user_id="uid", c_user_id="cuid",
+                service_id="miothealth", pass_token="pt", service_token="st",
+                ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                device_id="DEV123", slh=None, ph=None,
+                sts_cookie_header="cookie", cookies=[],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+        },
+    )()
+
+    call_count = {"login": 0}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            call_count["login"] += 1
+            if call_count["login"] == 1:
+                raise CaptchaRequiredError("/pass/getCode", payload={"_sign": "s", "qs": "q", "callback": "c"})
+            assert captcha_code == "xyzw"
+            return session
+
+        def fetch_captcha_image(self, captcha_url):
+            return b"img", "ick_val"
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "xyzw")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+
+    assert exit_code == 0
+    assert list(captcha_dir.iterdir()) == []
+
+
+def test_cleanup_captcha_artifacts_warns_when_delete_fails(monkeypatch, capsys, tmp_path):
+    captcha_path = tmp_path / "mi_fitness_captcha.png"
+    captcha_path.write_bytes(b"img")
+
+    original_unlink = cli.Path.unlink
+
+    def fail_unlink(self: Path, missing_ok: bool = False):
+        if self == captcha_path:
+            raise OSError("still open")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(cli.Path, "unlink", fail_unlink)
+
+    cli._cleanup_captcha_artifacts(captcha_path)
+    captured = capsys.readouterr()
+
+    assert "Failed to delete captcha image" in captured.err
+    assert str(captcha_path) in captured.err
+    assert captcha_path.exists()
 
 
 def test_login_captcha_no_url_fails(monkeypatch, capsys, tmp_path):
