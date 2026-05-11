@@ -4,7 +4,7 @@ import json
 
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.cli import app as cli
-from mi_fitness_sync.exceptions import CaptchaRequiredError, XiaomiApiError
+from mi_fitness_sync.exceptions import CaptchaRequiredError, Step2RequiredError, XiaomiApiError
 from mi_fitness_sync.strava.store import StravaTokenState
 
 
@@ -1277,3 +1277,306 @@ class TestSmoothingKwargsHelper:
         assert "smooth" not in kwargs
         assert "outlier_speed_mps" not in kwargs
         assert kwargs["smooth_mode"] == "match"
+
+
+# ---------------------------------------------------------------------------
+# Step-2 verification tests
+# ---------------------------------------------------------------------------
+
+
+def _make_step2_auth_client(monkeypatch, *, step2_session):
+    """Wire up a DummyAuthClient that raises Step2RequiredError on password login,
+    then returns *step2_session* on login_with_step2."""
+    from mi_fitness_sync.auth.client import MetaLoginData
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            raise Step2RequiredError(
+                "Step-2 required.",
+                payload={"_sign": "sig", "qs": "q", "callback": "cb", "code": 81003},
+                step1_token="step1tok",
+            )
+
+        def login_with_step2(self, *, email, step2_code, step1_token, meta, device_id, trust=True):
+            assert step1_token == "step1tok"
+            assert isinstance(meta, MetaLoginData)
+            assert meta.sign == "sig"
+            return step2_session
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+
+
+def test_login_step2_prompts_and_succeeds(monkeypatch, capsys, tmp_path):
+    from mi_fitness_sync.auth.state import AuthState
+
+    session = type(
+        "Session",
+        (),
+        {
+            "to_auth_state": lambda self: AuthState(
+                email="u@x.com", user_id="uid", c_user_id="cuid",
+                service_id="miothealth", pass_token="pt", service_token="st",
+                ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                device_id="DEV123", slh=None, ph=None,
+                sts_cookie_header="cookie", cookies=[],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+        },
+    )()
+
+    _make_step2_auth_client(monkeypatch, step2_session=session)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    # First input call is not used (email from --email), code prompt returns "123456"
+    monkeypatch.setattr("builtins.input", lambda prompt: "123456")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Step-2 verification required" in captured.out
+    assert "Login succeeded" in captured.out
+
+
+def test_login_step2_empty_code_fails(monkeypatch, capsys, tmp_path):
+    _make_step2_auth_client(monkeypatch, step2_session=None)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Verification code is required" in captured.err
+
+
+def test_login_step2_missing_step1_token_warns_and_continues(monkeypatch, capsys, tmp_path):
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            raise Step2RequiredError(
+                "Step-2 required.",
+                payload={"_sign": "sig", "qs": "q", "callback": "cb", "code": 81003},
+                step1_token=None,
+            )
+
+        def login_with_step2(self, *, email, step2_code, step1_token, meta, device_id, trust=True):
+            assert step1_token is None
+            from mi_fitness_sync.auth.client import LoginSession
+
+            return LoginSession(
+                email=email, user_id="uid", c_user_id="cuid",
+                service_id="miothealth", pass_token="pt", service_token="st",
+                ssecurity="ss", psecurity=None, auto_login_url="https://x",
+                device_id=device_id, slh=None, ph=None,
+                sts_cookie_header="", cookies=[],
+            )
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "123456")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "step1Token" in captured.err
+
+
+def test_login_step2_incomplete_meta(monkeypatch, capsys, tmp_path):
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            raise Step2RequiredError(
+                "Step-2 required.",
+                payload={"_sign": "sig", "qs": "", "callback": "cb", "code": 81003},
+                step1_token="tok",
+            )
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "meta login data is incomplete" in captured.err
+
+
+def test_format_error_step2_message():
+    error = Step2RequiredError("step2 needed", payload={})
+    result = cli.format_error(error)
+    assert "could not be completed" in result
+
+
+# ---------------------------------------------------------------------------
+# Captcha challenge tests
+# ---------------------------------------------------------------------------
+
+def test_login_captcha_prompts_and_retries(monkeypatch, capsys, tmp_path):
+    from mi_fitness_sync.auth.state import AuthState
+
+    session = type(
+        "Session",
+        (),
+        {
+            "to_auth_state": lambda self: AuthState(
+                email="u@x.com", user_id="uid", c_user_id="cuid",
+                service_id="miothealth", pass_token="pt", service_token="st",
+                ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                device_id="DEV123", slh=None, ph=None,
+                sts_cookie_header="cookie", cookies=[],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+        },
+    )()
+
+    call_count = {"login": 0}
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            call_count["login"] += 1
+            if call_count["login"] == 1:
+                raise CaptchaRequiredError(
+                    "/pass/getCode?icodeType=login",
+                    captcha_type="captcha",
+                    payload={"_sign": "s", "qs": "q", "callback": "c", "code": 87001},
+                )
+            assert captcha_code == "xyzw"
+            assert ick == "ick_val"
+            return session
+
+        def fetch_captcha_image(self, captcha_url):
+            return b"fake png", "ick_val"
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "xyzw")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Captcha required" in captured.out
+    assert "Login succeeded" in captured.out
+    assert call_count["login"] == 2
+
+
+def test_login_captcha_empty_code_fails(monkeypatch, capsys, tmp_path):
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            raise CaptchaRequiredError("/pass/getCode", payload={})
+
+        def fetch_captcha_image(self, captcha_url):
+            return b"img", "ick"
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Captcha code is required" in captured.err
+
+
+def test_login_captcha_wrong_code_fails(monkeypatch, capsys, tmp_path):
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            raise CaptchaRequiredError("/pass/getCode", payload={})
+
+        def fetch_captcha_image(self, captcha_url):
+            return b"img", "ick"
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "wrong")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "incorrect or expired" in captured.err
+
+
+def test_login_captcha_no_url_fails(monkeypatch, capsys, tmp_path):
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            raise CaptchaRequiredError("", payload={})
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "captcha URL" in captured.err
+
+
+def test_login_captcha_ick_missing_fails(monkeypatch, capsys, tmp_path):
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            raise CaptchaRequiredError("/pass/getCode", payload={})
+
+        def fetch_captcha_image(self, captcha_url):
+            raise XiaomiApiError("Captcha response did not include an ICK token; cannot submit captcha.")
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "ICK token" in captured.err

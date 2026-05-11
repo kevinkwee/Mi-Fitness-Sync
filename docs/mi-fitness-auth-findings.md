@@ -434,6 +434,259 @@ Only called for SID `xiaomihome`.
    → VerifyToken interceptor injects Cookie header
    → On 401: force-refresh token, retry up to 3 times
 ```
+---
+
+## Step-2 Verification (Code 81003)
+
+When the server returns code `81003` (constant `RESULT_CODE_VERIFICATION` in `XMPassport`), `processLoginContent()` raises `NeedVerificationException`. The decompiled SDK and controller layers preserve the state needed for a `/loginStep2` retry, but the decompiled password-login UI in this APK does not show a concrete code-entry screen for this path.
+
+### Response Fields
+
+`processLoginContent()` extracts the following when code 81003 is returned:
+
+| Field | Source | Required | Description |
+|---|---|---|---|
+| `_sign` | JSON body (`getString`) | Yes | CSRF-like signature token |
+| `qs` | JSON body (`getString`) | Yes | Query string parameters |
+| `callback` | JSON body (`getString`) | Yes | Callback URL |
+| `userId` | JSON body (`optString`) | No | Xiaomi user ID |
+| `step1Token` | **HTTP response header** | — | Token from first login step |
+
+The three JSON fields are bundled into a `MetaLoginData` object. No other fields — `desc`, `maskedPhone`, `maskedEmail`, `notifyHint`, `verifyHint`, `hint` — are extracted from the 81003 response. The `desc` field is read earlier in the method for logging but is not propagated.
+
+### NeedVerificationException
+
+`com.xiaomi.accountsdk.account.exception.NeedVerificationException` extends `Exception`. Hardcodes its message as `"Need verification code"`.
+
+| Field | Type | Getter |
+|---|---|---|
+| `mMetaLoginData` | `MetaLoginData` | `getMetaLoginData()` |
+| `mStep1Token` | `String` | `getStep1Token()` |
+| `mUserId` | `String` | `getUserId()` |
+
+Two constructors:
+- `NeedVerificationException(String str)` — userId only, nulls for MetaLoginData and step1Token.
+- `NeedVerificationException(MetaLoginData, String step1Token, String userId)` — full constructor used by `processLoginContent`.
+
+### MetaLoginData
+
+`com.xiaomi.accountsdk.account.data.MetaLoginData` implements `Parcelable`. Contains exactly three fields:
+
+| Field | JSON Key |
+|---|---|
+| `sign` | `_sign` |
+| `f30661qs` (deobfuscated: `qs`) | `qs` |
+| `callback` | `callback` |
+
+### Step-2 Login Submission
+
+`Step2LoginParams` (`com.xiaomi.accountsdk.account.data.Step2LoginParams`) carries the step-2 submission state:
+
+| Field | Description |
+|---|---|
+| `userId` | User account ID |
+| `serviceId` | Service identifier (e.g. `miothealth`) |
+| `step1Token` | Authentication token from step 1 |
+| `step2code` | User-entered second-step verification code |
+| `metaLoginData` | Challenge data from `NeedVerificationException` |
+| `trust` | Device trust flag |
+| `deviceId` | Optional hashed device identifier |
+| `returnStsUrl` | Optional flag controlling STS return handling |
+
+`XMPassport.loginByStep2(Step2LoginParams)` submits to `URL_LOGIN_AUTH_STEP2` → `https://account.xiaomi.com/pass/loginStep2`.
+
+**POST parameters:**
+
+| Key | Value |
+|---|---|
+| `user` | Xiaomi account ID |
+| `code` | `step2code` |
+| `_sign` | `metaLoginData.sign` |
+| `qs` | `metaLoginData.qs` |
+| `callback` | `metaLoginData.callback` |
+| `trust` | `"true"` or `"false"` |
+| `sid` | Target service ID |
+| `_json` | `"true"` |
+
+**Cookies:**
+
+| Key | Value |
+|---|---|
+| `step1Token` | First-step verification token |
+| `deviceId` | Hashed device identifier |
+
+The response is parsed by the same `processLoginContent()` path used by password login.
+
+### Observed UI Wiring
+
+| Class | Observation |
+|---|---|
+| `PhoneLoginController.passwordLogin()` | Converts `NeedVerificationException` into `PasswordLoginCallback.onLoginByStep2(Step2LoginParams)` |
+| `LoginUIController.loginByPassword()` | Does the same for the internal Passport UI controller |
+| `LoginUIController.loginByStep2()` | Calls `AccountHelper.getServiceTokenByStep2(...)` and maps `InvalidStep2codeException` to `onInvalidStep2Code()` |
+| `LoginIdPasswordCallback` | Default `onLoginByStep2()` throws `IllegalStateException("should never happens")` |
+| `PasswordLoginFragment._LoginIdPasswordCallback` | Does not override `onLoginByStep2()` |
+| `ConfirmCredentialActivity` | Defines `onLoginByStep2(Step2LoginParams)` with an empty method body |
+
+### VerifyCodeLoginFragment Is a Different Flow
+
+`VerifyCodeLoginFragment` is the phone-ticket login screen, not the password step-2 consumer for `NeedVerificationException`.
+
+| Member / Method | Role |
+|---|---|
+| `mSendPhoneNumber` / `mTicketType` | Store the phone-ticket destination and transport (`sms` / `whatsapp`) |
+| `LoginAndRegisterController.requestPhoneNumberVerifyCode(...)` | Requests the phone login ticket |
+| `loginPhoneUserInfo()` / `registerPhoneUserInfo()` | Complete phone-based login / registration |
+| `_RequestPhoneVerifyCodeCallback.onNeedCaptchaCode()` | Handles CAPTCHA while requesting a phone login ticket |
+
+No decompiled Passport fragment or activity in this APK was found that implements `LoginUIController.Step2LoginCallback` or otherwise collects `step2code` for a password-login `NeedVerificationException`.
+
+### Related Controllers
+
+| Class | Package | Role |
+|---|---|---|
+| `PhoneLoginController` | `com.xiaomi.passport.uicontroller` | Dispatches step-2 login calls |
+| `MiPassportUIController` | `com.xiaomi.passport.uicontroller` | UI-driven step-2 login orchestration |
+| `LoginAndRegisterController` | `com.xiaomi.passport.ui.utils` | Bridges UI fragments to controllers |
+
+### Phone-Ticket Verification String Resources
+
+The following resources belong to the phone-ticket verification UI above:
+
+| String Name | Value |
+|---|---|
+| `passport_send_sms_to` | Code sent to %1$s |
+| `passport_to_verify_code_login` | Sign in via SMS |
+| `passport_can_not_recevie_verify_code` | Didn’t receive a code? |
+| `passport_resend_ticket` | Resend code |
+| `passport_sending_vcode` | Sending code… |
+| `passport_input_verify_code` | Enter verification code |
+| `passport_identification_expired` | Verification code expired. Start over. |
+| `passport_error_sms_limit` | Too many verification codes have been sent to this number. Try again later. |
+| `passport_error_token_expired` | Code expired. Try again. |
+
+---
+
+## Captcha (Password Login: Code 87001)
+
+For password login, `processLoginContent()` raises `NeedCaptchaException` only on code `87001`. Code `70016` is a separate wrong-password branch that still carries `captchaUrl` and `MetaLoginData` via `InvalidCredentialException`. Code `20031` appears in other account flows such as registration and verification-code requests, not in password-login `processLoginContent()`.
+
+### NeedCaptchaException
+
+`com.xiaomi.accountsdk.account.exception.NeedCaptchaException` extends `AccountException`.
+
+| Field | Type | Getter |
+|---|---|---|
+| `mCaptchaUrl` | `String` | `getCaptchaUrl()` |
+| `mCaptchaType` | `String` | `getCaptchaType()` |
+
+Captcha type constants:
+
+| Constant | Value |
+|---|---|
+| `TYPE_PICTURE_CAPTCHA` | `captcha` |
+| `TYPE_PICTURE_CAPTCHA_VIEW` | `captchaView` |
+| `TYPE_MAN_MACHINE` | `manMachine` |
+
+### Trigger in processLoginContent
+
+At code 87001:
+
+```java
+throw new NeedCaptchaException(i, string,
+    jSONObject.getString("captchaUrl"),
+    jSONObject.optString("type"));
+```
+
+At code 70016 (wrong password + CAPTCHA required), password login throws `InvalidCredentialException` with `MetaLoginData` and `captchaUrl` rather than `NeedCaptchaException`.
+
+### Captcha Image Fetch
+
+`CaptchaView` (`com.xiaomi.passport.p237ui.settings.CaptchaView`) handles display and ICK extraction.
+
+In the password UI, `BaseLoginFragment.showCaptcha()` passes `XMPassport.ACCOUNT_DOMAIN + captchaUrl` into `EditTextGroupView.setupCaptcha()`, and `CaptchaView` downloads that URL with `SimpleRequestForAccount.getAsStream(...)`.
+
+`CaptchaView` also has a constructor default of `https://account.xiaomi.com/pass/getCode?icodeType=login&...`, but the password-login flow overrides that value with the server-provided `captchaUrl` before the download starts.
+
+**Response:**
+- Body: image binary (PNG/JPEG)
+- Header: `ick` — **Image Check Key**, required for submission
+
+The `ick` value is extracted from the HTTP response headers and stored for later submission.
+
+### Other Captcha Codes Outside Password Login
+
+| Method | Captcha code handling |
+|---|---|
+| `getRegisterVerifyCode()` | Throws `NeedCaptchaException` on `20031` |
+| `sendPhoneRegTicket()` | Throws `NeedCaptchaException` on `20031` and `87001` |
+| `sendEmailActivateMessage()` | Throws `NeedCaptchaException` on `20031` and `87001` |
+| `regByEmail()` | Throws `NeedCaptchaException` on `87001` |
+
+### Captcha Submission
+
+The captcha is **not** submitted to a separate endpoint. The app retries the **same login request** with two additions:
+
+| Addition | Where |
+|---|---|
+| `captCode` | POST parameter — user-entered captcha text |
+| `ick` | Cookie — extracted from captcha image response header |
+
+Full retry POST to `/serviceLoginAuth2`:
+
+```
+POST /pass/serviceLoginAuth2
+Parameters:
+  user=<userId>
+  hash=<MD5(password)>
+  sid=<serviceId>
+  captCode=<user_entered_code>
+  _json=true
+  _sign=<sign>
+  qs=<qs>
+  callback=<callback>
+Cookies:
+  deviceId=<id>
+  ick=<ick_from_captcha_fetch>
+```
+
+### Captcha Parameter Name Variations
+
+Different endpoints use different parameter names for the captcha code:
+
+| Endpoint | Parameter Name |
+|---|---|
+| `/serviceLoginAuth2` | `captCode` |
+| `/sendServiceLoginTicket` | `captCode` |
+| `/sendPhoneRegTicket` | `icode` |
+| `/register` (email) | `inputcode` |
+
+All require the `ick` cookie.
+
+### Captcha Flow
+
+```
+1. POST /serviceLoginAuth2 (no captcha)
+2. Server returns code 87001 with captchaUrl and type
+3. NeedCaptchaException thrown
+4. GET ACCOUNT_DOMAIN + captchaUrl → image + ick header
+5. CaptchaView displays image, user enters code
+6. POST /serviceLoginAuth2 (same params + captCode param + ick cookie)
+7. On success (code 0): parse AccountInfo
+   On wrong code (87001): repeat from step 4
+   On rate limit (70022): ReachLimitException
+```
+
+### Captcha String Resources
+
+| String Name | Value |
+|---|---|
+| `passport_dialog_captcha_title` | Code |
+| `passport_input_captcha_hint` | Enter code |
+| `passport_input_voice_captcha_hint` | Enter voice verification code |
+| `passport_wrong_captcha` | The code you entered is incorrect |
+| `passport_talkback_image_captcha` | Image verification code |
+| `passport_talkback_switch_voice_captcha` | Switch to voice verification code |
 
 ---
 
@@ -451,4 +704,4 @@ The following areas are partially or incompletely decompiled:
 
 - **`NeedNotificationException` flow:** Some accounts trigger a security notification flow (`securityStatus != 0`) that redirects to a `notificationUrl`. The full handling of this flow within the Passport UI is partially decompiled.
 
-- **Step-2 verification:** `NeedVerificationException` carries a `step1Token` and `MetaLoginData` for `loginStep2`, but the complete step-2 flow is spread across multiple classes and not all branches are fully recovered.
+- **Step-2 verification UI consumer:** `XMPassport.loginByStep2()` and `LoginUIController.loginByStep2()` are decompiled, but no Passport fragment or activity in this APK was found that collects `step2code` for a password-login `NeedVerificationException`. `VerifyCodeLoginFragment` is the phone-ticket login flow.

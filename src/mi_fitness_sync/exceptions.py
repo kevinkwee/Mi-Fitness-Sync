@@ -14,9 +14,17 @@ class XiaomiApiError(MiFitnessError):
 class CaptchaRequiredError(MiFitnessError):
     """Captcha is required before login can continue."""
 
-    def __init__(self, captcha_url: str):
+    def __init__(
+        self,
+        captcha_url: str,
+        *,
+        captcha_type: str = "captcha",
+        payload: dict | None = None,
+    ):
         super().__init__("Captcha is required for this account.")
         self.captcha_url = captcha_url
+        self.captcha_type = captcha_type
+        self.payload = payload or {}
 
 
 class NotificationRequiredError(MiFitnessError):
@@ -30,9 +38,16 @@ class NotificationRequiredError(MiFitnessError):
 class Step2RequiredError(MiFitnessError):
     """Step-2 login was requested by Xiaomi Passport."""
 
-    def __init__(self, message: str, *, payload: dict | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        payload: dict | None = None,
+        step1_token: str | None = None,
+    ):
         super().__init__(message)
         self.payload = payload or {}
+        self.step1_token = step1_token
 
 
 class AuthStateNotFoundError(MiFitnessError):

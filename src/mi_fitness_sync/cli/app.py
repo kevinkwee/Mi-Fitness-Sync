@@ -14,7 +14,7 @@ from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
 from mi_fitness_sync.activity.formatting import parse_cli_time
 from mi_fitness_sync.activity.models import Activity, ActivityDetail
 from mi_fitness_sync.activity.utils import render_activities_table
-from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MiFitnessAuthClient
+from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MetaLoginData, MiFitnessAuthClient
 from mi_fitness_sync.auth.state import utc_now_iso
 from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
 from mi_fitness_sync.cli.speed_parser import parse_speed_input
@@ -202,11 +202,18 @@ def handle_login(args: argparse.Namespace) -> int:
     device_id = existing_state.device_id if existing_state else MiFitnessAuthClient.generate_device_id()
 
     client = MiFitnessAuthClient(service_id=DEFAULT_SERVICE_ID)
-    session = client.login_with_password(
-        email=email,
-        password=password,
-        device_id=device_id,
-    )
+    try:
+        session = client.login_with_password(
+            email=email,
+            password=password,
+            device_id=device_id,
+        )
+    except CaptchaRequiredError as exc:
+        session = _handle_captcha_challenge(
+            client, exc, email=email, password=password, device_id=device_id,
+        )
+    except Step2RequiredError as exc:
+        session = _handle_step2_verification(client, exc, email=email, device_id=device_id)
 
     state = session.to_auth_state()
     if existing_state:
@@ -228,6 +235,102 @@ def handle_logout(args: argparse.Namespace) -> int:
     delete_state(args.state_path)
     print(f"Removed auth state at {path}")
     return 0
+
+
+def _handle_step2_verification(
+    client: MiFitnessAuthClient,
+    exc: Step2RequiredError,
+    *,
+    email: str,
+    device_id: str,
+) -> object:
+    payload = exc.payload
+    step1_token = exc.step1_token
+    if not step1_token:
+        print(
+            "Warning: Step-2 verification is required but the server did not provide a step1Token.\n"
+            "Attempting step-2 without it — the session cookies may carry the auth state.",
+            file=sys.stderr,
+        )
+
+    sign = payload.get("_sign", "")
+    qs = payload.get("qs", "")
+    callback = payload.get("callback", "")
+    if not all((sign, qs, callback)):
+        raise MiFitnessError(
+            "Step-2 verification is required but meta login data is incomplete."
+        ) from exc
+
+    meta = MetaLoginData(sign=sign, qs=qs, callback=callback)
+
+    print("Step-2 verification required. Check your email or SMS for a verification code.")
+    code = input("Verification code: ").strip()
+    if not code:
+        raise MiFitnessError("Verification code is required.")
+
+    return client.login_with_step2(
+        email=email,
+        step2_code=code,
+        step1_token=step1_token,
+        meta=meta,
+        device_id=device_id,
+    )
+
+
+def _handle_captcha_challenge(
+    client: MiFitnessAuthClient,
+    exc: CaptchaRequiredError,
+    *,
+    email: str,
+    password: str,
+    device_id: str,
+) -> object:
+    captcha_url = exc.captcha_url
+    meta_payload = exc.payload
+
+    meta = None
+    if all(meta_payload.get(k) for k in ("_sign", "qs", "callback")):
+        meta = MetaLoginData(
+            sign=meta_payload["_sign"],
+            qs=meta_payload["qs"],
+            callback=meta_payload["callback"],
+        )
+
+    if not captcha_url:
+        raise MiFitnessError(
+            "Server requires a captcha but did not provide a captcha URL."
+        ) from exc
+
+    print(f"Captcha required. Fetching captcha image...")
+    image_bytes, ick = client.fetch_captcha_image(captcha_url)
+
+    captcha_path = _save_captcha_image(image_bytes)
+    print(f"Captcha image saved to: {captcha_path}")
+    print("Open the file to view the captcha, then enter the code below.")
+
+    captcha_code = input("Captcha code: ").strip()
+    if not captcha_code:
+        raise MiFitnessError("Captcha code is required.")
+
+    try:
+        return client.login_with_password(
+            email=email,
+            password=password,
+            device_id=device_id,
+            captcha_code=captcha_code,
+            ick=ick,
+            meta=meta,
+        )
+    except CaptchaRequiredError:
+        raise MiFitnessError("Captcha code was incorrect or expired. Please try logging in again.")
+
+
+def _save_captcha_image(image_bytes: bytes) -> Path:
+    import tempfile
+    tmp_dir = Path(tempfile.gettempdir())
+    captcha_path = tmp_dir / "mi_fitness_captcha.png"
+    captcha_path.write_bytes(image_bytes)
+    return captcha_path
 
 
 def handle_auth_status(args: argparse.Namespace) -> int:
@@ -589,7 +692,7 @@ def format_error(exc: MiFitnessError) -> str:
     if isinstance(exc, NotificationRequiredError):
         return f"Login requires additional verification in a browser or app. URL: {exc.notification_url}"
     if isinstance(exc, Step2RequiredError):
-        return "Login requires a Xiaomi Passport step-2 verification flow that this CLI does not automate yet."
+        return "Login requires a Xiaomi Passport step-2 verification flow that could not be completed."
     if isinstance(exc, StravaError):
         return str(exc)
     if isinstance(exc, XiaomiApiError):
