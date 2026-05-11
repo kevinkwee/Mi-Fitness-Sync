@@ -89,6 +89,12 @@ Commands that access Mi Fitness accept `--state-path` to override the default au
 
 Logs into Xiaomi Passport for the Mi Fitness service and saves the auth state locally. Email and password can be passed as arguments or entered interactively when omitted. The password prompt does not echo input.
 
+If Xiaomi requires extra verification, the CLI supports the interactive flows it can complete locally:
+
+1. Captcha challenges download an image to the local captcha directory and try to open it with the OS default image viewer
+2. Step-2 verification prompts for the email/SMS code in the terminal
+3. Browser or app notification approval is not automated; the CLI prints the verification URL when Xiaomi requires it
+
 Examples:
 
 ```bash
@@ -198,6 +204,7 @@ Exports one activity to GPX, TCX, or FIT.
 ```bash
 mi-fitness-sync export-activity sid:key:1717200000 --format gpx --output run.gpx
 mi-fitness-sync export-activity sid:key:1717200000 --format tcx --output run.tcx.gz --gzip
+mi-fitness-sync export-activity sid:key:1717200000 --format gpx --smooth-mode full --outlier-speed 7:30
 mi-fitness-sync export-activity sid:key:1717200000 --format fit
 ```
 
@@ -207,11 +214,14 @@ Flags:
 |------|-------------|
 | `activity_id` | Activity ID from `list-activities` (positional, required) |
 | `--format` | Export format: `gpx`, `tcx`, or `fit` (required) |
-| `--output` | Destination file path (default: `~/.mi_fitness_sync/exports/<title>_<time>.<format>`) |
+| `--output` | Destination file path (default: `~/.mi_fitness_sync/exports/<sanitized_title>_<local_start_time>.<format>`) |
 | `--gzip` | Gzip-compress the output |
 | `--country-code` | Two-letter country override |
 | `--no-cache` | Disable the local FDS binary cache |
 | `--cache-dir` | Override the local FDS cache directory |
+| `--no-smooth` | Disable GPS smoothing entirely |
+| `--outlier-speed` | Max plausible speed for outlier detection, as km/h (for example `180` or `180kmh`) or pace (for example `7:30` or `7:30/km`) |
+| `--smooth-mode` | Smoothing strategy: `match` (default, converge toward the Mi Fitness summary distance) or `full` (apply the strongest smoothing pass) |
 | `--verbose` | Enable debug logging |
 | `--state-path` | Override the persisted auth state file path |
 
@@ -219,7 +229,9 @@ Export behavior:
 
 1. GPX requires GPS track points in the detail payload
 2. TCX and FIT prefer track points but fall back to timestamped sport samples without coordinates
-3. FIT generation is best-effort — only fields present in the Mi Fitness source are included
+3. GPS smoothing is enabled by default for exports that include GPS coordinates; it only adjusts latitude/longitude and leaves timestamps, heart rate, cadence, and other fields unchanged
+4. `match` mode tries to bring the smoothed GPS distance closer to the Mi Fitness summary distance, while `full` applies the largest valid smoothing window after outlier cleanup
+5. FIT generation is best-effort — only fields present in the Mi Fitness source are included
 
 ### `strava-login`
 
@@ -247,7 +259,7 @@ The flow:
 4. Exchanges the code for access and refresh tokens
 5. Saves tokens to `~/.mi_fitness_sync/strava/tokens.json`
 
-Access tokens expire after six hours. The CLI refreshes them automatically using the stored refresh token.
+The CLI refreshes Strava access tokens automatically using the stored refresh token whenever the saved access token is near expiry.
 
 ### `strava-status`
 
@@ -284,6 +296,7 @@ Uploads one Mi Fitness activity to Strava as a FIT file. The FIT file is also sa
 ```bash
 mi-fitness-sync upload-to-strava sid:key:1717200000
 mi-fitness-sync upload-to-strava sid:key:1717200000 --output run.fit
+mi-fitness-sync upload-to-strava sid:key:1717200000 --smooth-mode full --outlier-speed 180kmh
 mi-fitness-sync upload-to-strava sid:key:1717200000 --skip-duplicate-check
 ```
 
@@ -292,19 +305,22 @@ Flags:
 | Flag | Description |
 |------|-------------|
 | `activity_id` | Activity ID from `list-activities` (positional, required) |
-| `--output` | Local FIT file save path (default: `~/.mi_fitness_sync/exports/<title>_<time>.fit`) |
+| `--output` | Local FIT file save path (default: `~/.mi_fitness_sync/exports/<sanitized_title>_<local_start_time>.fit`) |
 | `--country-code` | Two-letter country override |
 | `--skip-duplicate-check` | Skip checking Strava for existing activities with a similar start time |
 | `--strava-token-path` | Override the Strava token file path |
 | `--no-cache` | Disable the local FDS binary cache |
 | `--cache-dir` | Override the local FDS cache directory |
+| `--no-smooth` | Disable GPS smoothing entirely before generating the FIT upload |
+| `--outlier-speed` | Max plausible speed for outlier detection, as km/h or pace |
+| `--smooth-mode` | Smoothing strategy: `match` (default) or `full` |
 | `--verbose` | Enable debug logging |
 | `--state-path` | Override the persisted Mi Fitness auth state file path |
 
 Upload behavior:
 
 1. Fetches the activity detail from Mi Fitness
-2. Renders to FIT format and saves the file locally
+2. Renders to FIT format with the same optional smoothing controls as `export-activity`, then saves the file locally
 3. Checks Strava for existing activities within ±5 minutes of the start time (unless `--skip-duplicate-check` is set)
 4. If potential duplicates are found, prompts for confirmation before uploading
 5. Uploads the FIT file to Strava and polls until processing completes
@@ -338,6 +354,8 @@ You can override that location with `--state-path`.
 
 Strava tokens are stored under `~/.mi_fitness_sync/strava/tokens.json`. You can override that location with `--strava-token-path`.
 
+When Xiaomi requires a captcha, the image is saved under `~/.mi_fitness_sync/captcha/` and the CLI tries to open it with your OS default image app. The file is deleted on a best-effort basis after you respond; if deletion fails, the CLI prints the saved path so you can remove it manually.
+
 Both files contain sensitive credentials and should not be shared or committed to version control.
 
 ## Limitations
@@ -345,7 +363,7 @@ Both files contain sensitive credentials and should not be shared or committed t
 1. This is an unofficial project and is not affiliated with Xiaomi, Mi Fitness, or Strava.
 2. Parts of the Xiaomi login flow had to be pieced together from app behavior and decompiled code.
 3. Xiaomi may change endpoints, cookies, signatures, or response formats at any time.
-4. Some accounts may require captcha, notification approval, or step-2 verification flows that are not fully automated here.
+4. Some accounts may require captcha or notification approval flows that are not fully automated here. Step-2 verification (SMS/email code) is supported interactively.
 5. Detail retrieval currently depends on the raw `huami_sport_record` payload shape used by the Android app; Xiaomi may change that format without notice.
 6. FDS download-url metadata does not guarantee the corresponding cloud object is still downloadable, so some workouts still cannot be enriched from FDS.
 7. GPX export is unavailable for workouts where Mi Fitness does not expose GPS track points.
@@ -354,9 +372,9 @@ Both files contain sensitive credentials and should not be shared or committed t
 
 ## Security Notes
 
-1. The CLI currently accepts account credentials directly on the command line.
-2. Shell history may persist those values depending on your environment.
-3. The auth state file contains sensitive session data and should be protected.
+1. The CLI accepts Mi account and Strava client credentials either on the command line or via interactive prompts.
+2. Command-line arguments may be persisted in shell history or process listings depending on your environment, so interactive prompts are safer on shared machines.
+3. The persisted Mi Fitness auth state and Strava token files contain sensitive session data and should be protected.
 
 If you use this on a shared machine, treat the local auth state like a credential.
 
