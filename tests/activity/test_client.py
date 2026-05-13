@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from mi_fitness_sync.activity.client import ACTIVITY_LIST_ENDPOINT, MiFitnessActivitiesClient
+from mi_fitness_sync.activity.client import (
+    ACTIVITY_LIST_ENDPOINT,
+    ITER_ACTIVITIES_PAGE_SIZE,
+    LIST_ACTIVITIES_PAGE_SIZE,
+    MiFitnessActivitiesClient,
+)
 from mi_fitness_sync.activity.models import Activity, ActivityPage, ActivitySample, FitnessDataPage
 from mi_fitness_sync.exceptions import MiFitnessError
 
@@ -593,6 +598,75 @@ def test_list_activities_filter_respects_limit(auth_state, monkeypatch):
     result = client.list_activities(start_time=None, end_time=3000, limit=2)
 
     assert len(result) == 2
+
+
+def test_list_activities_uses_list_page_size(auth_state, monkeypatch):
+    client = MiFitnessActivitiesClient(auth_state)
+    requested_limits: list[int] = []
+
+    def fake_fetch(**kwargs):
+        requested_limits.append(kwargs["limit"])
+        return ActivityPage(activities=[], has_more=False, next_key=None)
+
+    monkeypatch.setattr(client, "_fetch_activity_page", fake_fetch)
+
+    result = client.list_activities(start_time=None, end_time=None, limit=100)
+
+    assert result == []
+    assert requested_limits == [LIST_ACTIVITIES_PAGE_SIZE]
+
+
+def test_iter_activities_uses_iterator_page_size(auth_state, monkeypatch):
+    client = MiFitnessActivitiesClient(auth_state)
+    requested_limits: list[int] = []
+
+    def fake_fetch(**kwargs):
+        requested_limits.append(kwargs["limit"])
+        return ActivityPage(activities=[], has_more=False, next_key=None)
+
+    monkeypatch.setattr(client, "_fetch_activity_page", fake_fetch)
+
+    result = list(client.iter_activities(start_time=None, end_time=None, limit=None))
+
+    assert result == []
+    assert requested_limits == [ITER_ACTIVITIES_PAGE_SIZE]
+
+
+def test_iter_activities_reduces_last_page_to_remaining_limit(auth_state, monkeypatch):
+    client = MiFitnessActivitiesClient(auth_state)
+    requested_limits: list[int] = []
+
+    page1 = ActivityPage(
+        activities=[_make_activity(start_time) for start_time in range(1, 101)],
+        has_more=True,
+        next_key="page2",
+    )
+    page2 = ActivityPage(
+        activities=[_make_activity(start_time) for start_time in range(101, 201)],
+        has_more=True,
+        next_key="page3",
+    )
+    page3 = ActivityPage(
+        activities=[_make_activity(start_time) for start_time in range(201, 251)],
+        has_more=False,
+        next_key=None,
+    )
+
+    def fake_fetch(**kwargs):
+        requested_limits.append(kwargs["limit"])
+        token = kwargs.get("next_key")
+        if token == "page2":
+            return page2
+        if token == "page3":
+            return page3
+        return page1
+
+    monkeypatch.setattr(client, "_fetch_activity_page", fake_fetch)
+
+    result = list(client.iter_activities(start_time=None, end_time=None, limit=250))
+
+    assert len(result) == 250
+    assert requested_limits == [ITER_ACTIVITIES_PAGE_SIZE, ITER_ACTIVITIES_PAGE_SIZE, 50]
 
 
 def test_list_activities_paginates_when_filtering_reduces_count(auth_state, monkeypatch):

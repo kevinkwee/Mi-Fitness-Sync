@@ -33,7 +33,8 @@ from mi_fitness_sync.fds.cache import DEFAULT_CACHE_DIR, FdsCache
 logger = logging.getLogger(__name__)
 
 ACTIVITY_LIST_ENDPOINT = activity_transport.ACTIVITY_LIST_ENDPOINT
-DEFAULT_PAGE_SIZE = 20
+LIST_ACTIVITIES_PAGE_SIZE = 20
+ITER_ACTIVITIES_PAGE_SIZE = 100
 DEFAULT_TIMEOUT_SECONDS = 30
 DETAIL_DATA_KEY = "huami_sport_record"
 ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
@@ -76,11 +77,12 @@ class MiFitnessActivitiesClient:
         category: str | None = None,
     ) -> list[Activity]:
         return list(
-            self.iter_activities(
+            self._iter_activities_with_page_size(
                 start_time=start_time,
                 end_time=end_time,
                 limit=limit,
                 category=category,
+                page_size=LIST_ACTIVITIES_PAGE_SIZE,
             )
         )
 
@@ -92,16 +94,38 @@ class MiFitnessActivitiesClient:
         limit: int | None,
         category: str | None = None,
     ) -> Iterator[Activity]:
+        return self._iter_activities_with_page_size(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            category=category,
+            page_size=ITER_ACTIVITIES_PAGE_SIZE,
+        )
+
+    def _iter_activities_with_page_size(
+        self,
+        *,
+        start_time: int | None,
+        end_time: int | None,
+        limit: int | None,
+        category: str | None,
+        page_size: int,
+    ) -> Iterator[Activity]:
+        """Yield filtered activities while keeping total limits separate from HTTP page size.
+
+        The yielded counter tracks activities that survive local time filtering, so
+        the total limit applies to returned activities rather than raw API records.
+        """
         yielded = 0
         next_key: str | None = None
         while True:
             if limit is None:
-                page_limit = DEFAULT_PAGE_SIZE
+                page_limit = page_size
             else:
                 remaining = limit - yielded
                 if remaining <= 0:
                     break
-                page_limit = min(DEFAULT_PAGE_SIZE, remaining)
+                page_limit = min(page_size, remaining)
 
             page = self._fetch_activity_page(
                 start_time=start_time,
@@ -137,7 +161,7 @@ class MiFitnessActivitiesClient:
             page = self._fetch_activity_page(
                 start_time=start_time,
                 end_time=end_time,
-                limit=DEFAULT_PAGE_SIZE,
+                limit=ITER_ACTIVITIES_PAGE_SIZE,
                 category=None,
                 next_key=next_key,
             )
