@@ -187,3 +187,31 @@ class TestDownloadAndParseFdsFile:
             )
 
         cache.put.assert_called_once_with("test-cache-key", raw_bytes)
+
+    def test_retryable_http_error_retries_then_succeeds(self):
+        retry_response = MagicMock()
+        retry_response.status_code = 429
+        retry_response.headers = {"Retry-After": "0"}
+        retry_response.raise_for_status.side_effect = requests.HTTPError("429", response=retry_response)
+
+        success_response = MagicMock()
+        success_response.json.return_value = "encrypted-body"
+        success_response.raise_for_status = MagicMock()
+
+        session = MagicMock()
+        session.get.side_effect = [retry_response, success_response]
+
+        with (
+            patch("mi_fitness_sync.fds.downloader.decrypt_fds_data", return_value=b"decrypted-data"),
+            patch("mi_fitness_sync.fds.downloader.time.sleep") as sleep_mock,
+        ):
+            result = self._call(
+                session,
+                {"url": "https://cdn.example.com/file", "obj_key": "test-key"},
+                parse_decrypted=lambda value: value,
+                fallback=lambda: b"FALLBACK",
+            )
+
+        assert result == b"decrypted-data"
+        assert session.get.call_count == 2
+        sleep_mock.assert_called_once()

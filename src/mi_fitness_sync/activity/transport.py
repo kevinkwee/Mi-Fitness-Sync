@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import requests
@@ -10,6 +11,7 @@ from mi_fitness_sync.activity.crypto import decrypt_response_payload, encrypt_qu
 from mi_fitness_sync.auth.state import AuthState
 from mi_fitness_sync.config import USER_AGENT
 from mi_fitness_sync.exceptions import XiaomiApiError
+from mi_fitness_sync.http_retry import DEFAULT_MAX_ATTEMPTS, is_retryable_status_code, retry_delay_seconds
 from mi_fitness_sync.activity.region_mapping import region_for_country_code
 
 
@@ -139,20 +141,12 @@ class ActivityTransport:
             signature_path=signature_path,
         )
 
-        response = self._session.get(
+        response = self._get_with_retry(
             endpoint,
             params=params,
             headers=self.build_request_headers(),
-            timeout=self._timeout,
+            request_label=request_label,
         )
-
-        if response.status_code == 401:
-            raise XiaomiApiError(f"{request_label} was rejected with 401 auth err.")
-        if not response.ok:
-            raise XiaomiApiError(
-                f"{request_label} failed with HTTP {response.status_code}.",
-                payload={"response_text": response.text[:500]},
-            )
 
         payload = decrypt_response_payload(response.text, nonce, self._auth_state.ssecurity)
         if payload.get("code") != 0:
@@ -175,3 +169,56 @@ class ActivityTransport:
         if region == "cn":
             return endpoint
         return endpoint.replace("://", f"://{region}.", 1)
+
+    def _get_with_retry(
+        self,
+        endpoint: str,
+        *,
+        params: dict[str, str],
+        headers: dict[str, str],
+        request_label: str,
+    ) -> requests.Response:
+        for attempt_index in range(DEFAULT_MAX_ATTEMPTS):
+            try:
+                response = self._session.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
+            except requests.RequestException as exc:
+                if attempt_index >= DEFAULT_MAX_ATTEMPTS - 1:
+                    raise
+
+                delay = retry_delay_seconds(attempt_index, None)
+                logger.warning(
+                    "%s failed with %s; retrying in %.2fs (%d/%d)",
+                    request_label,
+                    exc,
+                    delay,
+                    attempt_index + 1,
+                    DEFAULT_MAX_ATTEMPTS - 1,
+                )
+                time.sleep(delay)
+                continue
+
+            if response.status_code == 401:
+                raise XiaomiApiError(f"{request_label} was rejected with 401 auth err.")
+            if response.ok:
+                return response
+            if attempt_index >= DEFAULT_MAX_ATTEMPTS - 1 or not is_retryable_status_code(response.status_code):
+                raise XiaomiApiError(
+                    f"{request_label} failed with HTTP {response.status_code}.",
+                    payload={"response_text": response.text[:500]},
+                )
+
+            delay = retry_delay_seconds(attempt_index, response.headers.get("Retry-After"))
+            logger.warning(
+                "%s failed with HTTP %d; retrying in %.2fs (%d/%d)",
+                request_label,
+                response.status_code,
+                delay,
+                attempt_index + 1,
+                DEFAULT_MAX_ATTEMPTS - 1,
+            )
+            time.sleep(delay)

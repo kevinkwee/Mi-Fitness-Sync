@@ -6,6 +6,7 @@ from pathlib import Path
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.cli import app as cli
 from mi_fitness_sync.exceptions import CaptchaRequiredError, NotificationRequiredError, Step2RequiredError, XiaomiApiError
+from mi_fitness_sync.export.bulk import BulkExportRecord, BulkExportSummary
 from mi_fitness_sync.strava.store import StravaTokenState
 
 
@@ -377,8 +378,10 @@ def test_export_activity_writes_requested_file(monkeypatch, tmp_path, capsys, au
         def __init__(self, state, **kwargs):
             assert state == auth_state
 
-        def get_activity_detail(self, activity_id):
+        def get_activity_detail(self, activity_id, *, include_sport_report=True, include_recovery_rate=True):
             assert activity_id == "sid:key:1"
+            assert include_sport_report is False
+            assert include_recovery_rate is False
             return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
@@ -408,8 +411,10 @@ def test_export_activity_uses_sanitized_title_and_local_start_time(monkeypatch, 
         def __init__(self, state, **kwargs):
             assert state == auth_state
 
-        def get_activity_detail(self, activity_id):
+        def get_activity_detail(self, activity_id, *, include_sport_report=True, include_recovery_rate=True):
             assert activity_id == "sid:key:1"
+            assert include_sport_report is False
+            assert include_recovery_rate is False
             return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
@@ -431,6 +436,101 @@ def test_export_activity_uses_sanitized_title_and_local_start_time(monkeypatch, 
     assert exit_code == 0
     assert output_path.read_bytes() == b"payload"
     assert str(output_path) in captured
+
+
+def test_export_activities_command_invokes_bulk_exporter(monkeypatch, tmp_path, capsys, auth_state):
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+
+    sample_activity = Activity(
+        activity_id="sid:key:1",
+        sid="sid",
+        key="key",
+        category="outdoor_run",
+        sport_type=1,
+        title="Morning Run",
+        start_time=1717200000,
+        end_time=1717203600,
+        duration_seconds=3600,
+        distance_meters=10000,
+        calories=700,
+        steps=12000,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "sid", "key": "key", "time": 1717200000},
+        raw_report={"name": "Morning Run"},
+    )
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self, state, **kwargs):
+            captured["state"] = state
+            captured["kwargs"] = kwargs
+
+        def iter_activities(self, *, start_time, end_time, limit, category=None):
+            assert start_time == 1704067200
+            assert end_time is None
+            assert limit == 1
+            assert category is None
+            return iter([sample_activity])
+
+    class DummyExporter:
+        def __init__(self, state, options):
+            captured["exporter_state"] = state
+            captured["options"] = options
+
+        def run(self, activities, *, progress_callback=None):
+            items = list(activities)
+            captured["activity_ids"] = [activity.activity_id for activity in items]
+            if progress_callback is not None:
+                progress_callback(
+                    BulkExportRecord(
+                        activity_id=items[0].activity_id,
+                        status="completed",
+                        output_path=str(tmp_path / "exports" / "done.gpx"),
+                        bytes_written=7,
+                        error=None,
+                        recorded_at="2026-05-11T00:00:00+00:00",
+                    )
+                )
+            options = captured["options"]
+            assert isinstance(options, cli.BulkExportOptions)
+            return BulkExportSummary(
+                total_seen=1,
+                exported=1,
+                output_dir=options.output_dir,
+                manifest_path=options.manifest_path,
+            )
+
+    monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
+    monkeypatch.setattr(cli, "BulkExporter", DummyExporter)
+
+    exit_code = cli.main([
+        "export-activities",
+        "--format",
+        "gpx",
+        "--output-dir",
+        str(tmp_path / "exports"),
+        "--since",
+        "2024-01-01T00:00:00Z",
+        "--limit",
+        "1",
+    ])
+    captured_output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert captured["activity_ids"] == ["sid:key:1"]
+    assert "[exported] sid:key:1" in captured_output
+    assert "Bulk export complete." in captured_output
+
+
+def test_export_activities_invalid_workers(monkeypatch, capsys, auth_state):
+    monkeypatch.setattr(cli, "load_state", lambda path: auth_state)
+
+    exit_code = cli.main(["export-activities", "--format", "gpx", "--workers", "0"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "--workers must be greater than zero." in captured.err
 
 
 def test_activity_detail_no_cache_flag(monkeypatch, auth_state, sample_activity_detail):
@@ -582,8 +682,10 @@ def test_upload_to_strava_success(monkeypatch, capsys, tmp_path, auth_state, sam
         def __init__(self, state, **kwargs):
             pass
 
-        def get_activity_detail(self, activity_id):
+        def get_activity_detail(self, activity_id, *, include_sport_report=True, include_recovery_rate=True):
             assert activity_id == "sid:key:1"
+            assert include_sport_report is True
+            assert include_recovery_rate is False
             return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyClient)
@@ -658,7 +760,9 @@ def _setup_upload_mocks(monkeypatch, tmp_path, auth_state, sample_activity_detai
     class DummyMiFitnessClient:
         def __init__(self, state, **kwargs):
             pass
-        def get_activity_detail(self, activity_id):
+        def get_activity_detail(self, activity_id, *, include_sport_report=True, include_recovery_rate=True):
+            assert include_sport_report is True
+            assert include_recovery_rate is False
             return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyMiFitnessClient)
@@ -849,7 +953,9 @@ def test_upload_duplicate_check_query_window(monkeypatch, capsys, tmp_path, auth
     class DummyMiFitnessClient:
         def __init__(self, state, **kwargs):
             pass
-        def get_activity_detail(self, activity_id):
+        def get_activity_detail(self, activity_id, *, include_sport_report=True, include_recovery_rate=True):
+            assert include_sport_report is True
+            assert include_recovery_rate is False
             return sample_activity_detail
 
     monkeypatch.setattr(cli, "MiFitnessActivitiesClient", DummyMiFitnessClient)

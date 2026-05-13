@@ -21,6 +21,9 @@ from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MetaLoginData, MiFit
 from mi_fitness_sync.auth.state import utc_now_iso
 from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
 from mi_fitness_sync.cli.speed_parser import parse_speed_input
+from mi_fitness_sync.export.bulk import BulkExportOptions, BulkExportRecord, BulkExporter
+from mi_fitness_sync.export.files import activity_local_datetime as export_activity_local_datetime
+from mi_fitness_sync.export.files import default_export_path, sanitize_export_title
 from mi_fitness_sync.export.render import SUPPORTED_EXPORT_FORMATS, render_export
 from mi_fitness_sync.exceptions import (
     AuthStateNotFoundError,
@@ -108,6 +111,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
+    bulk_export_parser = subparsers.add_parser(
+        "export-activities",
+        help="Export many Mi Fitness activities to GPX, TCX, or FIT",
+    )
+    bulk_export_parser.add_argument("--state-path", help="Override the persisted auth state path")
+    bulk_export_parser.add_argument("--since", help="Inclusive start time as unix seconds or ISO-8601")
+    bulk_export_parser.add_argument("--until", help="Inclusive end time as unix seconds or ISO-8601")
+    bulk_export_parser.add_argument("--limit", type=int, help="Maximum activities to export (default: all matching activities)")
+    bulk_export_parser.add_argument("--category", help="Optional Mi Fitness category filter")
+    bulk_export_parser.add_argument(
+        "--country-code",
+        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+    )
+    bulk_export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
+    bulk_export_parser.add_argument(
+        "--output-dir",
+        help="Destination directory (default: ~/.mi_fitness_sync/exports/bulk)",
+    )
+    bulk_export_parser.add_argument(
+        "--resume-file",
+        help="Resume/manifest JSONL path (default: <output-dir>/bulk_export_<format>.jsonl)",
+    )
+    bulk_export_parser.add_argument("--workers", type=int, default=2, help="Concurrent export workers (default: 2)")
+    bulk_export_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files instead of skipping them")
+    bulk_export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress each exported payload before writing it")
+    bulk_export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    bulk_export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
+    bulk_export_parser.add_argument("--no-smooth", action="store_true", help="Disable GPS smoothing entirely")
+    bulk_export_parser.add_argument(
+        "--outlier-speed",
+        help="Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30'). Default: 180 km/h",
+    )
+    bulk_export_parser.add_argument(
+        "--smooth-mode",
+        choices=("match", "full"),
+        default="match",
+        help="Smoothing strategy: 'match' converges on summary distance (default), 'full' applies maximum smoothing",
+    )
+    bulk_export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+
     strava_login_parser = subparsers.add_parser("strava-login", help="Authenticate with Strava via OAuth2")
     strava_login_parser.add_argument("--client-id", help="Strava API client ID")
     strava_login_parser.add_argument("--client-secret", help="Strava API client secret")
@@ -175,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             return handle_activity_detail(args)
         if args.command == "export-activity":
             return handle_export_activity(args)
+        if args.command == "export-activities":
+            return handle_export_activities(args)
         if args.command == "strava-login":
             return handle_strava_login(args)
         if args.command == "strava-status":
@@ -529,7 +574,7 @@ def handle_export_activity(args: argparse.Namespace) -> int:
         args.state_path, args.country_code,
         no_cache=args.no_cache, cache_dir=args.cache_dir,
     )
-    detail = client.get_activity_detail(args.activity_id)
+    detail = _get_export_detail(client, args.activity_id, args.format)
 
     smooth_kwargs = _smoothing_kwargs(args)
     export = render_export(detail, args.format, compress=args.gzip, **smooth_kwargs)
@@ -537,11 +582,13 @@ def handle_export_activity(args: argparse.Namespace) -> int:
     if args.output:
         output_path = Path(args.output)
     else:
-        safe_title = _sanitize_filename(detail.activity.title)
-        start_dt = _activity_local_datetime(detail)
-        date_str = start_dt.strftime("%Y%m%d_%H%M%S")
-        suffix = f".{args.format}.gz" if args.gzip else f".{args.format}"
-        output_path = get_exports_dir() / f"{safe_title}_{date_str}{suffix}"
+        output_path = default_export_path(
+            get_exports_dir(),
+            detail.activity,
+            args.format,
+            compress=args.gzip,
+            zone_offset_seconds=detail.zone_offset_seconds,
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(export.payload)
 
@@ -550,6 +597,70 @@ def handle_export_activity(args: argparse.Namespace) -> int:
     print(f"Compressed: {'yes' if export.compressed else 'no'}")
     print(f"Bytes written: {len(export.payload)}")
     return 0
+
+
+def handle_export_activities(args: argparse.Namespace) -> int:
+    if args.limit is not None and args.limit <= 0:
+        raise MiFitnessError("--limit must be greater than zero.")
+    if args.workers <= 0:
+        raise MiFitnessError("--workers must be greater than zero.")
+
+    end_time = parse_cli_time(args.until) if args.until else None
+    start_time = parse_cli_time(args.since) if args.since else None
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise MiFitnessError("--since must be earlier than or equal to --until.")
+
+    auth_state = _load_required_state(args.state_path)
+    client_kwargs: dict[str, object] = {
+        "country_code": args.country_code,
+        "no_cache": args.no_cache,
+    }
+    if args.cache_dir is not None:
+        client_kwargs["cache_dir"] = args.cache_dir
+    list_client = MiFitnessActivitiesClient(auth_state, **client_kwargs)  # type: ignore[arg-type]
+
+    output_dir = Path(args.output_dir) if args.output_dir else get_exports_dir() / "bulk"
+    manifest_path = Path(args.resume_file) if args.resume_file else output_dir / f"bulk_export_{args.format}.jsonl"
+    outlier_speed_mps = parse_speed_input(args.outlier_speed) if args.outlier_speed else None
+    options = BulkExportOptions(
+        output_dir=output_dir,
+        manifest_path=manifest_path,
+        file_format=args.format,
+        compress=args.gzip,
+        country_code=args.country_code,
+        no_cache=args.no_cache,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        workers=args.workers,
+        overwrite=args.overwrite,
+        smooth=not args.no_smooth,
+        outlier_speed_mps=outlier_speed_mps,
+        smooth_mode=args.smooth_mode,
+        include_sport_report=args.format == "fit",
+    )
+
+    print(f"Bulk export directory: {output_dir}")
+    print(f"Bulk export manifest: {manifest_path}")
+    print(f"Format: {args.format}")
+    print(f"Workers: {args.workers}")
+
+    exporter = BulkExporter(auth_state, options)
+    activities = list_client.iter_activities(
+        start_time=start_time,
+        end_time=end_time,
+        limit=args.limit,
+        category=args.category,
+    )
+    summary = exporter.run(activities, progress_callback=_print_bulk_export_progress)
+
+    print("Bulk export complete.")
+    print(f"Matched activities: {summary.total_seen}")
+    print(f"Exported: {summary.exported}")
+    print(f"Skipped existing: {summary.skipped_existing}")
+    print(f"Skipped from manifest: {summary.skipped_manifest}")
+    print(f"Failed: {summary.failed}")
+    print(f"Output directory: {summary.output_dir}")
+    print(f"Manifest path: {summary.manifest_path}")
+    return 1 if summary.failed else 0
 
 
 def handle_strava_login(args: argparse.Namespace) -> int:
@@ -639,7 +750,7 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
         args.state_path, args.country_code,
         no_cache=args.no_cache, cache_dir=args.cache_dir,
     )
-    detail = client.get_activity_detail(args.activity_id)
+    detail = _get_export_detail(client, args.activity_id, "fit")
 
     smooth_kwargs = _smoothing_kwargs(args)
     export = render_export(detail, "fit", **smooth_kwargs)
@@ -648,10 +759,13 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
     if args.output:
         output_path = Path(args.output)
     else:
-        safe_title = _sanitize_filename(detail.activity.title)
-        start_dt = _activity_local_datetime(detail)
-        date_str = start_dt.strftime("%Y%m%d_%H%M%S")
-        output_path = get_exports_dir() / f"{safe_title}_{date_str}.fit"
+        output_path = default_export_path(
+            get_exports_dir(),
+            detail.activity,
+            "fit",
+            compress=False,
+            zone_offset_seconds=detail.zone_offset_seconds,
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(export.payload)
 
@@ -747,8 +861,7 @@ def _fetch_strava_status(
 
 def _sanitize_filename(title: str) -> str:
     """Replace spaces with underscores and strip non-alphanumeric/underscore chars."""
-    name = title.replace(" ", "_")
-    return re.sub(r"[^\w]", "", name)
+    return sanitize_export_title(title)
 
 
 def _smoothing_kwargs(args: argparse.Namespace) -> dict[str, object]:
@@ -763,21 +876,46 @@ def _smoothing_kwargs(args: argparse.Namespace) -> dict[str, object]:
     return kwargs
 
 
+def _get_export_detail(
+    client: MiFitnessActivitiesClient,
+    activity_or_id: Activity | str,
+    file_format: str,
+) -> ActivityDetail:
+    return client.get_activity_detail(
+        activity_or_id,
+        include_sport_report=file_format == "fit",
+        include_recovery_rate=False,
+    )
+
+
+def _print_bulk_export_progress(record: BulkExportRecord) -> None:
+    output_path = record.output_path or "<unknown>"
+    if record.status == "completed":
+        print(f"[exported] {record.activity_id} -> {output_path} ({record.bytes_written} bytes)")
+        return
+    if record.status == "skipped_existing":
+        print(f"[skipped-existing] {record.activity_id} -> {output_path}")
+        return
+    if record.status == "skipped_manifest":
+        print(f"[resumed] {record.activity_id} -> {output_path}")
+        return
+    print(f"[failed] {record.activity_id}: {record.error or 'Unknown error'}", file=sys.stderr)
+
+
 def _activity_local_datetime(detail: ActivityDetail) -> datetime:
     """Return the activity start time as a local datetime.
 
     Uses the activity's zone_offset_seconds when available, otherwise falls
     back to the system local timezone.
     """
-    ts = detail.start_time
-    if detail.zone_offset_seconds is not None:
-        tz = timezone(timedelta(seconds=detail.zone_offset_seconds))
-    else:
-        tz = None
-    utc_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    if tz is not None:
-        return utc_dt.astimezone(tz)
-    return utc_dt.astimezone()
+    return export_activity_local_datetime(detail.activity, zone_offset_seconds=detail.zone_offset_seconds)
+
+
+def _load_required_state(state_path: str | None):
+    state = load_state(state_path)
+    if state is None:
+        raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
+    return state
 
 
 def _activities_client(
@@ -787,9 +925,7 @@ def _activities_client(
     no_cache: bool = False,
     cache_dir: str | None = None,
 ) -> MiFitnessActivitiesClient:
-    state = load_state(state_path)
-    if state is None:
-        raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
+    state = _load_required_state(state_path)
     kwargs: dict[str, object] = {"country_code": country_code, "no_cache": no_cache}
     if cache_dir is not None:
         kwargs["cache_dir"] = cache_dir

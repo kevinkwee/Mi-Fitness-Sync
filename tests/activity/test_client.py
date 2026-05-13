@@ -271,6 +271,65 @@ def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, mon
     assert detail.total_calories == 42
 
 
+def test_get_activity_detail_skips_optional_fds_payloads_when_disabled(auth_state, monkeypatch):
+    client = MiFitnessActivitiesClient(auth_state)
+    activity = Activity(
+        activity_id="sid-1:key-1:1717200000",
+        sid="sid-1",
+        key="key-1",
+        category="outdoor_run",
+        sport_type=1,
+        title="Morning Run",
+        start_time=1717200000,
+        end_time=1717200060,
+        duration_seconds=60,
+        distance_meters=500,
+        calories=42,
+        steps=800,
+        sync_state="server",
+        next_key=None,
+        raw_record={"sid": "sid-1", "key": "key-1", "time": 1717200000},
+        raw_report={"name": "Morning Run"},
+    )
+
+    fitness_item = {
+        "sid": "sid-1",
+        "key": "key-1",
+        "time": 1717200000,
+        "zone_name": "UTC",
+        "zone_offset": 0,
+        "value": json.dumps({"sport_records": []}),
+    }
+    sport_report_calls: list[str] = []
+    recovery_rate_calls: list[str] = []
+
+    monkeypatch.setattr(client, "_try_get_fds_download_map", lambda selected_activity: {})
+    monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda selected_activity, fds: [])
+    monkeypatch.setattr(client, "_try_download_fds_gps_track_points", lambda selected_activity, fds: [])
+    monkeypatch.setattr(
+        client,
+        "_try_download_fds_sport_report",
+        lambda selected_activity, fds: sport_report_calls.append(selected_activity.activity_id) or None,
+    )
+    monkeypatch.setattr(
+        client,
+        "_try_download_fds_recovery_rate",
+        lambda selected_activity, fds: recovery_rate_calls.append(selected_activity.activity_id) or None,
+    )
+    monkeypatch.setattr(client, "_get_activity_detail_item", lambda selected_activity: fitness_item)
+
+    detail = client.get_activity_detail(
+        activity,
+        include_sport_report=False,
+        include_recovery_rate=False,
+    )
+
+    assert detail.sport_report is None
+    assert detail.recovery_rate is None
+    assert not sport_report_calls
+    assert not recovery_rate_calls
+
+
 def test_get_activity_detail_uses_fds_samples_as_primary(auth_state, monkeypatch):
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(

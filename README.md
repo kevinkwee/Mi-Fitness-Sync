@@ -17,7 +17,7 @@ This is mainly useful if you want to:
 1. Confirm that your workouts really exist in Mi Fitness cloud storage
 2. Inspect recent activities when Mi Fitness fails to push them to Strava
 3. Pull activity data yourself instead of waiting for the official sync to work
-4. Export workouts to GPX, TCX, or FIT for manual backup or re-upload
+4. Export one or many workouts to GPX, TCX, or FIT for manual backup or re-upload
 5. Upload workouts directly to Strava with duplicate detection
 
 ## Install
@@ -72,10 +72,13 @@ mi-fitness-sync activity-detail sid:key:1717200000 --json
 # 6. Export a workout
 mi-fitness-sync export-activity sid:key:1717200000 --format gpx --output run.gpx
 
-# 7. Authenticate with Strava (prompts for client ID and secret)
+# 7. Bulk export matching workouts
+mi-fitness-sync export-activities --format gpx --since 2024-01-01 --output-dir backups
+
+# 8. Authenticate with Strava (prompts for client ID and secret)
 mi-fitness-sync strava-login
 
-# 8. Upload a workout to Strava
+# 9. Upload a workout to Strava
 mi-fitness-sync upload-to-strava sid:key:1717200000
 ```
 
@@ -233,6 +236,48 @@ Export behavior:
 4. `match` mode tries to bring the smoothed GPS distance closer to the Mi Fitness summary distance, while `full` applies the largest valid smoothing window after outlier cleanup
 5. FIT generation is best-effort — only fields present in the Mi Fitness source are included
 6. Pool swim FIT exports write one `length` message per pool length, with rest as idle lengths, and one `lap` per swim set plus one per rest period before, between, or after sets
+
+### `export-activities`
+
+Exports many activities to GPX, TCX, or FIT using the same filters as `list-activities`.
+
+```bash
+mi-fitness-sync export-activities --format gpx --since 2024-01-01 --output-dir backups
+mi-fitness-sync export-activities --format fit --category outdoor_run --workers 2
+mi-fitness-sync export-activities --format tcx --limit 100 --gzip --resume-file backups/export_manifest.jsonl
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--since` | Inclusive start time (unix seconds or ISO-8601) |
+| `--until` | Inclusive end time (unix seconds or ISO-8601) |
+| `--limit` | Maximum activities to export (default: all matching activities) |
+| `--category` | Mi Fitness category filter string |
+| `--format` | Export format: `gpx`, `tcx`, or `fit` (required) |
+| `--output-dir` | Destination directory (default: `~/.mi_fitness_sync/exports/bulk`) |
+| `--resume-file` | Resume/manifest JSONL path (default: `<output-dir>/bulk_export_<format>.jsonl`) |
+| `--workers` | Concurrent export workers (default: `2`) |
+| `--overwrite` | Re-export files even when the output path already exists |
+| `--gzip` | Gzip-compress every exported file |
+| `--country-code` | Two-letter country override |
+| `--no-cache` | Disable the local FDS binary cache |
+| `--cache-dir` | Override the local FDS cache directory |
+| `--no-smooth` | Disable GPS smoothing entirely |
+| `--outlier-speed` | Max plausible speed for outlier detection, as km/h or pace |
+| `--smooth-mode` | Smoothing strategy: `match` (default) or `full` |
+| `--verbose` | Enable debug logging |
+| `--state-path` | Override the persisted auth state file path |
+
+Bulk export behavior:
+
+1. Streams activities page-by-page instead of building one large in-memory list
+2. Reuses the listed activity objects directly, so it avoids the extra ID lookup step used by single-activity export
+3. Writes output files atomically and records progress in an append-only JSONL manifest so reruns can resume large jobs
+4. Skips existing output files by default; use `--overwrite` to regenerate them
+5. Uses conservative bounded concurrency plus automatic retry/backoff for transient Mi Fitness and FDS HTTP failures
+6. Default filenames include the activity ID suffix to keep large batches collision-free
 
 ### `strava-login`
 

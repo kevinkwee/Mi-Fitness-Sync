@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, TypeVar
 
 import requests
 
 from mi_fitness_sync.fds.cache import FdsCache
 from mi_fitness_sync.fds.common import decrypt_fds_data
+from mi_fitness_sync.http_retry import DEFAULT_MAX_ATTEMPTS, is_retryable_status_code, retry_delay_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -51,11 +53,55 @@ def download_and_parse_fds_file(
         logger.debug("FDS %s entry missing url or obj_key — raw entry: %s", entry_label, fds_entry)
         return fallback()
 
-    try:
-        response = session.get(url, timeout=timeout)
-        response.raise_for_status()
-    except requests.RequestException:
-        logger.warning("Failed to download %s from %s", download_label, url, exc_info=True)
+    response: requests.Response | None = None
+    for attempt_index in range(DEFAULT_MAX_ATTEMPTS):
+        try:
+            response = session.get(url, timeout=timeout)
+            response.raise_for_status()
+            break
+        except requests.HTTPError as exc:
+            status_code = getattr(exc.response, "status_code", None)
+            headers = getattr(exc.response, "headers", {})
+            retry_after = headers.get("Retry-After") if isinstance(headers, dict) else None
+            if (
+                isinstance(status_code, int)
+                and is_retryable_status_code(status_code)
+                and attempt_index < DEFAULT_MAX_ATTEMPTS - 1
+            ):
+                delay = retry_delay_seconds(attempt_index, retry_after)
+                logger.warning(
+                    "Failed to download %s from %s with HTTP %d; retrying in %.2fs (%d/%d)",
+                    download_label,
+                    url,
+                    status_code,
+                    delay,
+                    attempt_index + 1,
+                    DEFAULT_MAX_ATTEMPTS - 1,
+                )
+                time.sleep(delay)
+                continue
+
+            logger.warning("Failed to download %s from %s", download_label, url, exc_info=True)
+            return fallback()
+        except requests.RequestException as exc:
+            if attempt_index < DEFAULT_MAX_ATTEMPTS - 1:
+                delay = retry_delay_seconds(attempt_index, None)
+                logger.warning(
+                    "Failed to download %s from %s with %s; retrying in %.2fs (%d/%d)",
+                    download_label,
+                    url,
+                    exc,
+                    delay,
+                    attempt_index + 1,
+                    DEFAULT_MAX_ATTEMPTS - 1,
+                )
+                time.sleep(delay)
+                continue
+
+            logger.warning("Failed to download %s from %s", download_label, url, exc_info=True)
+            return fallback()
+
+    if response is None:
         return fallback()
 
     try:

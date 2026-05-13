@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import requests
 
@@ -75,10 +75,34 @@ class MiFitnessActivitiesClient:
         limit: int,
         category: str | None = None,
     ) -> list[Activity]:
-        activities: list[Activity] = []
+        return list(
+            self.iter_activities(
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+                category=category,
+            )
+        )
+
+    def iter_activities(
+        self,
+        *,
+        start_time: int | None,
+        end_time: int | None,
+        limit: int | None,
+        category: str | None = None,
+    ) -> Iterator[Activity]:
+        yielded = 0
         next_key: str | None = None
-        while len(activities) < limit:
-            page_limit = min(DEFAULT_PAGE_SIZE, limit - len(activities))
+        while True:
+            if limit is None:
+                page_limit = DEFAULT_PAGE_SIZE
+            else:
+                remaining = limit - yielded
+                if remaining <= 0:
+                    break
+                page_limit = min(DEFAULT_PAGE_SIZE, remaining)
+
             page = self._fetch_activity_page(
                 start_time=start_time,
                 end_time=end_time,
@@ -91,13 +115,13 @@ class MiFitnessActivitiesClient:
                     continue
                 if end_time is not None and activity.start_time is not None and activity.start_time > end_time:
                     continue
-                activities.append(activity)
-                if len(activities) >= limit:
-                    break
+                yield activity
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
             if not page.has_more or not page.next_key:
                 break
             next_key = page.next_key
-        return activities
 
     def get_activity_by_id(
         self,
@@ -125,7 +149,13 @@ class MiFitnessActivitiesClient:
             next_key = page.next_key
         raise MiFitnessError(f"Could not find activity {activity_id} in Mi Fitness for the surrounding time window.")
 
-    def get_activity_detail(self, activity_or_id: Activity | str) -> ActivityDetail:
+    def get_activity_detail(
+        self,
+        activity_or_id: Activity | str,
+        *,
+        include_sport_report: bool = True,
+        include_recovery_rate: bool = True,
+    ) -> ActivityDetail:
         activity = activity_or_id if isinstance(activity_or_id, Activity) else self.get_activity_by_id(activity_or_id)
         fds_downloads = self._try_get_fds_download_map(activity)
         logger.debug(
@@ -135,8 +165,8 @@ class MiFitnessActivitiesClient:
         )
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
         fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
-        fds_sport_report = self._try_download_fds_sport_report(activity, fds_downloads)
-        fds_recovery_rate = self._try_download_fds_recovery_rate(activity, fds_downloads)
+        fds_sport_report = self._try_download_fds_sport_report(activity, fds_downloads) if include_sport_report else None
+        fds_recovery_rate = self._try_download_fds_recovery_rate(activity, fds_downloads) if include_recovery_rate else None
 
         if fds_track_points and fds_samples:
             merge_fds_samples_into_track_points(fds_track_points, fds_samples)
