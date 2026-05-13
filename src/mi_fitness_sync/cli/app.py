@@ -859,11 +859,6 @@ def _fetch_strava_status(
     return status
 
 
-def _sanitize_filename(title: str) -> str:
-    """Replace spaces with underscores and strip non-alphanumeric/underscore chars."""
-    return sanitize_export_title(title)
-
-
 def _smoothing_kwargs(args: argparse.Namespace) -> dict[str, object]:
     """Build keyword arguments for ``render_export`` from CLI smoothing flags."""
     kwargs: dict[str, object] = {}
@@ -900,15 +895,6 @@ def _print_bulk_export_progress(record: BulkExportRecord) -> None:
         print(f"[resumed] {record.activity_id} -> {output_path}")
         return
     print(f"[failed] {record.activity_id}: {record.error or 'Unknown error'}", file=sys.stderr)
-
-
-def _activity_local_datetime(detail: ActivityDetail) -> datetime:
-    """Return the activity start time as a local datetime.
-
-    Uses the activity's zone_offset_seconds when available, otherwise falls
-    back to the system local timezone.
-    """
-    return export_activity_local_datetime(detail.activity, zone_offset_seconds=detail.zone_offset_seconds)
 
 
 def _load_required_state(state_path: str | None):
