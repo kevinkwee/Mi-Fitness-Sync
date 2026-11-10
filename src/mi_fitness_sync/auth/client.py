@@ -8,6 +8,7 @@ import secrets
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -27,6 +28,9 @@ ACCOUNT_BASE = "https://account.xiaomi.com"
 URL_LOGIN = f"{ACCOUNT_BASE}/pass/serviceLogin"
 URL_LOGIN_AUTH2 = f"{ACCOUNT_BASE}/pass/serviceLoginAuth2"
 URL_LOGIN_STEP2 = f"{ACCOUNT_BASE}/pass/loginStep2"
+URL_IDENTITY_LIST = f"{ACCOUNT_BASE}/identity/list"
+URL_SEND_EMAIL_TICKET = f"{ACCOUNT_BASE}/identity/auth/sendEmailTicket"
+URL_VERIFY_EMAIL = f"{ACCOUNT_BASE}/identity/auth/verifyEmail"
 DEFAULT_SERVICE_ID = "miothealth"
 SAFE_PREFIX = "&&&START&&&"
 
@@ -227,6 +231,103 @@ class MiFitnessAuthClient:
             raise XiaomiApiError("Step-2 login response did not include ssecurity or nonce.", payload=payload)
         if not auto_login_url:
             raise XiaomiApiError("Step-2 login response did not include an STS location URL.", payload=payload)
+
+        sts_response = self._follow_sts(auto_login_url=auto_login_url, nonce=str(nonce), ssecurity=ssecurity)
+        service_token = self._extract_service_token(sts_response)
+        slh = self._read_sts_cookie(sts_response, f"{self.service_id}_slh")
+        ph = self._read_sts_cookie(sts_response, f"{self.service_id}_ph")
+
+        return LoginSession(
+            email=email,
+            user_id=user_id,
+            c_user_id=c_user_id,
+            service_id=self.service_id,
+            pass_token=pass_token,
+            service_token=service_token,
+            ssecurity=ssecurity,
+            psecurity=psecurity,
+            auto_login_url=auto_login_url,
+            device_id=device_id,
+            slh=slh,
+            ph=ph,
+            sts_cookie_header=self._build_cookie_header(sts_response),
+            cookies=self._serialize_cookies(),
+        )
+
+    def send_notification_email_code(self, notification_url: str) -> str:
+        context = parse_qs(urlparse(notification_url).query).get("context", [""])[0]
+        if not context:
+            raise XiaomiApiError("Notification URL did not include an identity context.")
+        params = {"sid": self.service_id, "context": context}
+        self.session.get(notification_url, timeout=self.timeout)
+        self.session.get(URL_IDENTITY_LIST, params=params, timeout=self.timeout)
+        response = self.session.post(
+            URL_SEND_EMAIL_TICKET,
+            params=params,
+            data={"retry": "0", "icode": "", "_json": "true"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        self._raise_for_login_error(self._load_json_payload(response.text))
+        return context
+
+    def login_with_notification_code(
+        self,
+        *,
+        email: str,
+        code: str,
+        context: str,
+        device_id: str,
+        trust: bool = True,
+    ) -> LoginSession:
+        response = self.session.post(
+            URL_VERIFY_EMAIL,
+            params={"_flag": "8", "sid": self.service_id, "context": context},
+            data={"_flag": "8", "ticket": code, "trust": "true" if trust else "false", "_json": "true"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = self._load_json_payload(response.text)
+        self._raise_for_login_error(payload)
+        location = payload.get("location")
+        if not location:
+            raise XiaomiApiError("Email verification response did not include a location URL.", payload=payload)
+        # The redirect chain ends at serviceLoginAuth2/end, whose Extension-Pragma header carries
+        # ssecurity and whose Location is the STS URL, same as a password login response.
+        url = location
+        for _ in range(5):
+            response = self.session.get(url, allow_redirects=False, timeout=self.timeout)
+            logger.debug(
+                "notification login hop — status=%s, has_extension_pragma=%s, has_location=%s",
+                response.status_code,
+                bool(self._extension_value(response, "ssecurity")),
+                bool(response.headers.get("Location")),
+            )
+            if self._extension_value(response, "ssecurity"):
+                break
+            url = response.headers.get("Location")
+            if not url:
+                break
+
+        auto_login_url = response.headers.get("Location")
+        ssecurity = self._extension_value(response, "ssecurity")
+        psecurity = self._extension_value(response, "psecurity")
+        nonce = self._pick_first_non_empty(
+            self._extension_value(response, "nonce"),
+            parse_qs(urlparse(auto_login_url or "").query).get("nonce", [None])[0],
+        )
+        pass_token = self._cookie_value(self.session.cookies, "passToken")
+        c_user_id = self._cookie_value(self.session.cookies, "cUserId")
+        user_id = self._pick_first_non_empty(self._cookie_value(self.session.cookies, "userId"), email)
+
+        if not pass_token:
+            raise XiaomiApiError("Notification login did not produce a passToken.")
+        if not c_user_id:
+            raise XiaomiApiError("Notification login did not produce cUserId.")
+        if not ssecurity or nonce in (None, ""):
+            raise XiaomiApiError("Notification login did not produce ssecurity or nonce.")
+        if not auto_login_url:
+            raise XiaomiApiError("Notification login did not produce an STS location URL.")
 
         sts_response = self._follow_sts(auto_login_url=auto_login_url, nonce=str(nonce), ssecurity=ssecurity)
         service_token = self._extract_service_token(sts_response)

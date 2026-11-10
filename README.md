@@ -93,7 +93,7 @@ If Xiaomi requires extra verification, the CLI supports the interactive flows it
 
 1. Captcha challenges download an image to the local captcha directory and try to open it with the OS default image viewer
 2. Step-2 verification prompts for the email/SMS code in the terminal
-3. Browser or app notification approval is not automated; the CLI prints the verification URL when Xiaomi requires it
+3. Identity verification (`notificationUrl`) sends a code to the account email and prompts for it in the terminal
 
 Examples:
 
@@ -363,7 +363,7 @@ Both files contain sensitive credentials and should not be shared or committed t
 1. This is an unofficial project and is not affiliated with Xiaomi, Mi Fitness, or Strava.
 2. Parts of the Xiaomi login flow had to be pieced together from app behavior and decompiled code.
 3. Xiaomi may change endpoints, cookies, signatures, or response formats at any time.
-4. Some accounts may require captcha or notification approval flows that are not fully automated here. Step-2 verification (SMS/email code) is supported interactively.
+4. Some accounts may require captcha or app approval flows that are not fully automated here. Step-2 verification (SMS/email code) and identity verification by email code are supported interactively.
 5. Detail retrieval currently depends on the raw `huami_sport_record` payload shape used by the Android app; Xiaomi may change that format without notice.
 6. FDS download-url metadata does not guarantee the corresponding cloud object is still downloadable, so some workouts still cannot be enriched from FDS.
 7. GPX export is unavailable for workouts where Mi Fitness does not expose GPS track points.

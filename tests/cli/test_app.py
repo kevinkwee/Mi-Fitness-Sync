@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.cli import app as cli
-from mi_fitness_sync.exceptions import CaptchaRequiredError, Step2RequiredError, XiaomiApiError
+from mi_fitness_sync.exceptions import CaptchaRequiredError, NotificationRequiredError, Step2RequiredError, XiaomiApiError
 from mi_fitness_sync.strava.store import StravaTokenState
 
 
@@ -1750,3 +1750,78 @@ def test_login_captcha_ick_missing_fails(monkeypatch, capsys, tmp_path):
 
     assert exit_code == 1
     assert "ICK token" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Notification verification tests
+# ---------------------------------------------------------------------------
+
+
+def _make_notification_auth_client(monkeypatch, *, notification_session):
+    """Wire up a DummyAuthClient that raises NotificationRequiredError on password login,
+    then returns *notification_session* on login_with_notification_code."""
+
+    class DummyAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id):
+            raise NotificationRequiredError("https://account.xiaomi.com/fe/service/identity/authStart?context=ctx")
+
+        def send_notification_email_code(self, notification_url):
+            assert notification_url.endswith("context=ctx")
+            return "ctx"
+
+        def login_with_notification_code(self, *, email, code, context, device_id):
+            assert code == "123456"
+            assert context == "ctx"
+            return notification_session
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", DummyAuthClient)
+
+
+def test_login_notification_prompts_and_succeeds(monkeypatch, capsys, tmp_path):
+    from mi_fitness_sync.auth.state import AuthState
+
+    session = type(
+        "Session",
+        (),
+        {
+            "to_auth_state": lambda self: AuthState(
+                email="u@x.com", user_id="uid", c_user_id="cuid",
+                service_id="miothealth", pass_token="pt", service_token="st",
+                ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+                device_id="DEV123", slh=None, ph=None,
+                sts_cookie_header="cookie", cookies=[],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+        },
+    )()
+
+    _make_notification_auth_client(monkeypatch, notification_session=session)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "123456")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Identity verification required" in captured.out
+    assert "Login succeeded" in captured.out
+
+
+def test_login_notification_empty_code_fails(monkeypatch, capsys, tmp_path):
+    _make_notification_auth_client(monkeypatch, notification_session=None)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+    state_path = str(tmp_path / "state.json")
+    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Verification code is required" in captured.err

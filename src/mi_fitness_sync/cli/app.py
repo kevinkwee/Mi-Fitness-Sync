@@ -220,6 +220,8 @@ def handle_login(args: argparse.Namespace) -> int:
         )
     except Step2RequiredError as exc:
         session = _handle_step2_verification(client, exc, email=email, device_id=device_id)
+    except NotificationRequiredError as exc:
+        session = _handle_notification_verification(client, exc, email=email, device_id=device_id)
 
     state = session.to_auth_state()
     if existing_state:
@@ -279,6 +281,28 @@ def _handle_step2_verification(
         step2_code=code,
         step1_token=step1_token,
         meta=meta,
+        device_id=device_id,
+    )
+
+
+def _handle_notification_verification(
+    client: MiFitnessAuthClient,
+    exc: NotificationRequiredError,
+    *,
+    email: str,
+    device_id: str,
+) -> object:
+    context = client.send_notification_email_code(exc.notification_url)
+
+    print("Identity verification required. Check your email for a verification code.")
+    code = input("Verification code: ").strip()
+    if not code:
+        raise MiFitnessError("Verification code is required.")
+
+    return client.login_with_notification_code(
+        email=email,
+        code=code,
+        context=context,
         device_id=device_id,
     )
 

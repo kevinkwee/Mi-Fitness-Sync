@@ -10,7 +10,10 @@ from mi_fitness_sync.auth.client import (
     MiFitnessAuthClient,
     MetaLoginData,
     SAFE_PREFIX,
+    URL_IDENTITY_LIST,
     URL_LOGIN_STEP2,
+    URL_SEND_EMAIL_TICKET,
+    URL_VERIFY_EMAIL,
 )
 from mi_fitness_sync.exceptions import (
     CaptchaRequiredError,
@@ -608,3 +611,100 @@ class TestCaptchaRequiredErrorFields:
             client._raise_for_login_requirements(payload)
 
         assert exc_info.value.captcha_type == "captcha"
+
+
+class TestNotificationVerification:
+    def _make_response(self, *, text: str = "ok", headers: dict | None = None):
+        resp = MagicMock()
+        resp.text = text
+        resp.headers = headers or {}
+        resp.cookies = []
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_send_notification_email_code_posts_context(self):
+        client = MiFitnessAuthClient()
+        calls = []
+
+        def mock_get(url, params=None, timeout=None):
+            calls.append(("GET", url, params))
+            return self._make_response()
+
+        def mock_post(url, params=None, data=None, timeout=None):
+            calls.append(("POST", url, params))
+            return self._make_response(text=SAFE_PREFIX + json.dumps({"code": 0}))
+
+        client.session.get = mock_get
+        client.session.post = mock_post
+
+        notification_url = f"{ACCOUNT_BASE}/fe/service/identity/authStart?sid=miothealth&context=ctx123"
+        context = client.send_notification_email_code(notification_url)
+
+        assert context == "ctx123"
+        assert calls[0] == ("GET", notification_url, None)
+        assert calls[1] == ("GET", URL_IDENTITY_LIST, {"sid": "miothealth", "context": "ctx123"})
+        assert calls[2] == ("POST", URL_SEND_EMAIL_TICKET, {"sid": "miothealth", "context": "ctx123"})
+
+    def test_send_notification_email_code_without_context_raises(self):
+        client = MiFitnessAuthClient()
+
+        with pytest.raises(XiaomiApiError, match="identity context"):
+            client.send_notification_email_code(f"{ACCOUNT_BASE}/fe/service/identity/authStart?sid=miothealth")
+
+    def test_login_with_notification_code_returns_session(self):
+        client = MiFitnessAuthClient()
+        posted = {}
+        visited = []
+        hops = {
+            "https://example.com/finish": self._make_response(headers={"Location": "https://example.com/end"}),
+            "https://example.com/end": self._make_response(headers={
+                "Extension-Pragma": json.dumps({"ssecurity": "sec", "nonce": "999"}),
+                "Location": "https://example.com/sts",
+            }),
+        }
+
+        def mock_post(url, params=None, data=None, timeout=None):
+            posted["url"] = url
+            posted["data"] = data
+            return self._make_response(text=SAFE_PREFIX + json.dumps({"code": 0, "location": "https://example.com/finish"}))
+
+        def mock_get(url, params=None, timeout=None, allow_redirects=True):
+            visited.append(url)
+            if url == "https://example.com/end":
+                client.session.cookies.set("passToken", "pt", domain="account.xiaomi.com")
+                client.session.cookies.set("cUserId", "cuid", domain="account.xiaomi.com")
+            if url == "https://example.com/sts":
+                assert "clientSign" in params
+                client.session.cookies.set("serviceToken", "svc_token")
+                return self._make_response()
+            return hops[url]
+
+        client.session.post = mock_post
+        client.session.get = mock_get
+
+        session = client.login_with_notification_code(
+            email="u@x.com", code="123456", context="ctx123", device_id="DEV1",
+        )
+
+        assert posted["url"] == URL_VERIFY_EMAIL
+        assert posted["data"]["ticket"] == "123456"
+        assert posted["data"]["trust"] == "true"
+        assert visited == ["https://example.com/finish", "https://example.com/end", "https://example.com/sts"]
+        assert session.pass_token == "pt"
+        assert session.c_user_id == "cuid"
+        assert session.ssecurity == "sec"
+        assert session.service_token == "svc_token"
+        assert session.device_id == "DEV1"
+
+    def test_login_with_notification_code_rejected_code_raises(self):
+        client = MiFitnessAuthClient()
+
+        def mock_post(url, params=None, data=None, timeout=None):
+            return self._make_response(text=SAFE_PREFIX + json.dumps({"code": 70014, "desc": "Wrong code"}))
+
+        client.session.post = mock_post
+
+        with pytest.raises(XiaomiApiError, match="Wrong code"):
+            client.login_with_notification_code(
+                email="u@x.com", code="000000", context="ctx123", device_id="DEV1",
+            )
