@@ -103,7 +103,7 @@ def parse_fds_header(data: bytes, data_valid_len: int) -> FdsHeader:
 
 _FREE_TRAINING_RECORD_VALIDITY: dict[int, int] = {1: 1, 2: 1, 3: 2, 4: 2, 5: 2}
 _OUTDOOR_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
-_RUNNING_IN_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
+_RUNNING_IN_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2, 6: 4}
 _BIKING_OUT_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2}
 _BIKING_IN_RECORD_VALIDITY: dict[int, int] = {1: 1, 2: 2, 3: 2, 4: 2, 5: 3, 6: 4}
 _SWIMMING_RECORD_VALIDITY: dict[int, int] = {1: 2, 2: 2, 3: 3}

@@ -94,6 +94,9 @@ class TestGetRecordDataValidLen:
     def test_outdoor_run_v1(self):
         assert get_record_data_valid_len(1, 1) == 2
 
+    def test_indoor_run_v6(self):
+        assert get_record_data_valid_len(3, 6) == 4
+
     def test_unknown_sport(self):
         assert get_record_data_valid_len(999, 1) is None
 
