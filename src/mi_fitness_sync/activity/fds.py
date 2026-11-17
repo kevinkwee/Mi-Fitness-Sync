@@ -13,11 +13,21 @@ from mi_fitness_sync.exceptions import MiFitnessError, XiaomiApiError
 from mi_fitness_sync.fds.cache import FdsCache
 from mi_fitness_sync.fds.gps_records import download_and_parse_gps_record
 from mi_fitness_sync.fds.recovery_rate import RecoveryRateData, download_and_parse_recovery_rate
-from mi_fitness_sync.fds.sport_records import download_and_parse_sport_record
+from mi_fitness_sync.fds.sport_records import SportSample, download_and_parse_sport_record
 from mi_fitness_sync.fds.sport_reports import SportReport, download_and_parse_sport_report
 
 
 logger = logging.getLogger(__name__)
+
+
+def _raw_sport_sample(sample: SportSample) -> dict[str, Any]:
+    """Keep the FDS values that ActivitySample has no field for (e.g. per-length swim data)."""
+    raw: dict[str, Any] = {"source": "fds_sport_record"}
+    if sample.pace is not None:
+        raw["pace"] = sample.pace
+    if sample.extras:
+        raw["extras"] = {str(type_id): value for type_id, value in sorted(sample.extras.items())}
+    return raw
 
 FDS_SPORT_RECORD_FILE_TYPE = 0
 FDS_SPORT_REPORT_FILE_TYPE = 1
@@ -118,7 +128,7 @@ class ActivityFdsService:
                 altitude_meters=None,
                 steps=sample.steps,
                 calories=sample.calories,
-                raw_sample={"source": "fds_sport_record"},
+                raw_sample=_raw_sport_sample(sample),
             )
             for sample in sport_samples
         ]

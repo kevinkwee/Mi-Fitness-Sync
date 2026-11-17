@@ -1494,3 +1494,261 @@ class TestRenderExportSmoothingOptions:
         """Custom outlier_speed_mps should not raise."""
         export = render_export(sample_activity_detail, "gpx", outlier_speed_mps=10.0)
         assert export.file_format == "gpx"
+
+
+def _pool_swim_detail(raw_report: dict | None = None, *, sport_type: int = 9) -> ActivityDetail:
+    report = {
+        "avg_stroke_frequency": 0,
+        "avg_swolf": 68,
+        "best_swolf": 58,
+        "distance": 1500,
+        "duration": 2751,
+        "main_posture": 1,
+        "max_stroke_freq": 34,
+        "pool_width": 0,
+        "proto_type": 9,
+        "sport_type": 9,
+        "stroke_count": 1377,
+        "turn_count": 60,
+    }
+    if raw_report is not None:
+        report = raw_report
+    activity = Activity(
+        activity_id="sid-1:key-1:1794302641",
+        sid="sid-1",
+        key="key-1",
+        category="pool_swimming",
+        sport_type=sport_type,
+        title="Pool Swimming",
+        start_time=1794302641,
+        end_time=1794305392,
+        duration_seconds=2751,
+        distance_meters=1500,
+        calories=880,
+        steps=None,
+        sync_state="server",
+        next_key=None,
+        raw_record={},
+        raw_report=report,
+    )
+    sample = ActivitySample(
+        timestamp=1794302641,
+        start_time=None,
+        end_time=None,
+        duration_seconds=None,
+        heart_rate=None,
+        cadence=None,
+        speed_mps=None,
+        distance_meters=25.0,
+        altitude_meters=None,
+        steps=None,
+        calories=None,
+        raw_sample={},
+    )
+    return ActivityDetail(
+        activity=activity,
+        detail_sid="sid-1",
+        detail_key="fds_sport_record",
+        detail_time=1794302641,
+        zone_name="UTC",
+        zone_offset_seconds=0,
+        track_points=[],
+        samples=[sample],
+        sport_report=None,
+        recovery_rate=None,
+        raw_fitness_item={},
+        raw_detail={},
+    )
+
+
+def test_fit_export_pool_swim_includes_swim_summary():
+    fit = _parse_fit(render_export(_pool_swim_detail(), "fit").payload)
+    session = _fit_sessions(fit)[0]
+    lap = _fit_laps(fit)[0]
+
+    assert session.sport == Sport.SWIMMING.value
+    assert session.sub_sport == SubSport.LAP_SWIMMING.value
+    assert session.pool_length == pytest.approx(25.0)
+    assert session.total_cycles == 1377
+    assert session.num_lengths == 60
+    assert session.num_active_lengths == 60
+    assert session.avg_stroke_count == pytest.approx(22.95, abs=0.1)
+    assert session.avg_stroke_distance == pytest.approx(1.09, abs=0.01)
+    # avg_stroke_frequency is 0 (unknown), so the cadence is derived: 1377 strokes / 45.85 min
+    assert session.avg_cadence == 30
+    assert session.max_cadence == 34
+
+    assert lap.total_cycles == 1377
+    assert lap.num_lengths == 60
+    assert lap.avg_cadence == 30
+    assert lap.max_cadence == 34
+
+
+def test_fit_export_pool_swim_prefers_reported_pool_width_and_frequency():
+    detail = _pool_swim_detail({"pool_width": 50, "turn_count": 30, "stroke_count": 600, "avg_stroke_frequency": 28})
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.pool_length == pytest.approx(50.0)
+    assert session.avg_cadence == 28
+
+
+def test_fit_export_pool_swim_skips_implausible_pool_length():
+    detail = _pool_swim_detail({"turn_count": 3, "stroke_count": 1377})
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.pool_length is None
+    assert session.num_lengths == 3
+    assert session.total_cycles == 1377
+
+
+def test_fit_export_swim_without_swim_report_has_no_swim_fields():
+    detail = _pool_swim_detail({})
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.pool_length is None
+    assert session.total_cycles is None
+    assert session.num_lengths is None
+
+
+def test_fit_export_non_swim_ignores_stroke_fields():
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60}, sport_type=8)
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_cycles is None
+    assert session.num_lengths is None
+
+
+# Per-length FDS samples from a real Mi Band 9 pool swim (150 m, 25 m pool):
+# two sets (4 + 2 lengths) separated by a set marker without distance.
+_REAL_SWIM_LENGTHS = [
+    # (end_time, pace s/100m, swolf, strokes, stroke rate, calories)
+    (1793700560, 240, 83, 23, 23, 16),
+    (1793700594, 136, 50, 16, 28, 9),
+    (1793700638, 176, 63, 19, 25, 11),
+    (1793700677, 156, 56, 17, 26, 10),
+    None,
+    (1793700727, 200, 71, 21, 25, 13),
+    (1793700764, 148, 53, 16, 25, 9),
+]
+
+
+def _real_swim_sample(index: int, values: tuple | None) -> ActivitySample:
+    if values is None:
+        distance = None
+        calories = None
+        raw_sample = {"source": "fds_sport_record", "pace": 177, "extras": {"1": 1793700677, "11": 1, "13": 252}}
+    else:
+        end_time, pace, swolf, strokes, stroke_rate, calories = values
+        distance = 25.0
+        raw_sample = {
+            "source": "fds_sport_record",
+            "pace": pace,
+            "extras": {"1": end_time, "10": 1, "11": 1, "13": swolf, "16": strokes, "17": stroke_rate},
+        }
+    return ActivitySample(
+        timestamp=1793700499 + index,
+        start_time=None,
+        end_time=None,
+        duration_seconds=1,
+        heart_rate=None,
+        cadence=None,
+        speed_mps=None,
+        distance_meters=distance,
+        altitude_meters=None,
+        steps=None,
+        calories=calories,
+        raw_sample=raw_sample,
+    )
+
+
+def _real_pool_swim_detail() -> ActivityDetail:
+    detail = _pool_swim_detail({"stroke_count": 112, "turn_count": 6, "pool_width": 0, "max_stroke_freq": 28, "avg_stroke_frequency": 0, "main_posture": 1})
+    detail.activity.start_time = 1793700499
+    detail.activity.end_time = 1793700765
+    detail.activity.duration_seconds = 265
+    detail.activity.distance_meters = 150
+    detail.activity.calories = 70
+    detail.samples = [_real_swim_sample(index, values) for index, values in enumerate(_REAL_SWIM_LENGTHS)]
+    return detail
+
+
+def _fit_lengths(fit: FitFile) -> list:
+    from fit_tool.profile.messages.length_message import LengthMessage
+
+    return [r.message for r in fit.records if isinstance(r.message, LengthMessage)]
+
+
+def test_fit_export_pool_swim_writes_length_per_pool_length():
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    lengths = _fit_lengths(fit)
+
+    assert len(lengths) == 6
+    assert [length.total_strokes for length in lengths] == [23, 16, 19, 17, 21, 16]
+    assert [length.total_timer_time for length in lengths] == [60.0, 34.0, 44.0, 39.0, 50.0, 37.0]
+    assert [length.avg_swimming_cadence for length in lengths] == [23, 28, 25, 26, 25, 25]
+    # SWOLF = seconds + strokes, as reported by Mi Fitness
+    assert [int(l.total_timer_time) + l.total_strokes for l in lengths] == [83, 50, 63, 56, 71, 53]
+
+
+def test_fit_export_pool_swim_writes_lap_per_set():
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+
+    assert len(laps) == 2
+    assert [lap.total_distance for lap in laps] == [100.0, 50.0]
+    assert [lap.num_lengths for lap in laps] == [4, 2]
+    assert [lap.first_length_index for lap in laps] == [0, 4]
+    assert [lap.total_cycles for lap in laps] == [75, 37]
+    assert [lap.max_cadence for lap in laps] == [28, 25]
+    assert session.num_laps == 2
+    assert session.total_cycles == 112
+    assert session.num_lengths == 6
+    assert session.pool_length == pytest.approx(25.0)
+
+
+def test_fit_export_pool_swim_records_have_cumulative_distance():
+    from fit_tool.profile.messages.record_message import RecordMessage
+
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
+
+    assert [record.distance for record in records] == [0.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0]
+
+
+def test_fit_export_pool_swim_lap_cadence_is_consistent():
+    laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
+
+    assert [lap.avg_cadence for lap in laps] == [25, 25]
+    assert all(lap.avg_cadence <= lap.max_cadence for lap in laps)
+
+
+def test_fit_export_pool_swim_writes_swim_stroke():
+    from fit_tool.profile.profile_type import SwimStroke
+
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+
+    # Mi Fitness style 1 is breaststroke (confirmed on a real swim)
+    assert {length.swim_stroke for length in _fit_lengths(fit)} == {SwimStroke.BREASTSTROKE.value}
+    assert {lap.swim_stroke for lap in _fit_laps(fit)} == {SwimStroke.BREASTSTROKE.value}
+    assert _fit_sessions(fit)[0].swim_stroke == SwimStroke.BREASTSTROKE.value
+
+
+def test_fit_export_pool_swim_lap_with_mixed_strokes_is_mixed():
+    from fit_tool.profile.profile_type import SwimStroke
+
+    detail = _real_pool_swim_detail()
+    detail.samples[1].raw_sample["extras"]["11"] = 2
+    laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
+
+    assert [lap.swim_stroke for lap in laps] == [SwimStroke.MIXED.value, SwimStroke.BREASTSTROKE.value]
+
+
+def test_fit_export_pool_swim_summary_only_uses_main_posture():
+    from fit_tool.profile.profile_type import SwimStroke
+
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "main_posture": 2})
+    fit = _parse_fit(render_export(detail, "fit").payload)
+
+    assert _fit_laps(fit)[0].swim_stroke == SwimStroke.FREESTYLE.value
+    assert _fit_sessions(fit)[0].swim_stroke == SwimStroke.FREESTYLE.value

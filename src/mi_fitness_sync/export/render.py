@@ -237,7 +237,7 @@ def render_fit(detail: ActivityDetail) -> bytes:
     from fit_tool.profile.messages.record_message import RecordMessage
     from fit_tool.profile.messages.session_message import SessionMessage
     from fit_tool.profile.profile_type import Activity as FitActivity
-    from fit_tool.profile.profile_type import Event, EventType, FileType, Manufacturer
+    from fit_tool.profile.profile_type import Event, EventType, FileType, Manufacturer, SubSport
 
     builder = FitFileBuilder(auto_define=True)
     raw_report = detail.activity.raw_report
@@ -260,51 +260,63 @@ def render_fit(detail: ActivityDetail) -> bytes:
     start_event.event_type = EventType.START
     builder.add(start_event)
 
-    for point in export_points:
-        record = RecordMessage()
-        record.timestamp = _unix_millis(point.timestamp)
-        if point.latitude is not None and point.longitude is not None:
-            record.position_lat = point.latitude
-            record.position_long = point.longitude
-        if point.altitude_meters is not None:
-            record.altitude = point.altitude_meters
-        if point.distance_meters is not None:
-            record.distance = point.distance_meters
-        if point.speed_mps is not None:
-            record.speed = point.speed_mps
-        if point.heart_rate is not None:
-            record.heart_rate = point.heart_rate
-        if point.cadence is not None:
-            record.cadence = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type)
-        builder.add(record)
-
-    lap = LapMessage()
-    lap.timestamp = end_timestamp_ms
-    lap.start_time = start_timestamp_ms
-    lap.total_elapsed_time = float(detail.total_duration_seconds)
-    lap.total_timer_time = float(detail.total_duration_seconds)
-    lap.total_distance = detail.total_distance_meters
-    lap.total_calories = detail.total_calories or 0
-    lap.sport = fit_sport
-    lap.sub_sport = fit_sub_sport
-    if export_points and export_points[0].latitude is not None and export_points[0].longitude is not None:
-        lap.start_position_lat = export_points[0].latitude
-        lap.start_position_long = export_points[0].longitude
-    if detail.track_points:
-        lap.end_position_lat = detail.track_points[-1].latitude
-        lap.end_position_long = detail.track_points[-1].longitude
     average_heart_rate = _average_heart_rate(export_points)
-    if average_heart_rate is not None:
-        lap.avg_heart_rate = average_heart_rate
     maximum_heart_rate = _maximum_heart_rate(export_points)
-    if maximum_heart_rate is not None:
-        lap.max_heart_rate = maximum_heart_rate
     report = detail.sport_report
     ascent = _total_ascent(report, export_points)
     descent = _total_descent(report, export_points)
-    if ascent is not None:
-        lap.total_ascent = ascent
-    builder.add(lap)
+    swim_summary = _swim_summary(raw_report, detail.total_distance_meters, float(detail.total_duration_seconds), fit_sport)
+    swim_sets = _swim_sets(detail) if fit_sub_sport == SubSport.LAP_SWIMMING else []
+    num_laps = 1
+
+    if swim_sets:
+        num_laps = _add_swim_sets(builder, swim_sets, detail.start_time, fit_sport, fit_sub_sport)
+    else:
+        for point in export_points:
+            record = RecordMessage()
+            record.timestamp = _unix_millis(point.timestamp)
+            if point.latitude is not None and point.longitude is not None:
+                record.position_lat = point.latitude
+                record.position_long = point.longitude
+            if point.altitude_meters is not None:
+                record.altitude = point.altitude_meters
+            if point.distance_meters is not None:
+                record.distance = point.distance_meters
+            if point.speed_mps is not None:
+                record.speed = point.speed_mps
+            if point.heart_rate is not None:
+                record.heart_rate = point.heart_rate
+            if point.cadence is not None:
+                record.cadence = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type)
+            builder.add(record)
+
+        lap = LapMessage()
+        lap.timestamp = end_timestamp_ms
+        lap.start_time = start_timestamp_ms
+        lap.total_elapsed_time = float(detail.total_duration_seconds)
+        lap.total_timer_time = float(detail.total_duration_seconds)
+        lap.total_distance = detail.total_distance_meters
+        lap.total_calories = detail.total_calories or 0
+        lap.sport = fit_sport
+        lap.sub_sport = fit_sub_sport
+        if export_points and export_points[0].latitude is not None and export_points[0].longitude is not None:
+            lap.start_position_lat = export_points[0].latitude
+            lap.start_position_long = export_points[0].longitude
+        if detail.track_points:
+            lap.end_position_lat = detail.track_points[-1].latitude
+            lap.end_position_long = detail.track_points[-1].longitude
+        if average_heart_rate is not None:
+            lap.avg_heart_rate = average_heart_rate
+        if maximum_heart_rate is not None:
+            lap.max_heart_rate = maximum_heart_rate
+        if ascent is not None:
+            lap.total_ascent = ascent
+        if swim_summary is not None:
+            _apply_swim_summary(lap, swim_summary)
+            lap_stroke = _fit_swim_stroke(raw_report.get("main_posture"))
+            if lap_stroke is not None:
+                lap.swim_stroke = lap_stroke
+        builder.add(lap)
 
     session = SessionMessage()
     session.timestamp = end_timestamp_ms
@@ -315,7 +327,7 @@ def render_fit(detail: ActivityDetail) -> bytes:
     session.total_calories = detail.total_calories or 0
     session.sport = fit_sport
     session.sub_sport = fit_sub_sport
-    session.num_laps = 1
+    session.num_laps = num_laps
     if export_points and export_points[0].latitude is not None and export_points[0].longitude is not None:
         session.start_position_lat = export_points[0].latitude
         session.start_position_long = export_points[0].longitude
@@ -344,6 +356,19 @@ def render_fit(detail: ActivityDetail) -> bytes:
         session.total_strides = total_strides
         if detail.total_distance_meters > 0:
             session.avg_step_length = detail.total_distance_meters / total_strides
+    if swim_summary is not None:
+        _apply_swim_summary(session, swim_summary)
+        session_stroke = _fit_swim_stroke(raw_report.get("main_posture"))
+        if session_stroke is not None:
+            session.swim_stroke = session_stroke
+        if swim_summary.avg_strokes_per_length is not None:
+            # Older FIT consumers read the legacy session-only field instead of avg_strokes_per_length.
+            session.avg_stroke_count = swim_summary.avg_strokes_per_length
+        if swim_summary.pool_length_meters is not None:
+            from fit_tool.profile.profile_type import DisplayMeasure
+
+            session.pool_length = swim_summary.pool_length_meters
+            session.pool_length_unit = DisplayMeasure.METRIC
     builder.add(session)
 
     stop_event = EventMessage()
@@ -453,6 +478,277 @@ def _compute_elevation_loss(points: list[TrackPoint]) -> int | None:
         return None
     loss = sum(a - b for a, b in zip(altitudes, altitudes[1:]) if a > b)
     return round(loss)
+
+
+_MIN_POOL_LENGTH_METERS = 10.0
+_MAX_POOL_LENGTH_METERS = 100.0
+
+
+@dataclass(slots=True, frozen=True)
+class SwimSummary:
+    total_strokes: int | None
+    num_lengths: int | None
+    pool_length_meters: float | None
+    avg_strokes_per_length: float | None
+    avg_stroke_distance_meters: float | None
+    avg_cadence: int | None
+    max_cadence: int | None
+
+
+def _positive_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
+
+
+def _swim_summary(raw_report: dict, total_distance: float, total_time: float, fit_sport: object) -> SwimSummary | None:
+    """Derive FIT swim summary fields from the Mi Fitness report.
+
+    Mi Fitness reports pool swims with ``stroke_count``, ``turn_count`` (one per pool length),
+    ``pool_width`` (the configured pool length, 0 when unknown) and stroke frequencies in strokes/min.
+    """
+    from fit_tool.profile.profile_type import Sport
+
+    if fit_sport != Sport.SWIMMING:
+        return None
+
+    total_strokes = _positive_number(raw_report.get("stroke_count"))
+    num_lengths = _positive_number(raw_report.get("turn_count"))
+
+    pool_length = _positive_number(raw_report.get("pool_width"))
+    if pool_length is None and num_lengths is not None and total_distance > 0:
+        pool_length = total_distance / num_lengths
+    if pool_length is not None and not _MIN_POOL_LENGTH_METERS <= pool_length <= _MAX_POOL_LENGTH_METERS:
+        pool_length = None
+
+    avg_strokes_per_length = None
+    if total_strokes is not None and num_lengths is not None:
+        avg_strokes_per_length = total_strokes / num_lengths
+
+    avg_stroke_distance = None
+    if total_strokes is not None and total_distance > 0:
+        avg_stroke_distance = total_distance / total_strokes
+
+    avg_cadence = _positive_number(raw_report.get("avg_stroke_frequency"))
+    if avg_cadence is None and total_strokes is not None and total_time > 0:
+        avg_cadence = total_strokes / (total_time / 60)
+    max_cadence = _positive_number(raw_report.get("max_stroke_freq"))
+
+    if total_strokes is None and num_lengths is None and avg_cadence is None and max_cadence is None:
+        return None
+
+    return SwimSummary(
+        total_strokes=round(total_strokes) if total_strokes is not None else None,
+        num_lengths=round(num_lengths) if num_lengths is not None else None,
+        pool_length_meters=pool_length,
+        avg_strokes_per_length=avg_strokes_per_length,
+        avg_stroke_distance_meters=avg_stroke_distance,
+        avg_cadence=_clamp_cadence(round(avg_cadence)) if avg_cadence is not None else None,
+        max_cadence=_clamp_cadence(round(max_cadence)) if max_cadence is not None else None,
+    )
+
+
+def _apply_swim_summary(message: object, summary: SwimSummary) -> None:
+    """Set the swim fields shared by FIT lap and session messages."""
+    if summary.total_strokes is not None:
+        message.total_cycles = summary.total_strokes  # type: ignore[attr-defined]
+    if summary.num_lengths is not None:
+        message.num_lengths = summary.num_lengths  # type: ignore[attr-defined]
+        message.num_active_lengths = summary.num_lengths  # type: ignore[attr-defined]
+    if summary.avg_strokes_per_length is not None:
+        message.avg_strokes_per_length = summary.avg_strokes_per_length  # type: ignore[attr-defined]
+    if summary.avg_stroke_distance_meters is not None:
+        message.avg_stroke_distance = summary.avg_stroke_distance_meters  # type: ignore[attr-defined]
+    if summary.avg_cadence is not None:
+        message.avg_cadence = summary.avg_cadence  # type: ignore[attr-defined]
+    if summary.max_cadence is not None:
+        message.max_cadence = summary.max_cadence  # type: ignore[attr-defined]
+
+
+# Keys of the per-length values in ActivitySample.raw_sample["extras"] (FDS swimming record types).
+_SWIM_END_TIME = "1"
+_SWIM_SWOLF = "13"
+_SWIM_STROKE_COUNT = "16"
+_SWIM_STROKE_FREQ = "17"
+_SWIM_STYLE = "11"
+
+
+def _fit_swim_stroke(mi_style: object) -> object | None:
+    """Map a Mi Fitness swim style (record type 11 / report main_posture) to a FIT swim stroke.
+
+    Same codes as Gadgetbridge: 0 medley, 1 breaststroke, 2 freestyle, 3 backstroke, 4 butterfly.
+    """
+    from fit_tool.profile.profile_type import SwimStroke
+
+    if isinstance(mi_style, bool) or not isinstance(mi_style, int):
+        return None
+    return {
+        0: SwimStroke.MIXED,
+        1: SwimStroke.BREASTSTROKE,
+        2: SwimStroke.FREESTYLE,
+        3: SwimStroke.BACKSTROKE,
+        4: SwimStroke.BUTTERFLY,
+    }.get(mi_style)
+
+
+@dataclass(slots=True, frozen=True)
+class SwimLength:
+    start_time: int
+    end_time: int
+    distance_meters: float
+    strokes: int | None
+    stroke_rate: int | None
+    swolf: int | None
+    calories: int | None
+    stroke: object | None = None
+
+    @property
+    def duration_seconds(self) -> int:
+        return self.end_time - self.start_time
+
+
+def _swim_sets(detail: ActivityDetail) -> list[list[SwimLength]]:
+    """Group the per-length pool swim samples into sets.
+
+    Mi Fitness stores one sport record per pool length (end time, pace in s/100 m, SWOLF,
+    stroke count and stroke rate). A record without a distance marks the end of a set.
+    The length start is derived from its pace, so rest between lengths is not counted as
+    swimming time.
+    """
+    sets: list[list[SwimLength]] = []
+    current: list[SwimLength] = []
+    previous_end = detail.start_time
+
+    for sample in detail.samples:
+        extras = sample.raw_sample.get("extras")
+        if not isinstance(extras, dict):
+            continue
+        end_time = extras.get(_SWIM_END_TIME)
+        if not isinstance(end_time, int):
+            continue
+
+        if not sample.distance_meters:
+            if current:
+                sets.append(current)
+                current = []
+            continue
+
+        start_time = previous_end
+        pace = sample.raw_sample.get("pace")
+        if isinstance(pace, int) and pace > 0:
+            start_time = max(previous_end, end_time - round(pace * sample.distance_meters / 100))
+        if end_time <= start_time:
+            continue
+
+        current.append(
+            SwimLength(
+                start_time=start_time,
+                end_time=end_time,
+                distance_meters=sample.distance_meters,
+                strokes=extras.get(_SWIM_STROKE_COUNT),
+                stroke_rate=extras.get(_SWIM_STROKE_FREQ),
+                swolf=extras.get(_SWIM_SWOLF),
+                calories=sample.calories,
+                stroke=_fit_swim_stroke(extras.get(_SWIM_STYLE)),
+            )
+        )
+        previous_end = end_time
+
+    if current:
+        sets.append(current)
+    return sets
+
+
+def _add_swim_sets(builder: object, sets: list[list[SwimLength]], start_time: int, fit_sport: object, fit_sub_sport: object) -> int:
+    """Add records, lengths and one lap per set. Returns the number of laps."""
+    from fit_tool.profile.messages.lap_message import LapMessage
+    from fit_tool.profile.messages.length_message import LengthMessage
+    from fit_tool.profile.messages.record_message import RecordMessage
+    from fit_tool.profile.profile_type import Event, EventType, LengthType
+
+    first_record = RecordMessage()
+    first_record.timestamp = _unix_millis(start_time)
+    first_record.distance = 0.0
+    builder.add(first_record)  # type: ignore[attr-defined]
+
+    distance = 0.0
+    length_index = 0
+    for lap_index, lengths in enumerate(sets):
+        for swim_length in lengths:
+            distance += swim_length.distance_meters
+            record = RecordMessage()
+            record.timestamp = _unix_millis(swim_length.end_time)
+            record.distance = distance
+            record.speed = swim_length.distance_meters / swim_length.duration_seconds
+            if swim_length.stroke_rate is not None:
+                record.cadence = _clamp_cadence(swim_length.stroke_rate)
+            builder.add(record)  # type: ignore[attr-defined]
+
+            length = LengthMessage()
+            length.message_index = length_index
+            length.timestamp = _unix_millis(swim_length.end_time)
+            length.start_time = _unix_millis(swim_length.start_time)
+            length.total_elapsed_time = float(swim_length.duration_seconds)
+            length.total_timer_time = float(swim_length.duration_seconds)
+            length.avg_speed = swim_length.distance_meters / swim_length.duration_seconds
+            length.length_type = LengthType.ACTIVE
+            length.event = Event.LENGTH
+            length.event_type = EventType.STOP
+            if swim_length.stroke is not None:
+                length.swim_stroke = swim_length.stroke
+            if swim_length.strokes is not None:
+                length.total_strokes = swim_length.strokes
+            if swim_length.stroke_rate is not None:
+                length.avg_swimming_cadence = _clamp_cadence(swim_length.stroke_rate)
+            if swim_length.calories is not None:
+                length.total_calories = swim_length.calories
+            builder.add(length)  # type: ignore[attr-defined]
+            length_index += 1
+
+        timer_time = sum(swim_length.duration_seconds for swim_length in lengths)
+        lap_distance = sum(swim_length.distance_meters for swim_length in lengths)
+        strokes = [swim_length.strokes for swim_length in lengths if swim_length.strokes is not None]
+        rated_lengths = [swim_length for swim_length in lengths if swim_length.stroke_rate is not None]
+        stroke_rates = [swim_length.stroke_rate for swim_length in rated_lengths]
+        calories = [swim_length.calories for swim_length in lengths if swim_length.calories is not None]
+
+        lap = LapMessage()
+        lap.message_index = lap_index
+        lap.timestamp = _unix_millis(lengths[-1].end_time)
+        lap.start_time = _unix_millis(lengths[0].start_time)
+        lap.total_elapsed_time = float(lengths[-1].end_time - lengths[0].start_time)
+        lap.total_timer_time = float(timer_time)
+        lap.total_distance = lap_distance
+        lap.avg_speed = lap_distance / timer_time
+        lap.sport = fit_sport
+        lap.sub_sport = fit_sub_sport
+        lap.first_length_index = length_index - len(lengths)
+        lap.num_lengths = len(lengths)
+        lap.num_active_lengths = len(lengths)
+        if calories:
+            lap.total_calories = sum(calories)
+        if strokes:
+            lap.total_cycles = sum(strokes)
+            lap.avg_strokes_per_length = sum(strokes) / len(lengths)
+            lap.avg_stroke_distance = lap_distance / sum(strokes)
+        if rated_lengths:
+            # Time-weighted mean of the reported rates, so it stays consistent with max_cadence.
+            rated_time = sum(swim_length.duration_seconds for swim_length in rated_lengths)
+            weighted_rate = sum(swim_length.stroke_rate * swim_length.duration_seconds for swim_length in rated_lengths)  # type: ignore[operator]
+            lap.avg_cadence = _clamp_cadence(round(weighted_rate / rated_time))
+            lap.max_cadence = _clamp_cadence(max(stroke_rates))  # type: ignore[type-var]
+        elif strokes:
+            lap.avg_cadence = _clamp_cadence(round(sum(strokes) / (timer_time / 60)))
+        strokes_used = {swim_length.stroke for swim_length in lengths if swim_length.stroke is not None}
+        if len(strokes_used) == 1:
+            lap.swim_stroke = strokes_used.pop()
+        elif strokes_used:
+            from fit_tool.profile.profile_type import SwimStroke
+
+            lap.swim_stroke = SwimStroke.MIXED
+        builder.add(lap)  # type: ignore[attr-defined]
+
+    return len(sets)
 
 
 def _total_strides(detail: "ActivityDetail") -> int | None:
