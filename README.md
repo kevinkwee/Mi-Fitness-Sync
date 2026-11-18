@@ -232,6 +232,7 @@ Export behavior:
 3. GPS smoothing is enabled by default for exports that include GPS coordinates; it only adjusts latitude/longitude and leaves timestamps, heart rate, cadence, and other fields unchanged
 4. `match` mode tries to bring the smoothed GPS distance closer to the Mi Fitness summary distance, while `full` applies the largest valid smoothing window after outlier cleanup
 5. FIT generation is best-effort — only fields present in the Mi Fitness source are included
+6. Pool swim FIT exports write one `length` message per pool length, with rest as idle lengths, and one `lap` per swim set plus one per rest period before, between, or after sets
 
 ### `strava-login`
 
