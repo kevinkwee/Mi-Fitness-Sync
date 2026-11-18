@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from mi_fitness_sync.activity.fds import ActivityFdsService
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.activity.utils import build_fds_suffix
+from mi_fitness_sync.fds.sport_records import SportSample
 
 
 def _make_activity(
@@ -119,3 +120,28 @@ class TestRequestItemUsesReportTimestamp:
         assert item["suffix"] != wrong_suffix, (
             "Suffix must NOT match the record-level timestamp"
         )
+
+
+class TestSportSamplesKeepSwimData:
+    """Per-length swim data survives the FDS hand-off with string extras keys and the pace."""
+
+    def test_sport_samples_keep_pace_and_per_length_values(self, monkeypatch):
+        activity = _make_activity(proto_type=9)
+        suffix = build_fds_suffix(
+            sid=activity.sid,
+            timestamp=1700000000,
+            timezone_offset=28,
+            sport_type=9,
+            file_type=0,
+        )
+        parsed = [SportSample(timestamp=1700000060, distance=25, pace=240, extras={17: 23, 1: 1700000060, 16: 23})]
+        monkeypatch.setattr("mi_fitness_sync.activity.fds.download_and_parse_sport_record", lambda *args, **kwargs: parsed)
+
+        samples = _make_service().try_download_sport_samples(activity, {f"{suffix}_1700000000": {}})
+
+        assert samples[0].raw_sample == {
+            "source": "fds_sport_record",
+            "pace": 240,
+            "extras": {"1": 1700000060, "16": 23, "17": 23},
+        }
+        assert list(samples[0].raw_sample["extras"]) == ["1", "16", "17"]

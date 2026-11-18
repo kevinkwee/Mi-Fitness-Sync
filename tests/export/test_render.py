@@ -6,13 +6,14 @@ from xml.etree import ElementTree as ET
 from fit_tool.fit_file import FitFile
 from fit_tool.profile.messages.activity_message import ActivityMessage
 from fit_tool.profile.messages.lap_message import LapMessage
+from fit_tool.profile.messages.record_message import RecordMessage
 from fit_tool.profile.messages.session_message import SessionMessage
-from fit_tool.profile.profile_type import Sport, SubSport
+from fit_tool.profile.profile_type import DisplayMeasure, Event, EventType, LengthType, Sport, SubSport, SwimStroke
 
 import pytest
 
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
-from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories, _cadence_spm_to_rpm
+from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories, _cadence_spm_to_rpm, _fit_local_timestamp
 from mi_fitness_sync.export.smoothing import smooth_track, total_haversine_distance
 from mi_fitness_sync.fds.sport_reports import SportReport
 
@@ -1164,8 +1165,6 @@ class TestTcxRunningCadence:
 # Cadence SPM→RPM conversion tests
 # ---------------------------------------------------------------------------
 
-from fit_tool.profile.messages.record_message import RecordMessage
-
 
 def _cycling_detail(*, cadence: int = 80) -> ActivityDetail:
     activity = Activity(
@@ -1585,9 +1584,10 @@ def test_fit_export_pool_swim_includes_swim_summary():
 
 
 def test_fit_export_pool_swim_prefers_reported_pool_width_and_frequency():
-    detail = _pool_swim_detail({"pool_width": 50, "turn_count": 30, "stroke_count": 600, "avg_stroke_frequency": 28})
+    detail = _pool_swim_detail({"pool_width": 50, "turn_count": 60, "stroke_count": 600, "avg_stroke_frequency": 28})
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
+    # The report width is 50 m and the distance over turn count would give 25 m.
     assert session.pool_length == pytest.approx(50.0)
     assert session.avg_cadence == 28
 
@@ -1678,32 +1678,36 @@ def _fit_lengths(fit: FitFile) -> list:
     return [r.message for r in fit.records if isinstance(r.message, LengthMessage)]
 
 
-def test_fit_export_pool_swim_writes_length_per_pool_length():
+def test_fit_export_pool_swim_writes_active_lengths():
+    from fit_tool.profile.profile_type import LengthType
+
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     lengths = _fit_lengths(fit)
+    active_lengths = [length for length in lengths if length.length_type == LengthType.ACTIVE.value]
 
-    assert len(lengths) == 6
-    assert [length.total_strokes for length in lengths] == [23, 16, 19, 17, 21, 16]
-    assert [length.total_timer_time for length in lengths] == [60.0, 34.0, 44.0, 39.0, 50.0, 37.0]
-    assert [length.avg_swimming_cadence for length in lengths] == [23, 28, 25, 26, 25, 25]
-    # SWOLF = seconds + strokes, as reported by Mi Fitness
-    assert [int(l.total_timer_time) + l.total_strokes for l in lengths] == [83, 50, 63, 56, 71, 53]
+    assert len(lengths) == 7
+    assert len(active_lengths) == 6
+    assert [length.total_strokes for length in active_lengths] == [23, 16, 19, 17, 21, 16]
+    assert [length.total_timer_time for length in active_lengths] == [60.0, 34.0, 44.0, 39.0, 50.0, 37.0]
+    assert [length.avg_swimming_cadence for length in active_lengths] == [23, 28, 25, 26, 25, 25]
+    # The fixture's FDS SWOLF (type 13) equals length seconds + strokes.
+    assert [int(length.total_timer_time) + length.total_strokes for length in active_lengths] == [83, 50, 63, 56, 71, 53]
 
 
-def test_fit_export_pool_swim_writes_lap_per_set():
+def test_fit_export_pool_swim_writes_lap_per_set_and_rest():
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     laps = _fit_laps(fit)
     session = _fit_sessions(fit)[0]
 
-    assert len(laps) == 2
-    assert [lap.total_distance for lap in laps] == [100.0, 50.0]
-    assert [lap.num_lengths for lap in laps] == [4, 2]
-    assert [lap.first_length_index for lap in laps] == [0, 4]
-    assert [lap.total_cycles for lap in laps] == [75, 37]
-    assert [lap.max_cadence for lap in laps] == [28, 25]
-    assert session.num_laps == 2
+    assert len(laps) == 3
+    assert [lap.total_distance for lap in laps] == [0.0, 100.0, 50.0]
+    assert [lap.num_lengths for lap in laps] == [1, 4, 2]
+    assert [lap.num_active_lengths for lap in laps] == [0, 4, 2]
+    assert [lap.first_length_index for lap in laps] == [0, 1, 5]
+    assert [lap.total_cycles for lap in laps] == [None, 75, 37]
+    assert [lap.max_cadence for lap in laps] == [None, 28, 25]
+    assert session.num_laps == 3
     assert session.total_cycles == 112
-    assert session.num_lengths == 6
     assert session.pool_length == pytest.approx(25.0)
 
 
@@ -1713,24 +1717,26 @@ def test_fit_export_pool_swim_records_have_cumulative_distance():
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
 
-    assert [record.distance for record in records] == [0.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0]
+    assert [record.distance for record in records] == [0.0, 0.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0]
 
 
 def test_fit_export_pool_swim_lap_cadence_is_consistent():
     laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
+    rated_laps = [lap for lap in laps if lap.avg_cadence is not None]
 
-    assert [lap.avg_cadence for lap in laps] == [25, 25]
-    assert all(lap.avg_cadence <= lap.max_cadence for lap in laps)
+    assert [lap.avg_cadence for lap in laps] == [None, 25, 25]
+    assert all(lap.avg_cadence <= lap.max_cadence for lap in rated_laps)
 
 
 def test_fit_export_pool_swim_writes_swim_stroke():
-    from fit_tool.profile.profile_type import SwimStroke
+    from fit_tool.profile.profile_type import LengthType, SwimStroke
 
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
 
-    # Mi Fitness style 1 is breaststroke (confirmed on a real swim)
-    assert {length.swim_stroke for length in _fit_lengths(fit)} == {SwimStroke.BREASTSTROKE.value}
-    assert {lap.swim_stroke for lap in _fit_laps(fit)} == {SwimStroke.BREASTSTROKE.value}
+    # Mi Fitness style 1 is breaststroke.
+    assert {length.swim_stroke for length in active_lengths} == {SwimStroke.BREASTSTROKE.value}
+    assert {lap.swim_stroke for lap in _fit_laps(fit) if lap.swim_stroke is not None} == {SwimStroke.BREASTSTROKE.value}
     assert _fit_sessions(fit)[0].swim_stroke == SwimStroke.BREASTSTROKE.value
 
 
@@ -1741,7 +1747,7 @@ def test_fit_export_pool_swim_lap_with_mixed_strokes_is_mixed():
     detail.samples[1].raw_sample["extras"]["11"] = 2
     laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
 
-    assert [lap.swim_stroke for lap in laps] == [SwimStroke.MIXED.value, SwimStroke.BREASTSTROKE.value]
+    assert [lap.swim_stroke for lap in laps] == [None, SwimStroke.MIXED.value, SwimStroke.BREASTSTROKE.value]
 
 
 def test_fit_export_pool_swim_summary_only_uses_main_posture():
@@ -1752,3 +1758,593 @@ def test_fit_export_pool_swim_summary_only_uses_main_posture():
 
     assert _fit_laps(fit)[0].swim_stroke == SwimStroke.FREESTYLE.value
     assert _fit_sessions(fit)[0].swim_stroke == SwimStroke.FREESTYLE.value
+
+
+def test_fit_export_pool_swim_set_without_strokes_has_no_cycle_fields():
+    detail = _real_pool_swim_detail()
+    for sample in detail.samples[5:]:
+        sample.raw_sample["extras"]["16"] = 0
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+
+    assert laps[-1].total_cycles is None
+    assert laps[-1].avg_stroke_distance is None
+    # 0-stroke lengths hold no stroke data, so the session averages only the set that reported strokes.
+    assert session.total_cycles == 75
+    assert session.avg_stroke_count == pytest.approx(75 / 4, abs=0.06)
+    assert session.avg_stroke_distance == pytest.approx(100 / 75, abs=0.01)
+    assert session.avg_cadence == 25
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_prefers_avg_stroke_freq():
+    detail = _pool_swim_detail(
+        {"stroke_count": 1377, "turn_count": 60, "avg_stroke_freq": 40, "avg_stroke_frequency": 20}
+    )
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.avg_cadence == 40
+
+
+def test_fit_export_pool_swim_session_counts_written_lengths():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {"stroke_count": 999, "turn_count": 40, "sport_type": 9}
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.num_lengths == 7
+    assert session.num_active_lengths == 6
+    assert session.avg_stroke_count == pytest.approx(112 / 6, abs=0.05)
+    assert session.total_cycles == 112
+    assert session.avg_stroke_distance == pytest.approx(150 / 112, abs=0.01)
+    assert session.avg_cadence == 25
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_reported_rates_and_pool_length_win():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {
+        "stroke_count": 112,
+        "turn_count": 6,
+        "pool_width": 50,
+        "avg_stroke_freq": 30,
+        "max_stroke_freq": 35,
+        "sport_type": 9,
+    }
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+
+    assert session.avg_cadence == 30
+    assert session.max_cadence == 35
+    assert session.pool_length == pytest.approx(50.0)
+    assert [lap.avg_cadence for lap in laps] == [None, 25, 25]
+
+
+def test_fit_export_pool_swim_caps_average_rate_at_maximum():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {
+        "stroke_count": 112,
+        "turn_count": 6,
+        "avg_stroke_freq": 40,
+        "max_stroke_freq": 30,
+        "sport_type": 9,
+    }
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.avg_cadence == 30
+    assert session.max_cadence == 30
+
+
+def test_fit_export_pool_swim_caps_derived_rate_at_reported_maximum():
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "max_stroke_freq": 20})
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.avg_cadence == 20
+    assert session.max_cadence == 20
+
+
+def test_fit_export_pool_swim_caps_report_only_average_rate():
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "avg_stroke_freq": 40, "max_stroke_freq": 30})
+    fit = _parse_fit(render_export(detail, "fit").payload)
+
+    assert _fit_sessions(fit)[0].avg_cadence == 30
+    assert _fit_sessions(fit)[0].max_cadence == 30
+    assert _fit_laps(fit)[0].avg_cadence == 30
+
+
+def test_fit_export_pool_swim_caps_average_at_measured_maximum():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "avg_stroke_freq": 50, "sport_type": 9}
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.avg_cadence == 28
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_ignores_implausible_report_pool_width():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "pool_width": 5, "sport_type": 9}
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.pool_length == pytest.approx(25.0)
+
+
+def test_fit_export_pool_swim_measured_pool_length_beats_report_estimate():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 7, "sport_type": 9}
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.pool_length == pytest.approx(25.0)
+
+
+def test_fit_export_pool_swim_ignores_zero_stroke_rate():
+    from fit_tool.profile.messages.record_message import RecordMessage
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    for sample in detail.samples[5:]:
+        sample.raw_sample["extras"]["16"] = 0
+        sample.raw_sample["extras"]["17"] = 0
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+    last_lengths = [
+        length
+        for length in _fit_lengths(fit)
+        if length.length_type == LengthType.ACTIVE.value and length.start_time >= 1793700677000
+    ]
+    last_records = [record for record in (r.message for r in fit.records) if isinstance(record, RecordMessage) and record.timestamp > 1793700677000]
+
+    assert laps[2].avg_cadence is None
+    assert laps[2].max_cadence is None
+    assert [length.avg_swimming_cadence for length in last_lengths] == [None, None]
+    assert [record.cadence for record in last_records] == [None, None]
+    assert session.avg_cadence == 25
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_zero_stroke_lengths_have_no_stroke_fields():
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    for sample in detail.samples[5:]:
+        sample.raw_sample["extras"]["16"] = 0
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    last_lengths = [
+        length
+        for length in _fit_lengths(fit)
+        if length.length_type == LengthType.ACTIVE.value and length.start_time >= 1793700677000
+    ]
+
+    assert [length.total_strokes for length in last_lengths] == [None, None]
+
+
+def test_fit_export_pool_swim_session_maximum_rate_covers_every_lap():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "max_stroke_freq": 25, "sport_type": 9}
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_ignores_sample_cadence_for_session_rate():
+    detail = _pool_swim_detail({"turn_count": 60, "max_stroke_freq": 30})
+    detail.samples[0].cadence = 100
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.avg_cadence is None
+    assert session.max_cadence == 30
+
+
+def test_fit_export_pool_swim_length_without_pace_uses_previous_end():
+    detail = _real_pool_swim_detail()
+    detail.samples[0].raw_sample.pop("pace")
+
+    laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
+
+    # Without its pace, the first length starts at the session start, so there is no leading rest lap.
+    assert [lap.num_lengths for lap in laps] == [4, 2]
+
+
+def test_fit_export_pool_swim_omits_derived_rate_that_rounds_to_zero():
+    detail = _pool_swim_detail({"stroke_count": 20, "turn_count": 60})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.avg_cadence is None
+
+
+def test_fit_export_pool_swim_omits_reported_rate_that_rounds_to_zero():
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "max_stroke_freq": 0.4})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.max_cadence is None
+    assert session.avg_cadence == 30
+
+
+@pytest.mark.parametrize("rate_key", ["avg_stroke_freq", "avg_stroke_frequency"])
+def test_fit_export_pool_swim_omits_reported_average_rate_that_rounds_to_zero(rate_key):
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, rate_key: 0.4})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    # 0.4 strokes/min rounds to 0, so the derived 30 strokes/min stands instead.
+    assert session.avg_cadence == 30
+
+
+def test_fit_export_pool_swim_without_length_count_writes_strokes():
+    detail = _pool_swim_detail({"stroke_count": 600})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_cycles == 600
+    assert session.num_lengths is None
+    assert session.pool_length is None
+
+
+def test_fit_export_pool_swim_falls_back_to_report_pool_length_when_lengths_differ():
+    detail = _real_pool_swim_detail()
+    detail.samples[0].distance_meters = 20.0
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    # Mixed written lengths give no pool length, so the report distance over turn count decides.
+    assert session.pool_length == pytest.approx(25.0)
+
+
+def test_fit_export_pool_swim_skips_length_with_non_integer_end_time():
+    detail = _real_pool_swim_detail()
+    detail.samples[3].raw_sample["extras"]["1"] = "1793700677"
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+
+    assert len(active_lengths) == 5
+
+
+def test_fit_export_pool_swim_ignores_boolean_stroke_count():
+    detail = _pool_swim_detail({"stroke_count": True, "turn_count": 60})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_cycles is None
+
+
+def test_fit_export_pool_swim_ignores_boolean_posture():
+    detail = _pool_swim_detail({"stroke_count": 10, "turn_count": 2, "main_posture": True})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.swim_stroke is None
+
+
+def test_fit_export_pool_swim_lengths_carry_speed_and_calories():
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+
+    assert [(length.avg_speed, length.total_calories) for length in active_lengths] == [
+        (0.417, 16),
+        (0.735, 9),
+        (0.568, 11),
+        (0.641, 10),
+        (0.5, 13),
+        (0.676, 9),
+    ]
+
+
+def test_fit_export_pool_swim_laps_carry_speed_and_calories():
+    laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
+
+    assert [(lap.avg_speed, lap.total_calories) for lap in laps] == [(None, None), (0.565, 46), (0.575, 22)]
+
+
+def test_fit_export_pool_swim_records_carry_speed_and_rate():
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    records = [record.message for record in fit.records if isinstance(record.message, RecordMessage)]
+
+    assert [(record.speed, record.cadence) for record in records] == [
+        (None, None),
+        (0.0, None),
+        (0.417, 23),
+        (0.735, 28),
+        (0.568, 25),
+        (0.641, 26),
+        (0.5, 25),
+        (0.676, 25),
+    ]
+
+
+def test_fit_export_pool_swim_lengths_are_indexed_length_events():
+    lengths = _fit_lengths(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
+
+    assert [(length.message_index, length.event, length.event_type) for length in lengths] == [
+        (index, Event.LENGTH.value, EventType.STOP.value) for index in range(7)
+    ]
+
+
+def test_fit_export_pool_swim_laps_are_indexed():
+    laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
+
+    assert [lap.message_index for lap in laps] == [0, 1, 2]
+
+
+def test_fit_export_pool_swim_session_points_at_first_lap_in_metric_pool():
+    session = _fit_sessions(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))[0]
+
+    assert (session.first_lap_index, session.pool_length_unit) == (0, DisplayMeasure.METRIC.value)
+
+
+@pytest.mark.parametrize(
+    ("main_posture", "swim_stroke"),
+    [
+        (0, SwimStroke.MIXED),
+        (1, SwimStroke.BREASTSTROKE),
+        (2, SwimStroke.FREESTYLE),
+        (3, SwimStroke.BACKSTROKE),
+        (4, SwimStroke.BUTTERFLY),
+    ],
+)
+def test_fit_export_pool_swim_maps_mi_fitness_style_to_fit_stroke(main_posture, swim_stroke):
+    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "main_posture": main_posture})
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.swim_stroke == swim_stroke.value
+
+
+def test_fit_export_pool_swim_cadence_fallback_counts_stroked_lengths_only():
+    detail = _real_pool_swim_detail()
+    for sample in detail.samples:
+        if isinstance(sample.raw_sample.get("extras"), dict):
+            sample.raw_sample["extras"].pop("17", None)
+    for sample in detail.samples[5:]:
+        sample.raw_sample["extras"]["16"] = 0
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    # 75 strokes in the 177 s of the set that reported them, not over the whole 264 s of swimming.
+    assert session.avg_cadence == 25
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_uses_lengths_without_swim_report():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {}
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_cycles == 112
+    assert session.num_lengths == 7
+    assert session.num_active_lengths == 6
+    assert session.pool_length == pytest.approx(25.0)
+    assert session.avg_stroke_distance == pytest.approx(150 / 112, abs=0.01)
+    assert session.avg_cadence == 25
+    assert session.max_cadence == 28
+
+
+def test_fit_export_pool_swim_average_speed_uses_lap_span():
+    detail = _real_pool_swim_detail()
+    detail.activity.duration_seconds = 200
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_timer_time == 265.0
+    assert session.avg_speed == pytest.approx(150 / 265, abs=0.001)
+
+
+def test_fit_export_pool_swim_session_timestamp_keeps_the_activity_end():
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+
+    # The activity ends a second after the last lap, and the session timestamp follows the activity.
+    assert session.timestamp == 1793700765000
+    assert laps[-1].timestamp == 1793700764000
+
+
+def test_fit_export_pool_swim_laps_tile_the_session():
+    fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+
+    assert laps[0].start_time == session.start_time
+    assert sum(lap.total_elapsed_time for lap in laps) == session.total_elapsed_time
+    assert sum(lap.total_distance for lap in laps) == session.total_distance
+    for lap, next_lap in zip(laps, laps[1:]):
+        assert next_lap.start_time == lap.start_time + round(lap.total_elapsed_time * 1000)
+    assert all(lap.total_elapsed_time == lap.total_timer_time for lap in laps)
+    assert all(length.total_elapsed_time == length.total_timer_time for length in _fit_lengths(fit))
+
+
+def test_fit_export_pool_swim_laps_cover_lengths_past_the_report_duration():
+    detail = _real_pool_swim_detail()
+    last_length_end = detail.activity.end_time + 10
+    detail.samples[6].raw_sample["extras"]["1"] = last_length_end
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+    activity = _fit_activities(fit)[0]
+
+    assert [lap.total_elapsed_time for lap in laps] == [1.0, 177.0, 98.0]
+    assert sum(lap.total_elapsed_time for lap in laps) == session.total_elapsed_time == 276.0
+    assert session.timestamp == laps[-1].timestamp == last_length_end * 1000
+    assert activity.timestamp == last_length_end * 1000
+    assert activity.total_timer_time == session.total_timer_time == 276.0
+    assert activity.local_timestamp == _fit_local_timestamp(last_length_end, 0)
+
+
+def test_fit_export_pool_swim_writes_trailing_rest_lap():
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    detail.activity.duration_seconds = 300
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    session = _fit_sessions(fit)[0]
+    idle_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value]
+
+    assert [lap.total_elapsed_time for lap in laps] == [1.0, 177.0, 87.0, 35.0]
+    assert laps[-1].total_distance == 0.0
+    assert laps[-1].num_active_lengths == 0
+    assert len(idle_lengths) == 2
+    assert sum(lap.total_elapsed_time for lap in laps) == session.total_elapsed_time == 300.0
+
+
+def test_fit_export_pool_swim_skips_length_without_swim_time():
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    detail.samples[3].raw_sample["extras"]["1"] = 1793700638
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+
+    assert len(active_lengths) == 5
+    assert all(length.total_timer_time > 0 for length in _fit_lengths(fit))
+    session = _fit_sessions(fit)[0]
+    assert session.num_active_lengths == 5
+    assert session.total_distance == 125.0
+    assert session.avg_speed == pytest.approx(125 / 265, abs=0.001)
+
+
+def test_fit_export_pool_swim_skips_length_without_end_time():
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    detail.samples[3].raw_sample["extras"].pop("1")
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+
+    assert len(active_lengths) == 5
+
+
+def test_fit_export_pool_swim_ignores_implausible_written_pool_length():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {}
+    for sample in detail.samples:
+        if sample.distance_meters:
+            sample.distance_meters = 5.0
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.pool_length is None
+
+
+def test_fit_export_pool_swim_without_any_strokes_keeps_report_summary():
+    detail = _real_pool_swim_detail()
+    for sample in detail.samples:
+        if isinstance(sample.raw_sample.get("extras"), dict):
+            sample.raw_sample["extras"]["16"] = 0
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    # The lengths carry no stroke data, so the report's stroke summary stands.
+    assert session.total_cycles == 112
+    assert session.avg_stroke_count == pytest.approx(112 / 6, abs=0.05)
+    assert session.avg_stroke_distance == pytest.approx(150 / 112, abs=0.01)
+    assert session.avg_cadence == 25
+
+
+def test_fit_export_pool_swim_without_strokes_or_report_has_no_cadence():
+    detail = _real_pool_swim_detail()
+    detail.activity.raw_report = {}
+    for sample in detail.samples:
+        if isinstance(sample.raw_sample.get("extras"), dict):
+            sample.raw_sample["extras"]["16"] = 0
+            sample.raw_sample["extras"].pop("17", None)
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_cycles is None
+    assert session.avg_cadence is None
+    assert session.avg_stroke_count is None
+
+
+def test_fit_export_pool_swim_lap_stroke_distance_uses_stroked_lengths():
+    detail = _real_pool_swim_detail()
+    detail.samples[1].raw_sample["extras"]["16"] = 0
+
+    laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
+
+    assert laps[1].total_cycles == 59
+    assert laps[1].avg_stroke_distance == pytest.approx(75 / 59, abs=0.01)
+
+
+def test_fit_export_pool_swim_lap_cadence_without_rates_uses_active_time():
+    detail = _real_pool_swim_detail()
+    for sample in detail.samples[:4]:
+        sample.raw_sample["extras"].pop("17")
+    detail.samples[1].raw_sample["pace"] = 100  # 25 s for 25 m, leaving 9 s of rest after the first length
+
+    laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
+
+    assert laps[1].total_elapsed_time == laps[1].total_timer_time == 177.0
+    assert laps[1].avg_cadence == 27
+    assert laps[1].max_cadence is None
+
+
+def test_fit_export_pool_swim_session_cadence_uses_active_time():
+    detail = _real_pool_swim_detail()
+    detail.activity.duration_seconds = 400
+    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "sport_type": 9}
+    for sample in detail.samples:
+        if isinstance(sample.raw_sample.get("extras"), dict):
+            sample.raw_sample["extras"].pop("17", None)
+
+    session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
+
+    assert session.total_elapsed_time == 400.0
+    assert session.avg_cadence == 25
+
+
+def test_fit_export_pool_swim_strava_totals_come_from_laps():
+    laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
+
+    assert sum(lap.total_distance for lap in laps) == pytest.approx(150.0)
+    assert sum(lap.total_timer_time for lap in laps if lap.total_distance > 0) == pytest.approx(264.0)
+
+
+def test_fit_export_pool_swim_writes_rest_lap_between_sets():
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    detail.samples[5].raw_sample["pace"] = 108  # 27 s for 25 m, leaving 23 s of rest before the set
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    idle_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value]
+
+    assert [lap.total_distance for lap in laps] == [0.0, 100.0, 0.0, 50.0]
+    assert [lap.num_active_lengths for lap in laps] == [0, 4, 0, 2]
+    assert len(idle_lengths) == 2
+    assert sum(lap.total_elapsed_time for lap in laps) == _fit_sessions(fit)[0].total_elapsed_time
+
+
+def test_fit_export_pool_swim_rest_inside_set_is_idle_length():
+    from fit_tool.profile.profile_type import LengthType
+
+    detail = _real_pool_swim_detail()
+    detail.samples[1].raw_sample["pace"] = 100  # 25 s for 25 m, leaving 9 s of rest after the first length
+
+    fit = _parse_fit(render_export(detail, "fit").payload)
+    laps = _fit_laps(fit)
+    idle_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value]
+
+    assert [lap.num_lengths for lap in laps] == [1, 5, 2]
+    assert [lap.num_active_lengths for lap in laps] == [0, 4, 2]
+    assert laps[1].total_elapsed_time == laps[1].total_timer_time == 177.0
+    assert len(idle_lengths) == 2

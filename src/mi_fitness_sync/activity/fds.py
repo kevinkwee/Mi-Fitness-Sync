@@ -19,6 +19,11 @@ from mi_fitness_sync.fds.sport_reports import SportReport, download_and_parse_sp
 
 logger = logging.getLogger(__name__)
 
+FDS_SPORT_RECORD_FILE_TYPE = 0
+FDS_SPORT_REPORT_FILE_TYPE = 1
+FDS_GPS_FILE_TYPE = 2
+FDS_RECOVERY_RATE_FILE_TYPE = 3
+
 
 def _raw_sport_sample(sample: SportSample) -> dict[str, Any]:
     """Keep the FDS values that ActivitySample has no field for (e.g. per-length swim data)."""
@@ -28,11 +33,6 @@ def _raw_sport_sample(sample: SportSample) -> dict[str, Any]:
     if sample.extras:
         raw["extras"] = {str(type_id): value for type_id, value in sorted(sample.extras.items())}
     return raw
-
-FDS_SPORT_RECORD_FILE_TYPE = 0
-FDS_SPORT_REPORT_FILE_TYPE = 1
-FDS_GPS_FILE_TYPE = 2
-FDS_RECOVERY_RATE_FILE_TYPE = 3
 
 
 @dataclass(slots=True, frozen=True)
