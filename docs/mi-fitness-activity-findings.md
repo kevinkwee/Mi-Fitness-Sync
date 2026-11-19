@@ -276,16 +276,65 @@ The FDS response is a map keyed by `suffix_timestamp` pairs (underscore separato
 
 ### Swimming
 
-| JSON Field | Java Type |
+| JSON Field | Java Type | Binary report type |
+|---|---|---|
+| `stroke_count` | `Integer` | 35 |
+| `main_posture` | `Integer` | 36 |
+| `avg_stroke_freq` | `Integer` | None. `SportReportBaseParser` maps type 37, but no report parser declares it. |
+| `avg_stroke_frequency` | `Integer` | 157 (minimum parser version 7) |
+| `max_stroke_freq` | `Integer` | 38 |
+| `turn_count` | `Integer` | 39 |
+| `avg_swolf` | `Integer` | 40 |
+| `best_swolf` | `Integer` | 41 |
+| `pool_width` | `Integer` | 42 |
+
+The last column gives the `SwimmingReportParser` type that carries each field in the binary report. See [mi-fitness-fds-findings.md](mi-fitness-fds-findings.md) for the binary report layout.
+
+`SchemaReportParser` (`com.xiaomi.fit.fitness.parser.schema.sport`) also sets these fields from schema keys:
+
+| Schema key | `SportBasicReport` field (JSON name) |
 |---|---|
-| `stroke_count` | `Integer` |
-| `main_posture` | `Integer` |
-| `avg_stroke_freq` | `Integer` |
-| `max_stroke_freq` | `Integer` |
-| `turn_count` | `Integer` |
-| `avg_swolf` | `Integer` |
-| `best_swolf` | `Integer` |
-| `pool_width` | `Integer` |
+| `strokeCount`, `totalArmPull` | `stroke_count` |
+| `mainPosture`, `mainStroke` | `main_posture` |
+| `avgStrokeFreq` | `avg_stroke_freq` |
+| `avgStrokeFrequency` | `avg_stroke_frequency` |
+| `maxStrokeFreq`, `maxStrokeFrequency` | `max_stroke_freq` |
+| `turnCount`, `skiingRuns` | `turn_count` |
+| `avgSwolf` | `avg_swolf` |
+| `bestSwolf` | `best_swolf` |
+| `poolWidth`, `swimmingPoolWidth` | `pool_width` |
+
+`HmSportReportParse` (`com.xiaomi.fit.fitness.device.p104hm.parse.repo`) sets six swim fields from the JSON it parses:
+
+| JSON key | `SportBasicReport` field | Conversion |
+|---|---|---|
+| `total_strokes` | `stroke_count` | Direct |
+| `swim_pool_length` | `pool_width` | Direct |
+| `swim_style` | `main_posture` | Through `HMParseUtilKt.matchSwimType` |
+| `total_trips` | `turn_count` | Direct |
+| `avg_stroke_speed` | `avg_stroke_freq` | Multiplied by 60 and rounded |
+| `max_stroke_speed` | `max_stroke_freq` | Multiplied by 60 and rounded |
+
+`main_posture` uses the swimming posture codes declared by `com.xiaomi.fit.data.common.data.sport.SwimmingPosture` and resolved by the private `SportShareUtil.getSwimmingPostureStr` (`com.xiaomi.fitness.detail.util`), which the public `SportShareUtil.getPostureStr` calls:
+
+| Code | Posture | String resource |
+|---|---|---|
+| 0 | Medley (`MEDLEY`) | `trail_swimming_medley` |
+| 1 | Breaststroke (`BREASTSTROKE`) | `trail_swimming_breastStroke` |
+| 2 | Freestyle (`FREESTYLE`) | `trail_swimming_crawl` |
+| 3 | Backstroke (`BACKSTROKE`) | `trail_swimming_backStroke` |
+| 4 | Butterfly (`BUTTERFLY_STROKE`) | `trail_swimming_butterflyStroke` |
+| -1 | Unknown (`UNKNOWN`) | `trail_swimming_butterflyStroke` |
+
+`getSwimmingPostureStr` handles codes 0 to 3 and returns `trail_swimming_butterflyStroke` for every other value, so code 4 and -1 both display as butterfly.
+
+The average stroke rate shown for a swim (`SportReportComputeUtil.getAvgStrokeFeq`, `com.xiaomi.fit.data.common.data.sport.util`) is `avg_stroke_freq` when that field is present. Otherwise `getAvgStrokeFeq` computes it with integer division, which returns 0 when `duration` is 0:
+
+```java
+strokeCount * 60 / duration
+```
+
+`getAvgStrokeFeq` returns null only when both `avg_stroke_freq` and `stroke_count` are absent. Its callers include `SportDetailStrokeFragment` (`com.xiaomi.fitness.detail.inner`) and `SportRecordUtil` (`com.xiaomi.fitness.util`).
 
 ### Power (Cycling)
 
@@ -576,3 +625,5 @@ The following areas are partially or incompletely recovered:
 - **FDS binary parsing and sport type coverage:** See [mi-fitness-fds-findings.md](mi-fitness-fds-findings.md) for FDS-specific decompilation gaps including binary parser coverage, file type handling, and FDS upload/download internals.
 
 - **`CloudSyncBaseRequest` sync orchestration:** The class that orchestrates `pullAndSaveSportReportByTime` and `pullAndSaveSportReportByWM` is referenced in metadata but its implementation is partially obfuscated, making the full sync scheduling logic incomplete.
+
+- **`avg_stroke_frequency` consumers:** No decompiled Java calls `getAvgStrokeFrequency()`. `YRNSportModule` (`com.xiaomi.wearable.yrn.components.sport`) serializes the whole `SportBasicReport` with Gson and passes it to React Native. Whether the React Native bundle reads `avg_stroke_frequency` cannot be determined because the bundle is not part of the decompiled output.

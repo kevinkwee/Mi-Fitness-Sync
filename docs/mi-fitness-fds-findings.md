@@ -630,6 +630,21 @@ All 21 parser classes reside in `com.xiaomi.fit.fitness.parser.sport.record` and
 
 For sport reports (fileType=1), parser dispatch is separate. Notably, proto_type 15 (Hiking) maps to `HikingReportParser` for reports, while its record parser is the shared `OutdoorSportRecordParser`.
 
+`SwimmingReportParser` (`com.xiaomi.fit.fitness.parser.sport.report`) declares the swimming-specific report fields. Minimum parser version is the lowest parser version that reads the field.
+
+| Binary report type | Field | Bytes | Minimum parser version |
+|---|---|---|---|
+| 35 | `stroke_count` | 2 | 1 |
+| 36 | `main_posture` | 1 | 1 |
+| 38 | `max_stroke_freq` | 1 | 1 |
+| 39 | `turn_count` | 2 | 1 |
+| 40 | `avg_swolf` | 2 | 1 |
+| 41 | `best_swolf` | 2 | 1 |
+| 42 | `pool_width` | 1 | 1 |
+| 157 | `avg_stroke_frequency` | 1 | 7 |
+
+`SportReportBaseParser` maps type 37 to `setAvgStrokeFreq`, but no report parser declares type 37. The Field column holds the `SportBasicReport` JSON names.
+
 ### Data Validity Lengths
 
 `FitnessDataValidity.getSportRecordValidityLen()` returns the expected `dataValid` byte count per sport type and version. Its switch statement covers proto_types 1–25, mirroring the parser dispatch table above.
@@ -669,6 +684,55 @@ Parsed output consists of `OneSportRecord` objects (`com.xiaomi.fit.fitness.pars
 | `spo2` | Blood oxygen percentage |
 
 Sport-specific metrics vary by parser class and include stroke rate, swing metrics, diving depth, power, resistance, and others.
+
+### Swimming Record Layout
+
+`SwimmingRecordParser` always reads the one-dimensional layout, whatever the parser version, so the version dispatch above does not describe swimming records. Each record carries its own `endTime` (field type 1), and the fields after `swolf` are read only when the leading `swimmingType` byte is 0.
+
+| Field type | Field | Bytes | Minimum parser version | Present when |
+|---|---|---|---|---|
+| -1 | `swimmingType` | 1 | 1 | always |
+| 1 | `endTime` | 4 | 1 | always |
+| 11 | `mainPosture` | 1 | 1 | always |
+| 12 | `pace` | 2 | 1 | always |
+| 13 | `swolf` | 2 | 1 | always |
+| 9 | `distance` | 2 | 1 | `swimmingType` is 0 |
+| 2 | `calories` | 2 | 1 | `swimmingType` is 0 |
+| 16 | `strokeCount` | 2 | 1 | `swimmingType` is 0 |
+| 10 | `turnCount` | 2 | 1 | `swimmingType` is 0 |
+| 17 | `strokeFreq` | 1 | 1 | `swimmingType` is 0 |
+| 18 | `unknownStrokeFreq` | 1 | 1 | `swimmingType` is 0 |
+| 19 | `breastStrokeFreq` | 1 | 1 | `swimmingType` is 0 |
+| 20 | `crawlStrokeFreq` | 1 | 1 | `swimmingType` is 0 |
+| 21 | `backStrokeFreq` | 1 | 1 | `swimmingType` is 0 |
+| 22 | `butterflyStrokeFreq` | 1 | 1 | `swimmingType` is 0 |
+| 3 | `totalCal` | 2 | 2 | `swimmingType` is 0 |
+| 81 | `freeBreathAngle` | 1 | 3 | `swimmingType` is 0 |
+| 82 | `freePitchAngle` | 1 | 3 | `swimmingType` is 0 |
+| 83 | `frogBreathAngle` | 1 | 3 | `swimmingType` is 0 |
+| 84 | `frogSkiDuration` | 2 | 3 | `swimmingType` is 0 |
+| 85 | `swimHrCount` | 4 | 3 | `swimmingType` is 0 |
+| 86 | `swimHr` | 1 per value, repeated `swimHrCount` times | 3 | `swimmingType` is 0 |
+
+Field names come from `SportRecordBaseParser.DataItemType`. Numeric values are little-endian, and the swimming layouts leave `isUnsigned` at its default, so they are read as unsigned. `swimHr` sets `countsType` 85 and is stored as raw bytes; the code that turns those bytes into integers is not decompiled.
+
+### Swim Record Conversion
+
+`FitnessSportTypeUtils.getTheSportRecordKeys(protoSportType)` returns the swimming record keys for proto_types 9 and 10: `SwimPassage`, `SwimSwolf`, `SwimStrokeFreq`, `SwimStrokeCount`, `SwimPace`, `SwimmingInfo`, `Hr`, `FreeBreathAngle`, `FreePitchAngle`, `FrogBreathAngle`, `FrogSkiDuration` and `SwimmingHr`. JADX renames the heart rate key to the field `f31207Hr`.
+
+`SportRecordConverter.processCommonSportRecord` maps records by `type`:
+
+| Record `type` | Output | `SportRecordKey` |
+|---|---|---|
+| 0 | Pace, SWOLF, stroke count and stroke rate series | `SwimPace`, `SwimSwolf`, `SwimStrokeCount`, `SwimStrokeFreq` |
+| 1 | `SwimmingPassage` with start time, end time, posture (-1 when the record has none), pace and SWOLF | `SwimPassage` |
+| 2 | `SwimmingPassage` with the same fields | `SwimmingInfo` |
+
+`SportRecordConverter.getTheValueBySportKey` returns pace, SWOLF, stroke count and stroke rate only for type 0 records. For proto_type 9 with a record version of 3 or later, `convertSportRecord` also creates an `ITSportDetailInfo` for each type 0 record and stores it in a local list that the method does not add to the returned map.
+
+`processCommonSportRecord` turns each `SwimmingHr` value into a one-second `Hr` item, and the items run consecutively from the start time of the record that carries them. `SportRecordBaseParser.processSportRecordList` runs once per `SportRecord` and chains its type 1 records: the first starts at `SportRecord.getStartTime()`, and each later one starts at the end time of the previous type 1 record in the same `SportRecord`.
+
+`SchemaRecordParser` (`com.xiaomi.fit.fitness.parser.schema.sport`) sets `OneSportRecord.type` from `FitnessRecordKey.strokeType`, `FitnessRecordKey.movementsType` and a literal `dataType` key.
 
 ### GPS Data
 
@@ -769,3 +833,9 @@ The following areas are partially or incompletely recovered:
 - **Extended sport_type → proto_type mapping:** The API returns both `sport_type` and `proto_type` independently. The server-side mapping from extended sport_type values (100+) to their corresponding proto_type is not present in the decompiled client code. Only empirical observation of API responses can establish the full mapping.
 
 - **Sport display name strings:** `FitnessSportType.Companion.getSportRes()` references obfuscated resource IDs (e.g., `t2k.f113702J1`) for display names. The actual localized strings are in Android resource XML files and cannot be directly correlated to specific English names from the decompiled Java alone.
+
+- **Swim record type mapping:** `SportRecordBaseParser.setSportRecordItemValue()` is not decompiled (JADX reports the method dump skipped), so how the binary `swimmingType` field (field type -1) becomes `OneSportRecord.type` is unresolved. The converter's handling of types 0, 1 and 2 is recovered, but the `swimmingType` values that produce them are not.
+
+- **`SwimmingInfo` record semantics:** Records with `type` 2 are converted to `SwimmingPassage` objects under the `SwimmingInfo` key, with the same fields as type 1 records. What a type 2 record represents is not recovered, and no decompiled code reads the `SwimmingInfo` key.
+
+- **Swim metric scaling:** The meaning of field types 18 to 22 and 81 to 84 is known from the `DataItemType` names (`unknownStrokeFreq`, `breastStrokeFreq`, `crawlStrokeFreq`, `backStrokeFreq`, `butterflyStrokeFreq`, `freeBreathAngle`, `freePitchAngle`, `frogBreathAngle`, `frogSkiDuration`). `getTheValueBySportKey` returns the matching `OneSportRecord` values for the `FrogBreathAngle`, `FrogSkiDuration`, `FreePitchAngle` and `FreeBreathAngle` keys. The units and scaling of these values are not recovered.
