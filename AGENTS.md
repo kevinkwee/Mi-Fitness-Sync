@@ -516,7 +516,8 @@ Update `README.md` when you add new features, endpoints, or significant changes.
 `auth/client.py` replays the Mi Fitness app's Passport login for the `miothealth` service.
 
 - `GET /pass/serviceLogin` returns the `_sign`, `qs`, and `callback` meta values, then `POST /pass/serviceLoginAuth2` sends the MD5 hash of the password.
-- Each challenge raises a typed error that `cli/app.py` resolves interactively: `CaptchaRequiredError` (code `87001`), `Step2RequiredError` (code `81003`), and `NotificationRequiredError` (a `notificationUrl` in the response, completed through Xiaomi's email-code identity endpoints).
+- Each challenge raises a typed error that `cli/app.py` resolves interactively: `CaptchaRequiredError` (code `87001`), `Step2RequiredError` (code `81003`), and `NotificationRequiredError` (a `notificationUrl` in the response, completed through Xiaomi's email-code identity endpoints). Answering one challenge can raise another, so the CLI resolves them one after another, up to 5 (`MAX_LOGIN_CHALLENGES`).
+- `auth/client.py` maps Xiaomi result codes to typed errors, including `VerificationCodeRejectedError` when Xiaomi rejects an emailed code, so `cli/app.py` never branches on raw codes.
 - A successful login yields `ssecurity` and `nonce`, then a GET of the STS `location` with `clientSign` (Base64 SHA-1 of `nonce=<nonce>&<ssecurity>`) yields the `serviceToken` cookie. `ssecurity` and `serviceToken` must come from the same login. In the notification branch Xiaomi issues them only after the challenge is completed.
 
 ### 2. Auth State

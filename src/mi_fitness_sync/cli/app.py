@@ -12,12 +12,13 @@ import tempfile
 from dataclasses import asdict, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import get_args
 
 from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
 from mi_fitness_sync.activity.formatting import parse_cli_time
 from mi_fitness_sync.activity.models import Activity, ActivityDetail
 from mi_fitness_sync.activity.utils import render_activities_table
-from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, MetaLoginData, MiFitnessAuthClient
+from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, LoginSession, MetaLoginData, MiFitnessAuthClient
 from mi_fitness_sync.auth.state import utc_now_iso
 from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
 from mi_fitness_sync.cli.speed_parser import parse_speed_input
@@ -32,12 +33,19 @@ from mi_fitness_sync.exceptions import (
     NotificationRequiredError,
     Step2RequiredError,
     StravaError,
+    VerificationCodeRejectedError,
     XiaomiApiError,
 )
 from mi_fitness_sync.paths import get_captcha_dir, get_exports_dir
 
 
 logger = logging.getLogger(__name__)
+
+LoginChallenge = CaptchaRequiredError | Step2RequiredError | NotificationRequiredError
+LOGIN_CHALLENGE_ERRORS: tuple[type[MiFitnessError], ...] = get_args(LoginChallenge)
+MAX_LOGIN_CHALLENGES = 5
+RESEND_COMMAND = "resend"
+CANCEL_COMMAND = "cancel"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--email", help="Mi / Xiaomi account email")
     login_parser.add_argument("--password", help="Mi / Xiaomi account password")
     login_parser.add_argument("--state-path", help="Override the persisted auth state path")
+    login_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     logout_parser = subparsers.add_parser("logout", help="Delete the persisted auth state")
     logout_parser.add_argument("--state-path", help="Override the persisted auth state path")
@@ -253,20 +262,7 @@ def handle_login(args: argparse.Namespace) -> int:
     device_id = existing_state.device_id if existing_state else MiFitnessAuthClient.generate_device_id()
 
     client = MiFitnessAuthClient(service_id=DEFAULT_SERVICE_ID)
-    try:
-        session = client.login_with_password(
-            email=email,
-            password=password,
-            device_id=device_id,
-        )
-    except CaptchaRequiredError as exc:
-        session = _handle_captcha_challenge(
-            client, exc, email=email, password=password, device_id=device_id,
-        )
-    except Step2RequiredError as exc:
-        session = _handle_step2_verification(client, exc, email=email, device_id=device_id)
-    except NotificationRequiredError as exc:
-        session = _handle_notification_verification(client, exc, email=email, device_id=device_id)
+    session = _login_with_interactive_challenges(client, email=email, password=password, device_id=device_id)
 
     state = session.to_auth_state()
     if existing_state:
@@ -283,6 +279,44 @@ def handle_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def _login_with_interactive_challenges(
+    client: MiFitnessAuthClient,
+    *,
+    email: str,
+    password: str,
+    device_id: str,
+) -> LoginSession:
+    """Log in with the password, resolving each challenge Xiaomi raises, including one raised while answering another."""
+    try:
+        return client.login_with_password(email=email, password=password, device_id=device_id)
+    except LOGIN_CHALLENGE_ERRORS as exc:
+        challenge: LoginChallenge = exc
+
+    for _ in range(MAX_LOGIN_CHALLENGES):
+        try:
+            return _resolve_login_challenge(client, challenge, email=email, password=password, device_id=device_id)
+        except LOGIN_CHALLENGE_ERRORS as exc:
+            challenge = exc
+    raise MiFitnessError(
+        f"Xiaomi asked for more than {MAX_LOGIN_CHALLENGES} verification steps in a row. Try logging in again later."
+    )
+
+
+def _resolve_login_challenge(
+    client: MiFitnessAuthClient,
+    challenge: LoginChallenge,
+    *,
+    email: str,
+    password: str,
+    device_id: str,
+) -> LoginSession:
+    if isinstance(challenge, CaptchaRequiredError):
+        return _handle_captcha_challenge(client, challenge, email=email, password=password, device_id=device_id)
+    if isinstance(challenge, Step2RequiredError):
+        return _handle_step2_verification(client, challenge, email=email, device_id=device_id)
+    return _handle_notification_verification(client, challenge, email=email, device_id=device_id)
+
+
 def handle_logout(args: argparse.Namespace) -> int:
     path = resolve_state_path(args.state_path)
     delete_state(args.state_path)
@@ -296,7 +330,7 @@ def _handle_step2_verification(
     *,
     email: str,
     device_id: str,
-) -> object:
+) -> LoginSession:
     payload = exc.payload
     step1_token = exc.step1_token
     if not step1_token:
@@ -336,20 +370,45 @@ def _handle_notification_verification(
     *,
     email: str,
     device_id: str,
-) -> object:
-    context = client.send_notification_email_code(exc.notification_url)
-
+) -> LoginSession:
+    context = _request_notification_email_code(client, exc)
     print("Identity verification required. Check your email for a verification code.")
-    code = input("Verification code: ").strip()
-    if not code:
-        raise MiFitnessError("Verification code is required.")
 
-    return client.login_with_notification_code(
-        email=email,
-        code=code,
-        context=context,
-        device_id=device_id,
-    )
+    while True:
+        answer = input(f"Verification code ('{RESEND_COMMAND}' for a new code, '{CANCEL_COMMAND}' to stop): ").strip()
+        command = answer.lower()
+        if command == CANCEL_COMMAND:
+            raise MiFitnessError("Login cancelled.")
+        if command == RESEND_COMMAND:
+            _resend_notification_email_code(client, exc)
+            continue
+        if not answer:
+            print("Verification code is required.", file=sys.stderr)
+            continue
+
+        try:
+            return client.login_with_notification_code(email=email, code=answer, context=context, device_id=device_id)
+        except VerificationCodeRejectedError as err:
+            print(f"{format_error(err)} Enter the code again.", file=sys.stderr)
+
+
+def _request_notification_email_code(client: MiFitnessAuthClient, exc: NotificationRequiredError) -> str:
+    try:
+        return client.send_notification_email_code(exc.notification_url)
+    except XiaomiApiError as err:
+        raise MiFitnessError(
+            "Xiaomi requires identity verification.\n"
+            f"{format_error(err)}\nVerification URL: {exc.notification_url}"
+        ) from None
+
+
+def _resend_notification_email_code(client: MiFitnessAuthClient, exc: NotificationRequiredError) -> None:
+    try:
+        client.send_notification_email_code(exc.notification_url)
+    except XiaomiApiError as err:
+        print(f"Could not send a new code: {format_error(err)}", file=sys.stderr)
+        return
+    print("Sent a new verification code.")
 
 
 def _handle_captcha_challenge(
@@ -359,7 +418,7 @@ def _handle_captcha_challenge(
     email: str,
     password: str,
     device_id: str,
-) -> object:
+) -> LoginSession:
     captcha_url = exc.captcha_url
     meta_payload = exc.payload
 

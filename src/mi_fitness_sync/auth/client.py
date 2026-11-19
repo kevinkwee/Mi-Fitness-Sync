@@ -4,11 +4,13 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 from dataclasses import dataclass
+from html import unescape
 from http.cookies import SimpleCookie
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -16,6 +18,7 @@ from mi_fitness_sync.exceptions import (
     CaptchaRequiredError,
     NotificationRequiredError,
     Step2RequiredError,
+    VerificationCodeRejectedError,
     XiaomiApiError,
 )
 from mi_fitness_sync.auth.state import AuthState, utc_now_iso
@@ -31,8 +34,15 @@ URL_LOGIN_STEP2 = f"{ACCOUNT_BASE}/pass/loginStep2"
 URL_IDENTITY_LIST = f"{ACCOUNT_BASE}/identity/list"
 URL_SEND_EMAIL_TICKET = f"{ACCOUNT_BASE}/identity/auth/sendEmailTicket"
 URL_VERIFY_EMAIL = f"{ACCOUNT_BASE}/identity/auth/verifyEmail"
+URL_IDENTITY_RESULT_CHECK = f"{ACCOUNT_BASE}/identity/result/check"
 DEFAULT_SERVICE_ID = "miothealth"
 SAFE_PREFIX = "&&&START&&&"
+EMAIL_VERIFICATION_FLAG = "8"
+MAX_NOTIFICATION_LOGIN_HOPS = 5
+RESULT_CHECK_URL_PATTERN = re.compile(re.escape(URL_IDENTITY_RESULT_CHECK) + r"\?[^\s\"'<>]+")
+# XMPassport result codes RESULT_CODE_EMPTY_VERIFY_CODE (70012), RESULT_CODE_ERROR_VERIFY_CODE (70014),
+# and RESULT_CODE_AUTHENTICATE_FAILED (70016).
+REJECTED_VERIFICATION_CODES = frozenset({70012, 70014, 70016})
 
 
 @dataclass(slots=True)
@@ -255,19 +265,25 @@ class MiFitnessAuthClient:
         )
 
     def send_notification_email_code(self, notification_url: str) -> str:
+        """Ask Xiaomi to email a verification code and return the identity context it belongs to."""
         context = parse_qs(urlparse(notification_url).query).get("context", [""])[0]
         if not context:
             raise XiaomiApiError("Notification URL did not include an identity context.")
         params = {"sid": self.service_id, "context": context}
-        self.session.get(notification_url, timeout=self.timeout)
-        self.session.get(URL_IDENTITY_LIST, params=params, timeout=self.timeout)
-        response = self.session.post(
-            URL_SEND_EMAIL_TICKET,
-            params=params,
-            data={"retry": "0", "icode": "", "_json": "true"},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
+        try:
+            self.session.get(notification_url, timeout=self.timeout).raise_for_status()
+            self.session.get(URL_IDENTITY_LIST, params=params, timeout=self.timeout).raise_for_status()
+            response = self.session.post(
+                URL_SEND_EMAIL_TICKET,
+                params=params,
+                data={"retry": "0", "icode": "", "_json": "true"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise XiaomiApiError(
+                f"Failed to request a Xiaomi verification email ({_describe_request_failure(exc)})."
+            ) from None
         self._raise_for_login_error(self._load_json_payload(response.text))
         return context
 
@@ -280,34 +296,27 @@ class MiFitnessAuthClient:
         device_id: str,
         trust: bool = True,
     ) -> LoginSession:
-        response = self.session.post(
-            URL_VERIFY_EMAIL,
-            params={"_flag": "8", "sid": self.service_id, "context": context},
-            data={"_flag": "8", "ticket": code, "trust": "true" if trust else "false", "_json": "true"},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload = self._load_json_payload(response.text)
-        self._raise_for_login_error(payload)
-        location = payload.get("location")
-        if not location:
-            raise XiaomiApiError("Email verification response did not include a location URL.", payload=payload)
-        # The redirect chain ends at serviceLoginAuth2/end, whose Extension-Pragma header carries
-        # ssecurity and whose Location is the STS URL, same as a password login response.
-        url = location
-        for _ in range(5):
-            response = self.session.get(url, allow_redirects=False, timeout=self.timeout)
-            logger.debug(
-                "notification login hop — status=%s, has_extension_pragma=%s, has_location=%s",
-                response.status_code,
-                bool(self._extension_value(response, "ssecurity")),
-                bool(response.headers.get("Location")),
+        """Submit the emailed verification code and finish the login it unlocks."""
+        try:
+            response = self.session.post(
+                URL_VERIFY_EMAIL,
+                params={"_flag": EMAIL_VERIFICATION_FLAG, "sid": self.service_id, "context": context},
+                data={
+                    "_flag": EMAIL_VERIFICATION_FLAG,
+                    "ticket": code,
+                    "trust": "true" if trust else "false",
+                    "_json": "true",
+                },
+                timeout=self.timeout,
+                allow_redirects=False,
             )
-            if self._extension_value(response, "ssecurity"):
-                break
-            url = response.headers.get("Location")
-            if not url:
-                break
+            response.raise_for_status()
+            completion_url = self._find_verification_completion_url(response, context=context)
+            response = self._follow_to_login_end(completion_url)
+        except requests.RequestException as exc:
+            raise XiaomiApiError(
+                f"Failed to complete the Xiaomi email verification ({_describe_request_failure(exc)})."
+            ) from None
 
         auto_login_url = response.headers.get("Location")
         ssecurity = self._extension_value(response, "ssecurity")
@@ -351,6 +360,67 @@ class MiFitnessAuthClient:
             cookies=self._serialize_cookies(),
         )
 
+    def _find_verification_completion_url(self, response: requests.Response, *, context: str) -> str:
+        payload = _parse_json_object(response.text)
+        if payload is not None:
+            code = payload.get("code")
+            if isinstance(code, int) and code in REJECTED_VERIFICATION_CODES:
+                raise VerificationCodeRejectedError(self._describe_login_error(payload), code=code, payload=payload)
+            self._raise_for_login_error(payload)
+
+        location = self._pick_first_non_empty(
+            payload.get("location") if payload is not None else None,
+            response.headers.get("Location"),
+            self._find_result_check_url(response.text),
+        )
+        if location:
+            return urljoin(URL_VERIFY_EMAIL, str(location))
+
+        logger.debug("Email verification response had no completion URL. Probing identity/result/check.")
+        result_check = self.session.get(
+            URL_IDENTITY_RESULT_CHECK,
+            params={"sid": self.service_id, "context": context},
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        location = self._pick_first_non_empty(result_check.headers.get("Location"))
+        if not location:
+            raise XiaomiApiError("Email verification response did not include a completion URL.")
+        return urljoin(URL_IDENTITY_RESULT_CHECK, str(location))
+
+    def _follow_to_login_end(self, url: str) -> requests.Response:
+        """Follow the post-verification redirects to serviceLoginAuth2/end, which carries ssecurity."""
+        interstitial_retried = False
+        for _ in range(MAX_NOTIFICATION_LOGIN_HOPS):
+            response = self.session.get(url, allow_redirects=False, timeout=self.timeout)
+            has_ssecurity = bool(self._extension_value(response, "ssecurity"))
+            location = response.headers.get("Location")
+            logger.debug(
+                "Notification login hop: status=%s, has_ssecurity=%s, has_location=%s",
+                response.status_code,
+                has_ssecurity,
+                bool(location),
+            )
+            if has_ssecurity:
+                return response
+            if location:
+                url = urljoin(url, location)
+            elif response.status_code == 200 and not interstitial_retried:
+                # Xiaomi can answer once with an interstitial page and redirect when the same URL is requested again.
+                interstitial_retried = True
+            else:
+                raise XiaomiApiError(
+                    f"Notification login stopped at HTTP {response.status_code} before serviceLoginAuth2/end."
+                )
+        raise XiaomiApiError(
+            f"Notification login did not reach serviceLoginAuth2/end within {MAX_NOTIFICATION_LOGIN_HOPS} requests."
+        )
+
+    @staticmethod
+    def _find_result_check_url(text: str) -> str | None:
+        match = RESULT_CHECK_URL_PATTERN.search(text)
+        return unescape(match.group(0)) if match else None
+
     def _build_password_login_form(
         self,
         *,
@@ -393,13 +463,18 @@ class MiFitnessAuthClient:
 
     def _follow_sts(self, *, auto_login_url: str, nonce: str, ssecurity: str) -> requests.Response:
         client_sign = self._generate_client_sign(nonce=nonce, ssecurity=ssecurity)
-        response = self.session.get(
-            auto_login_url,
-            params={"clientSign": client_sign, "_userIdNeedEncrypt": "true"},
-            timeout=self.timeout,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
+        try:
+            response = self.session.get(
+                auto_login_url,
+                params={"clientSign": client_sign, "_userIdNeedEncrypt": "true"},
+                timeout=self.timeout,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise XiaomiApiError(
+                f"Failed to get the Mi Fitness service token ({_describe_request_failure(exc)})."
+            ) from None
         return response
 
     def _extract_service_token(self, response: requests.Response) -> str:
@@ -462,9 +537,7 @@ class MiFitnessAuthClient:
         return serialized
 
     def _load_json_payload(self, text: str) -> dict[str, Any]:
-        raw = text.strip()
-        if raw.startswith(SAFE_PREFIX):
-            raw = raw[len(SAFE_PREFIX) :]
+        raw = _strip_safe_prefix(text)
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -511,10 +584,11 @@ class MiFitnessAuthClient:
         code = payload.get("code")
         if code in (None, 0):
             return
+        raise XiaomiApiError(self._describe_login_error(payload), code=code, payload=payload)
 
+    def _describe_login_error(self, payload: dict[str, Any]) -> str:
         description = self._pick_first_non_empty(payload.get("desc"), payload.get("description"), payload.get("info"))
-        message = description or f"Xiaomi Passport login failed with code {code}."
-        raise XiaomiApiError(message, code=code, payload=payload)
+        return description or f"Xiaomi Passport login failed with code {payload.get('code')}."
 
     def _extract_step1_token(
         self,
@@ -613,3 +687,23 @@ class MiFitnessAuthClient:
                 continue
             return value
         return None
+
+
+def _strip_safe_prefix(text: str) -> str:
+    return text.strip().removeprefix(SAFE_PREFIX)
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """Return the response as a JSON object, or None when Xiaomi answered with something else."""
+    try:
+        payload = json.loads(_strip_safe_prefix(text))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _describe_request_failure(exc: requests.RequestException) -> str:
+    """Summarize a transport failure without the request URL, which carries session tokens."""
+    if exc.response is not None:
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__

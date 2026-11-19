@@ -3,9 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.cli import app as cli
-from mi_fitness_sync.exceptions import CaptchaRequiredError, NotificationRequiredError, Step2RequiredError, XiaomiApiError
+from mi_fitness_sync.exceptions import (
+    CaptchaRequiredError,
+    NotificationRequiredError,
+    Step2RequiredError,
+    VerificationCodeRejectedError,
+    XiaomiApiError,
+)
 from mi_fitness_sync.export.bulk import BulkExportRecord, BulkExportSummary
 from mi_fitness_sync.strava.store import StravaTokenState
 
@@ -1920,14 +1928,227 @@ def test_login_notification_prompts_and_succeeds(monkeypatch, capsys, tmp_path):
     assert "Login succeeded" in captured.out
 
 
-def test_login_notification_empty_code_fails(monkeypatch, capsys, tmp_path):
-    _make_notification_auth_client(monkeypatch, notification_session=None)
-    monkeypatch.setattr(cli, "load_state", lambda path: None)
-    monkeypatch.setattr("builtins.input", lambda prompt: "")
+NOTIFICATION_URL = "https://account.xiaomi.com/fe/service/identity/authStart?sid=miothealth&context=ctx"
+STEP2_PAYLOAD = {"_sign": "sig", "qs": "q", "callback": "cb", "code": 81003}
+CAPTCHA_PAYLOAD = {"_sign": "s", "qs": "q", "callback": "c", "code": 87001}
 
+
+def _login_session():
+    from mi_fitness_sync.auth.state import AuthState
+
+    state = AuthState(
+        email="u@x.com", user_id="uid", c_user_id="cuid",
+        service_id="miothealth", pass_token="pt", service_token="st",
+        ssecurity="ss", psecurity=None, auto_login_url="https://example.com",
+        device_id="DEV123", slh=None, ph=None,
+        sts_cookie_header="cookie", cookies=[],
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    return type("Session", (), {"to_auth_state": lambda self: state})()
+
+
+def _take(outcomes: list):
+    outcome = outcomes.pop(0)
+    if isinstance(outcome, Exception):
+        raise outcome
+    return outcome
+
+
+def _install_auth_client(monkeypatch, *, password=(), step2=(), codes=(), sends=()):
+    """Install an auth client double that plays each method's queued outcomes in order and records calls."""
+    password_outcomes, step2_outcomes, code_outcomes = list(password), list(step2), list(codes)
+    send_outcomes = list(sends)
+    calls: dict[str, list] = {"step2": [], "sends": [], "codes": []}
+
+    class ScriptedAuthClient:
+        generate_device_id = staticmethod(lambda: "DEV123")
+
+        def __init__(self, service_id):
+            pass
+
+        def login_with_password(self, *, email, password, device_id, captcha_code=None, ick=None, meta=None):
+            return _take(password_outcomes)
+
+        def fetch_captcha_image(self, captcha_url):
+            return b"\x89PNG\r\n\x1a\nmock", "ick_val"
+
+        def login_with_step2(self, *, email, step2_code, step1_token, meta, device_id, trust=True):
+            calls["step2"].append(step2_code)
+            return _take(step2_outcomes)
+
+        def send_notification_email_code(self, notification_url):
+            calls["sends"].append(notification_url)
+            return _take(send_outcomes) if send_outcomes else "ctx"
+
+        def login_with_notification_code(self, *, email, code, context, device_id):
+            calls["codes"].append(code)
+            return _take(code_outcomes)
+
+    monkeypatch.setattr(cli, "MiFitnessAuthClient", ScriptedAuthClient)
+    monkeypatch.setattr(cli, "load_state", lambda path: None)
+    return calls
+
+
+def _feed_inputs(monkeypatch, answers: list[str]) -> None:
+    """Answer prompts in order, failing the test on any prompt beyond the scripted ones."""
+    remaining = list(answers)
+
+    def fake_input(prompt):
+        assert remaining, f"Unexpected extra prompt: {prompt}"
+        return remaining.pop(0)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+
+def _run_login(tmp_path) -> int:
     state_path = str(tmp_path / "state.json")
-    exit_code = cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
-    captured = capsys.readouterr()
+    return cli.main(["login", "--email", "u@x.com", "--password", "pass", "--state-path", state_path])
+
+
+def test_login_parser_accepts_verbose():
+    args = cli.build_parser().parse_args(["login", "--verbose"])
+
+    assert args.verbose is True
+
+
+def test_login_notification_empty_code_reprompts(monkeypatch, capsys, tmp_path):
+    _install_auth_client(monkeypatch, password=[NotificationRequiredError(NOTIFICATION_URL)], codes=[_login_session()])
+    _feed_inputs(monkeypatch, ["", "123456"])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 0
+    assert "Verification code is required" in capsys.readouterr().err
+
+
+def test_login_notification_rejected_code_reprompts(monkeypatch, tmp_path):
+    calls = _install_auth_client(
+        monkeypatch,
+        password=[NotificationRequiredError(NOTIFICATION_URL)],
+        codes=[VerificationCodeRejectedError("Rejected", code=70014), _login_session()],
+    )
+    _feed_inputs(monkeypatch, ["000000", "123456"])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 0
+    assert calls["codes"] == ["000000", "123456"]
+
+
+def test_login_notification_other_error_code_aborts(monkeypatch, capsys, tmp_path):
+    _install_auth_client(
+        monkeypatch,
+        password=[NotificationRequiredError(NOTIFICATION_URL)],
+        codes=[XiaomiApiError("Too many attempts", code=70022)],
+    )
+    _feed_inputs(monkeypatch, ["000000"])
+
+    exit_code = _run_login(tmp_path)
 
     assert exit_code == 1
-    assert "Verification code is required" in captured.err
+    assert "Too many attempts (code=70022)" in capsys.readouterr().err
+
+
+def test_login_notification_resend_requests_new_code(monkeypatch, capsys, tmp_path):
+    calls = _install_auth_client(monkeypatch, password=[NotificationRequiredError(NOTIFICATION_URL)], codes=[_login_session()])
+    _feed_inputs(monkeypatch, ["resend", "123456"])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 0
+    assert len(calls["sends"]) == 2
+    assert "Sent a new verification code" in capsys.readouterr().out
+
+
+def test_login_notification_resend_failure_reprompts(monkeypatch, capsys, tmp_path):
+    _install_auth_client(
+        monkeypatch,
+        password=[NotificationRequiredError(NOTIFICATION_URL)],
+        sends=["ctx", XiaomiApiError("Sending limit reached", code=70022)],
+        codes=[_login_session()],
+    )
+    _feed_inputs(monkeypatch, ["resend", "123456"])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 0
+    assert "Sending limit reached (code=70022)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("answer", ["cancel", "CANCEL"])
+def test_login_notification_cancel_aborts_without_submitting(monkeypatch, capsys, tmp_path, answer):
+    calls = _install_auth_client(monkeypatch, password=[NotificationRequiredError(NOTIFICATION_URL)])
+    _feed_inputs(monkeypatch, [answer])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 1
+    assert calls["codes"] == []
+    assert "Login cancelled" in capsys.readouterr().err
+
+
+def test_login_notification_send_failure_shows_verification_url(monkeypatch, capsys, tmp_path):
+    _install_auth_client(
+        monkeypatch,
+        password=[NotificationRequiredError(NOTIFICATION_URL)],
+        sends=[XiaomiApiError("Failed to request a Xiaomi verification email (HTTP 503).")],
+    )
+    _feed_inputs(monkeypatch, [])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 1
+    assert f"Verification URL: {NOTIFICATION_URL}" in capsys.readouterr().err
+
+
+def test_login_captcha_then_notification_reaches_email_prompt(monkeypatch, tmp_path):
+    captcha_dir = _patch_captcha_dir(monkeypatch, tmp_path)
+    _patch_captcha_opener(monkeypatch, result=True, expected_dir=captcha_dir)
+    calls = _install_auth_client(
+        monkeypatch,
+        password=[
+            CaptchaRequiredError("/pass/getCode?icodeType=login", payload=CAPTCHA_PAYLOAD),
+            NotificationRequiredError(NOTIFICATION_URL),
+        ],
+        codes=[_login_session()],
+    )
+    _feed_inputs(monkeypatch, ["xyzw", "123456"])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 0
+    assert calls["codes"] == ["123456"]
+
+
+def test_login_step2_then_notification_reaches_email_prompt(monkeypatch, tmp_path):
+    calls = _install_auth_client(
+        monkeypatch,
+        password=[Step2RequiredError("Step-2 required.", payload=STEP2_PAYLOAD, step1_token="tok")],
+        step2=[NotificationRequiredError(NOTIFICATION_URL)],
+        codes=[_login_session()],
+    )
+    _feed_inputs(monkeypatch, ["111111", "123456"])
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 0
+    assert calls["codes"] == ["123456"]
+
+
+def test_login_endless_challenges_stop_at_limit(monkeypatch, capsys, tmp_path):
+    def step2_challenge():
+        return Step2RequiredError("Step-2 required.", payload=STEP2_PAYLOAD, step1_token="tok")
+
+    calls = _install_auth_client(
+        monkeypatch,
+        password=[step2_challenge()],
+        step2=[step2_challenge() for _ in range(cli.MAX_LOGIN_CHALLENGES)],
+    )
+    _feed_inputs(monkeypatch, ["111111"] * cli.MAX_LOGIN_CHALLENGES)
+
+    exit_code = _run_login(tmp_path)
+
+    assert exit_code == 1
+    assert len(calls["step2"]) == cli.MAX_LOGIN_CHALLENGES
+    assert "verification steps in a row" in capsys.readouterr().err

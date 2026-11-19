@@ -11,6 +11,10 @@ class XiaomiApiError(MiFitnessError):
         self.payload = payload or {}
 
 
+class VerificationCodeRejectedError(XiaomiApiError):
+    """Xiaomi rejected a submitted verification code, and another code can be tried."""
+
+
 class CaptchaRequiredError(MiFitnessError):
     """Captcha is required before login can continue."""
 

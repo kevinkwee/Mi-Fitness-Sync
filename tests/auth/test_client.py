@@ -4,13 +4,16 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from mi_fitness_sync.auth.client import (
     ACCOUNT_BASE,
+    MAX_NOTIFICATION_LOGIN_HOPS,
     MiFitnessAuthClient,
     MetaLoginData,
     SAFE_PREFIX,
     URL_IDENTITY_LIST,
+    URL_IDENTITY_RESULT_CHECK,
     URL_LOGIN_STEP2,
     URL_SEND_EMAIL_TICKET,
     URL_VERIFY_EMAIL,
@@ -19,6 +22,7 @@ from mi_fitness_sync.exceptions import (
     CaptchaRequiredError,
     NotificationRequiredError,
     Step2RequiredError,
+    VerificationCodeRejectedError,
     XiaomiApiError,
 )
 
@@ -663,7 +667,7 @@ class TestNotificationVerification:
             }),
         }
 
-        def mock_post(url, params=None, data=None, timeout=None):
+        def mock_post(url, params=None, data=None, timeout=None, allow_redirects=True):
             posted["url"] = url
             posted["data"] = data
             return self._make_response(text=SAFE_PREFIX + json.dumps({"code": 0, "location": "https://example.com/finish"}))
@@ -699,7 +703,7 @@ class TestNotificationVerification:
     def test_login_with_notification_code_rejected_code_raises(self):
         client = MiFitnessAuthClient()
 
-        def mock_post(url, params=None, data=None, timeout=None):
+        def mock_post(url, params=None, data=None, timeout=None, allow_redirects=True):
             return self._make_response(text=SAFE_PREFIX + json.dumps({"code": 70014, "desc": "Wrong code"}))
 
         client.session.post = mock_post
@@ -708,3 +712,296 @@ class TestNotificationVerification:
             client.login_with_notification_code(
                 email="u@x.com", code="000000", context="ctx123", device_id="DEV1",
             )
+
+
+NOTIFICATION_URL = f"{ACCOUNT_BASE}/fe/service/identity/authStart?sid=miothealth&context=ctx-secret"
+RESULT_CHECK_URL = f"{ACCOUNT_BASE}/identity/result/check?sid=miothealth&identityToken=tok"
+END_URL = f"{ACCOUNT_BASE}/pass/serviceLoginAuth2/end?sid=miothealth&userId=1"
+STS_URL = "https://sts-hlth.io.mi.com/healthapp/sts?nonce=999"
+
+
+def _response(*, status: int = 200, text: str = "", headers: dict | None = None) -> MagicMock:
+    response = MagicMock()
+    response.status_code = status
+    response.text = text
+    response.headers = headers or {}
+    response.cookies = []
+    response.raise_for_status = MagicMock()
+    return response
+
+
+def _login_end_response() -> MagicMock:
+    return _response(
+        status=302,
+        headers={
+            "Extension-Pragma": json.dumps({"ssecurity": "sec", "nonce": 999, "psecurity": "psec"}),
+            "Location": STS_URL,
+        },
+    )
+
+
+class TestLoginWithNotificationCode:
+    """Covers submitting the emailed code and following Xiaomi's answer through to the service token."""
+
+    def _script(
+        self,
+        client: MiFitnessAuthClient,
+        *,
+        verify_response: MagicMock,
+        gets: dict[str, list[MagicMock]],
+        sts_error: requests.RequestException | None = None,
+    ):
+        """Serve *verify_response* for the code POST and queued responses per GET URL, recording every request."""
+        seen: list[tuple[str, str, dict | None]] = []
+
+        def fake_post(url, params=None, data=None, timeout=None, allow_redirects=True):
+            seen.append(("POST", url, params))
+            self.verify_allow_redirects = allow_redirects
+            return verify_response
+
+        def fake_get(url, params=None, timeout=None, allow_redirects=True):
+            seen.append(("GET", url, params))
+            if url == STS_URL:
+                if sts_error is not None:
+                    raise sts_error
+                client.session.cookies.set("serviceToken", "svc")
+                return _response(text="ok")
+            response = gets[url].pop(0)
+            if "Extension-Pragma" in response.headers:
+                client.session.cookies.set("passToken", "pt", domain="account.xiaomi.com")
+                client.session.cookies.set("cUserId", "cuid", domain="account.xiaomi.com")
+            return response
+
+        client.session.post = fake_post
+        client.session.get = fake_get
+        return seen
+
+    def _login(self, client: MiFitnessAuthClient):
+        return client.login_with_notification_code(email="u@x.com", code="123456", context="ctx", device_id="DEV1")
+
+    def test_non_json_answer_follows_location_header(self):
+        client = MiFitnessAuthClient()
+        seen = self._script(
+            client,
+            verify_response=_response(status=302, headers={"Location": RESULT_CHECK_URL}),
+            gets={RESULT_CHECK_URL: [_response(status=302, headers={"Location": END_URL})], END_URL: [_login_end_response()]},
+        )
+
+        self._login(client)
+
+        assert [url for _, url, _ in seen] == [URL_VERIFY_EMAIL, RESULT_CHECK_URL, END_URL, STS_URL]
+
+    def test_verify_post_does_not_follow_redirects(self):
+        client = MiFitnessAuthClient()
+        self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": END_URL})),
+            gets={END_URL: [_login_end_response()]},
+        )
+
+        self._login(client)
+
+        assert self.verify_allow_redirects is False
+
+    def test_json_location_wins_over_location_header(self):
+        client = MiFitnessAuthClient()
+        seen = self._script(
+            client,
+            verify_response=_response(
+                text=json.dumps({"code": 0, "location": END_URL}),
+                headers={"Location": RESULT_CHECK_URL},
+            ),
+            gets={END_URL: [_login_end_response()]},
+        )
+
+        self._login(client)
+
+        assert seen[1][1] == END_URL
+
+    @pytest.mark.parametrize("error_code", [70012, 70014, 70016])
+    def test_rejected_code_raises_typed_error(self, error_code):
+        client = MiFitnessAuthClient()
+        self._script(client, verify_response=_response(text=json.dumps({"code": error_code, "desc": "Bad code"})), gets={})
+
+        with pytest.raises(VerificationCodeRejectedError, match="Bad code"):
+            self._login(client)
+
+    def test_non_integer_error_code_is_not_a_rejected_code(self):
+        client = MiFitnessAuthClient()
+        self._script(client, verify_response=_response(text=json.dumps({"code": [70014], "desc": "Odd"})), gets={})
+
+        with pytest.raises(XiaomiApiError) as exc_info:
+            self._login(client)
+
+        assert not isinstance(exc_info.value, VerificationCodeRejectedError)
+
+    def test_other_error_code_is_not_a_rejected_code(self):
+        client = MiFitnessAuthClient()
+        self._script(client, verify_response=_response(text=json.dumps({"code": 70022, "desc": "Too many"})), gets={})
+
+        with pytest.raises(XiaomiApiError) as exc_info:
+            self._login(client)
+
+        assert not isinstance(exc_info.value, VerificationCodeRejectedError)
+
+    def test_non_json_answer_follows_result_check_link_in_body(self):
+        client = MiFitnessAuthClient()
+        html = f'<html><a href="{RESULT_CHECK_URL.replace("&", "&amp;")}">continue</a></html>'
+        seen = self._script(
+            client,
+            verify_response=_response(text=html),
+            gets={RESULT_CHECK_URL: [_response(status=302, headers={"Location": END_URL})], END_URL: [_login_end_response()]},
+        )
+
+        self._login(client)
+
+        assert seen[1][1] == RESULT_CHECK_URL
+
+    @pytest.mark.parametrize(
+        "verify_body",
+        [pytest.param("", id="empty-body"), pytest.param(json.dumps({"code": 0}), id="json-without-location")],
+    )
+    def test_missing_completion_url_probes_result_check(self, verify_body):
+        client = MiFitnessAuthClient()
+        seen = self._script(
+            client,
+            verify_response=_response(text=verify_body),
+            gets={URL_IDENTITY_RESULT_CHECK: [_response(status=302, headers={"Location": END_URL})], END_URL: [_login_end_response()]},
+        )
+
+        self._login(client)
+
+        assert seen[1] == ("GET", URL_IDENTITY_RESULT_CHECK, {"sid": "miothealth", "context": "ctx"})
+
+    def test_missing_completion_url_everywhere_raises(self):
+        client = MiFitnessAuthClient()
+        self._script(client, verify_response=_response(text=""), gets={URL_IDENTITY_RESULT_CHECK: [_response()]})
+
+        with pytest.raises(XiaomiApiError, match="did not include a completion URL"):
+            self._login(client)
+
+    def test_relative_redirect_resolves_against_account_host(self):
+        client = MiFitnessAuthClient()
+        relative_end = END_URL.removeprefix(ACCOUNT_BASE)
+        seen = self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": RESULT_CHECK_URL})),
+            gets={RESULT_CHECK_URL: [_response(status=302, headers={"Location": relative_end})], END_URL: [_login_end_response()]},
+        )
+
+        self._login(client)
+
+        assert seen[2][1] == END_URL
+
+    def test_interstitial_page_is_retried_once(self):
+        client = MiFitnessAuthClient()
+        self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": END_URL})),
+            gets={END_URL: [_response(text="<html>Xiaomi Account - Tips</html>"), _login_end_response()]},
+        )
+
+        session = self._login(client)
+
+        assert session.ssecurity == "sec"
+
+    def test_interstitial_page_is_not_retried_twice(self):
+        client = MiFitnessAuthClient()
+        interstitial = "<html>Xiaomi Account - Tips</html>"
+        seen = self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": END_URL})),
+            gets={END_URL: [_response(text=interstitial), _response(text=interstitial), _login_end_response()]},
+        )
+
+        with pytest.raises(XiaomiApiError, match="stopped at HTTP 200"):
+            self._login(client)
+
+        assert [url for _, url, _ in seen].count(END_URL) == 2
+
+    def test_error_status_without_redirect_reports_status(self):
+        client = MiFitnessAuthClient()
+        self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": END_URL})),
+            gets={END_URL: [_response(status=403, text="forbidden")]},
+        )
+
+        with pytest.raises(XiaomiApiError, match="stopped at HTTP 403"):
+            self._login(client)
+
+    def test_sts_failure_raises_api_error_without_url(self):
+        client = MiFitnessAuthClient()
+        self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": END_URL})),
+            gets={END_URL: [_login_end_response()]},
+            sts_error=requests.HTTPError(f"500 Server Error for url: {STS_URL}", response=MagicMock(status_code=500)),
+        )
+
+        with pytest.raises(XiaomiApiError) as exc_info:
+            self._login(client)
+
+        assert str(exc_info.value) == "Failed to get the Mi Fitness service token (HTTP 500)."
+
+    def test_redirect_loop_stops_at_hop_limit(self):
+        client = MiFitnessAuthClient()
+        looping = [_response(status=302, headers={"Location": RESULT_CHECK_URL}) for _ in range(MAX_NOTIFICATION_LOGIN_HOPS)]
+        self._script(
+            client,
+            verify_response=_response(text=json.dumps({"code": 0, "location": RESULT_CHECK_URL})),
+            gets={RESULT_CHECK_URL: looping},
+        )
+
+        with pytest.raises(XiaomiApiError, match=f"within {MAX_NOTIFICATION_LOGIN_HOPS} requests"):
+            self._login(client)
+
+    def test_verify_transport_failure_raises_api_error(self):
+        client = MiFitnessAuthClient()
+        client.session.post = MagicMock(side_effect=requests.Timeout("timed out"))
+
+        with pytest.raises(XiaomiApiError, match=r"\(Timeout\)"):
+            self._login(client)
+
+
+class TestSendNotificationEmailCodeFailures:
+    def test_transport_failure_raises_api_error(self):
+        client = MiFitnessAuthClient()
+        client.session.get = MagicMock(side_effect=requests.ConnectionError("refused"))
+
+        with pytest.raises(XiaomiApiError, match=r"\(ConnectionError\)"):
+            client.send_notification_email_code(NOTIFICATION_URL)
+
+    def test_http_error_message_omits_request_url(self):
+        client = MiFitnessAuthClient()
+        failing = _response()
+        failing.raise_for_status.side_effect = requests.HTTPError(
+            f"503 Server Error for url: {URL_IDENTITY_LIST}?context=ctx-secret",
+            response=MagicMock(status_code=503),
+        )
+        client.session.get = MagicMock(side_effect=[_response(), failing])
+        client.session.post = MagicMock(side_effect=AssertionError("sendEmailTicket must not be posted"))
+
+        with pytest.raises(XiaomiApiError) as exc_info:
+            client.send_notification_email_code(NOTIFICATION_URL)
+
+        assert str(exc_info.value) == "Failed to request a Xiaomi verification email (HTTP 503)."
+
+    def test_transport_failure_drops_url_bearing_cause(self):
+        client = MiFitnessAuthClient()
+        client.session.get = MagicMock(side_effect=requests.ConnectionError(f"refused: {NOTIFICATION_URL}"))
+
+        with pytest.raises(XiaomiApiError) as exc_info:
+            client.send_notification_email_code(NOTIFICATION_URL)
+
+        assert exc_info.value.__cause__ is None and exc_info.value.__suppress_context__
+
+    def test_ticket_error_code_raises_with_code(self):
+        client = MiFitnessAuthClient()
+        client.session.get = MagicMock(return_value=_response())
+        client.session.post = MagicMock(return_value=_response(text=json.dumps({"code": 70022, "desc": "Too many requests"})))
+
+        with pytest.raises(XiaomiApiError) as exc_info:
+            client.send_notification_email_code(NOTIFICATION_URL)
+
+        assert exc_info.value.code == 70022

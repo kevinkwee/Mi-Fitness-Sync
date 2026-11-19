@@ -88,6 +88,8 @@ All credentials are entered via CLI arguments or interactive prompts — there a
 
 Commands that access Mi Fitness accept `--state-path` to override the default auth state file location. Commands that access Strava accept `--strava-token-path` to override the default Strava token file location.
 
+The `--verbose` debug output includes request URLs that carry session tokens, so do not share it unredacted.
+
 ### `login`
 
 Logs into Xiaomi Passport for the Mi Fitness service and saves the auth state locally. Email and password can be passed as arguments or entered interactively when omitted. The password prompt does not echo input.
@@ -97,6 +99,10 @@ If Xiaomi requires extra verification, the CLI supports the interactive flows it
 1. Captcha challenges download an image to the local captcha directory and try to open it with the OS default image viewer
 2. Step-2 verification prompts for the email/SMS code in the terminal
 3. Identity verification (`notificationUrl`) sends a code to the account email and prompts for it in the terminal
+
+Xiaomi can ask for a second challenge after you answer the first one, for example, identity verification after a captcha. The CLI handles each one in turn, up to 5.
+
+At the identity verification prompt, type `resend` to get a new email code or `cancel` to stop. An empty or rejected code prompts you again. If Xiaomi cannot send the email, the error shows the verification URL so you can see which check Xiaomi asks for. Approving the sign-in in a browser does not log the CLI in, so run `login` again afterwards.
 
 Examples:
 
@@ -112,6 +118,7 @@ Flags:
 | `--email` | Mi / Xiaomi account email (prompted if omitted) |
 | `--password` | Mi / Xiaomi account password (prompted securely if omitted) |
 | `--state-path` | Override the persisted auth state file path |
+| `--verbose` | Enable debug logging |
 
 ### `logout`
 

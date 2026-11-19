@@ -208,3 +208,6 @@ __marimo__/
 
 # Decompiled files
 /mifitness_android/
+
+# Agent review reports, never committed
+/.github/temp_reports/

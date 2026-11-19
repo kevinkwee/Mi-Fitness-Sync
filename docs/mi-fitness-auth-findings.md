@@ -436,6 +436,90 @@ Only called for SID `xiaomihome`.
 ```
 ---
 
+## Notification-Based Approval
+
+`XMPassport.processLoginContent()` throws `NeedNotificationException` instead of returning `AccountInfo` when a password-login response with `code == 0` carries a non-zero `securityStatus` and the `needProcessNotification` flag is set. `PasswordLoginParams` sets `needProcessNotification` to `true` by default. A relative `notificationUrl` is prefixed with `ACCOUNT_DOMAIN`.
+
+```java
+int iOptInt = jSONObject.optInt("securityStatus", 0);
+if (z && iOptInt != 0) {   // z = needProcessNotification
+    String string6 = jSONObject.getString("notificationUrl");
+```
+
+### NeedNotificationException
+
+`com.xiaomi.accountsdk.account.exception.NeedNotificationException` extends `Exception`.
+
+| Field | Type | Getter |
+|---|---|---|
+| `userId` | `String` | `getUserId()` |
+| `notificationUrl` | `String` | `getNotificationUrl()` |
+| `loginContent` | `SimpleRequest.StringContent` | `getLoginContent()` |
+
+`Step1LoginContext(Exception)` records this branch as `NextStep.NOTIFICATION` with the same `userId`, `notificationUrl`, and login content. The `Parcelable` form of the login content writes only `getBody()`, so the response headers do not survive a parcel round trip.
+
+### State Available at the Throw
+
+| Value | Source |
+|---|---|
+| `userId` | Response header `userId`. The pass-token login reads JSON `userId` instead when `isResultFromCA()` is true |
+| `passToken` | Response header `passToken`, or JSON `passToken` when `isResultFromCA()` is true |
+| `securityStatus` | JSON field `securityStatus` |
+| `notificationUrl` | JSON field `notificationUrl` |
+| `loginContent` | The full `SimpleRequest.StringContent` response |
+
+The throw happens before `parseLoginResult()`. `cUserId`, `ssecurity`, `nonce`, `psecurity`, and `location` are therefore not read from this response, and `getServiceTokenByStsUrl()` does not run.
+
+### UI Wiring
+
+| Class | Behavior |
+|---|---|
+| `PhoneLoginController.passwordLogin()` | Converts the exception into `PasswordLoginCallback.onNeedNotification(serviceId, notificationUrl)` |
+| `LoginUIController.loginByPassword()` | Same conversion for the internal Passport UI |
+| `PasswordLoginFragment._LoginIdPasswordCallback` | Dismisses the loading dialog and calls `startActivity()` with `XiaomiAccountManager.getAccountNotificationActivityIntent("passportapi", notificationUrl, null, null)` |
+| `ConfirmCredentialActivity` | Starts the notification activity with `startActivityForResult(..., 2)` (`REQUEST_CODE_NOTIFICATION_LOGIN`). On `RESULT_OK` it sets its own result and finishes. Any other result shows a re-login toast and leaves the activity open |
+| `RedirectNotificationPageExceptionHandler` | Starts the same notification activity intent for a `NeedNotificationException` and reports the exception as handled |
+
+### Notification Page Completion
+
+`AuthenticatorIntent.getAccountNotificationActivityIntentImpl()` opens `notificationUrl` in `PassportJsbWebViewActivity` with `removeAllCookies(true)`, `closeAfterLogin(true)`, cookie filling for the account domain, and header filling.
+
+No decompiled Passport fragment or activity renders an email-ticket or email-code form for this branch. The page content comes from the server behind `notificationUrl`.
+
+`PassportJsbWebViewActivity` always installs `CookieLoginUrlInterceptor`, which reads, then removes, the account-domain `passInfo` cookie on each URL load:
+
+| `passInfo` | Behavior |
+|---|---|
+| `auth-end` | Handled only when `closeAfterLogin` is set. `BgRunnableAuthEnd` requests the intercepted URL and builds `NotificationAuthResult` from the response headers. `PostRunnableAuthEnd` puts the result under the intent extra `notification_auth_end` and finishes with `RESULT_OK`, or finishes with `RESULT_CANCELED` when no result was built |
+| `login-end` | Builds `AccountInfo` from the `userId` and `passToken` cookies and adds it to `XiaomiAccountManager` when no Xiaomi account exists yet. Finishes with `RESULT_OK` only when `closeAfterLogin` is set. The URL itself is not intercepted |
+
+`CookieLoginUrlInterceptor.BgRunnableAuthEnd` and `NotificationAuthTask` send the same GET, with no parameters and a null cookie map at the call site:
+
+```java
+SimpleRequestForAccount.getAsString(stsUrl, null, null, false)
+```
+
+Both build `NotificationAuthResult` from the response headers of that GET:
+
+| Field | Response header |
+|---|---|
+| `userId` | `userId` |
+| `serviceToken` | `serviceToken` |
+| `pSecurity_ph` | `passportsecurity_ph` |
+| `pSecurity_slh` | `passportsecurity_slh` |
+
+The binder interfaces for this path are present:
+
+| Member | Role |
+|---|---|
+| `MiLoginResult.ERROR_NEED_NOTIFICATION` | Result code `3` for this branch |
+| `MiPassportLoginFuture.NotificationAuthFuture` | Future for the `auth-end` completion |
+| `MiPassportLoginFuture.NotificationLoginFuture` | Future for the `login-end` completion |
+| `MiPassportUIController.onNotificationAuthEnd()` | Delegates to `IMiPassportUIControllerService.onNotificationAuthEnd()` |
+| `MiPassportUIController.onNotificationLoginEnd()` | Delegates to `IMiPassportUIControllerService.onNotificationLoginEnd()` |
+
+---
+
 ## Step-2 Verification (Code 81003)
 
 When the server returns code `81003` (constant `RESULT_CODE_VERIFICATION` in `XMPassport`), `processLoginContent()` raises `NeedVerificationException`. The decompiled SDK and controller layers preserve the state needed for a `/loginStep2` retry, but the decompiled password-login UI in this APK does not show a concrete code-entry screen for this path.
@@ -702,6 +786,8 @@ The following areas are partially or incompletely decompiled:
 
 - **`DeviceIdHasher.hashDeviceInfo()`:** Referenced by `HashedDeviceIdUtil.getRuntimeDeviceIdHashed()` but the hashing implementation is not fully visible.
 
-- **`NeedNotificationException` flow:** Some accounts trigger a security notification flow (`securityStatus != 0`) that redirects to a `notificationUrl`. The full handling of this flow within the Passport UI is partially decompiled.
+- **`NeedNotificationException` service side:** The notification page launch and the `CookieLoginUrlInterceptor` completion path are decompiled. The AIDL-generated `IMiPassportUIControllerService.Default`, `Stub`, and `Stub.Proxy` are present, but no concrete subclass of `IMiPassportUIControllerService.Stub` was found, so the service behind `onNotificationAuthEnd()` and `onNotificationLoginEnd()` was not located. No reader of the `notification_auth_end` intent extra was found either.
+
+- **Hosted notification pages:** `PassportJsbWebViewActivity` loads the page behind `notificationUrl` from the server. The HTML and JavaScript of that page, including any email-ticket request or email-code entry, are not part of the APK.
 
 - **Step-2 verification UI consumer:** `XMPassport.loginByStep2()` and `LoginUIController.loginByStep2()` are decompiled, but no Passport fragment or activity in this APK was found that collects `step2code` for a password-login `NeedVerificationException`. `VerifyCodeLoginFragment` is the phone-ticket login flow.
