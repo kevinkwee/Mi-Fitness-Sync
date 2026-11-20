@@ -434,38 +434,6 @@ uv run mypy
 
 CI runs formatting, lint, and type checks on pushes to `main` and on every pull request, together with a build whose packaging metadata is validated. The test suite runs on Ubuntu and Windows for Python 3.12 and 3.13.
 
-## Releasing
-
-Releases publish to PyPI through GitHub Actions trusted publishing, so no API token is stored in the repository. One-time setup before the first release:
-
-1. On PyPI, add a pending publisher for the project `mi-fitness-sync` with owner `kevinkwee`, repository `Mi-Fitness-Sync`, workflow `publish.yml`, and environment `pypi`.
-2. In the GitHub repository settings, create an environment named `pypi` and, optionally, add a deployment protection rule such as a required reviewer.
-
-After that, the `Publish` workflow triggers on any tag matching `v*` and does the rest in order:
-
-1. Runs the test suite and builds the sdist and wheel.
-2. Stops if the tag does not match `__version__` in `src/mi_fitness_sync/__init__.py`, so a mistyped tag cannot claim a version on PyPI.
-3. Uploads both files to PyPI through trusted publishing.
-4. Creates the GitHub release for the tag, using that version's section of [`CHANGELOG.md`](https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/CHANGELOG.md) as the notes, and falls back to generated notes when the changelog has no section for it.
-
-To cut a release:
-
-1. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`, and put a fresh empty `## [Unreleased]` heading above it.
-2. At the bottom of that file, point the `[Unreleased]` link at `compare/v<x.y.z>...HEAD` and add `[x.y.z]: .../releases/tag/v<x.y.z>`.
-3. Set `__version__` in `src/mi_fitness_sync/__init__.py` to that version, commit both files, and push the commit.
-4. Push a tag that matches that version exactly:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-A manual `Publish` run stops after the build and never writes to PyPI. The PyPI badges and the `pip install mi-fitness-sync` command only resolve once the first release is published.
-
-## Support
-
-If this project saved you time, you can buy me a coffee on [Ko-fi](https://ko-fi.com/kevinkwee27). Support is optional and does not affect how the project is maintained.
-
 ## Local Auth Storage
 
 By default, Mi Fitness auth state is stored in the user profile under `~/.mi_fitness_sync/auth/auth.json`.
@@ -498,5 +466,10 @@ Both files contain sensitive credentials and should not be shared or committed t
 
 If you use this on a shared machine, treat the local auth state like a credential.
 
+## Sponsor
+
+If `mi-fitness-sync` saves you time, you can [support its development on Ko-fi](https://ko-fi.com/kevinkwee27).
+
 ## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+MIT. See [LICENSE](LICENSE).
