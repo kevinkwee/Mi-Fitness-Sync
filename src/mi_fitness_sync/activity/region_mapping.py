@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from mi_fitness_sync.exceptions import MiFitnessError
 
-
 COUNTRY_CODE_TO_REGION = {
     "AC": "sg",
     "AD": "de",
@@ -254,6 +253,9 @@ COUNTRY_CODE_TO_REGION = {
 }
 
 
+COUNTRY_CODE_LENGTH = 2
+
+
 def normalize_country_code(value: str | None) -> str | None:
     if value is None:
         return None
@@ -262,10 +264,9 @@ def normalize_country_code(value: str | None) -> str | None:
     if not normalized:
         return None
 
-    if len(normalized) != 2 or not normalized.isalpha():
-        raise MiFitnessError(
-            "Country overrides must use a two-letter country code such as ID, GB, or US."
-        )
+    if len(normalized) != COUNTRY_CODE_LENGTH or not normalized.isalpha():
+        msg = "Country overrides must use a two-letter country code such as ID, GB, or US."
+        raise MiFitnessError(msg)
 
     return normalized
 
@@ -277,6 +278,7 @@ def region_for_country_code(value: str | None) -> str | None:
 
     region = COUNTRY_CODE_TO_REGION.get(country_code)
     if region is None:
-        raise MiFitnessError(f"Unsupported Mi Fitness country override: {country_code}.")
+        msg = f"Unsupported Mi Fitness country override: {country_code}."
+        raise MiFitnessError(msg)
 
     return region

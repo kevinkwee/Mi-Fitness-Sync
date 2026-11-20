@@ -5,7 +5,6 @@ from pathlib import Path
 
 from mi_fitness_sync.paths import get_cache_dir
 
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR = get_cache_dir() / "fds"

@@ -23,11 +23,15 @@ def make_aes_key(length: int = 16) -> bytes:
     return b"\xab" * length
 
 
-def build_header(timestamp: int, tz: int, version: int, sport_type: int, data_valid: bytes) -> bytes:
+def build_header(
+    timestamp: int, tz: int, version: int, sport_type: int, data_valid: bytes
+) -> bytes:
     return struct.pack("<I", timestamp) + bytes([tz, version, sport_type]) + b"\x00" + data_valid
 
 
-def build_one_dimen_segment(record_count: int, start_time: int, it_summary: bytes, records: bytes) -> bytes:
+def build_one_dimen_segment(
+    record_count: int, start_time: int, it_summary: bytes, records: bytes
+) -> bytes:
     return struct.pack("<II", record_count, start_time) + it_summary + records
 
 
@@ -35,8 +39,14 @@ def build_gps_v1_record(timestamp: int, longitude: float, latitude: float) -> by
     return struct.pack("<Iff", timestamp, longitude, latitude)
 
 
-def build_gps_v2_record(timestamp: int, longitude: float, latitude: float, accuracy: float, speed_raw: int) -> bytes:
-    return struct.pack("<Iff", timestamp, longitude, latitude) + struct.pack("<f", accuracy) + struct.pack("<H", speed_raw)
+def build_gps_v2_record(
+    timestamp: int, longitude: float, latitude: float, accuracy: float, speed_raw: int
+) -> bytes:
+    return (
+        struct.pack("<Iff", timestamp, longitude, latitude)
+        + struct.pack("<f", accuracy)
+        + struct.pack("<H", speed_raw)
+    )
 
 
 def build_gps_v3_record(
@@ -52,7 +62,9 @@ def build_gps_v3_record(
     return base + struct.pack("<ff", altitude, hdop)
 
 
-def build_gps_binary(timestamp: int, tz: int, version: int, sport_type: int, data_valid: bytes, body: bytes) -> bytes:
+def build_gps_binary(
+    timestamp: int, tz: int, version: int, sport_type: int, data_valid: bytes, body: bytes
+) -> bytes:
     return build_header(timestamp, tz, version, sport_type, data_valid) + body
 
 

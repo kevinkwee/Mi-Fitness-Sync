@@ -12,19 +12,19 @@ from mi_fitness_sync.fds.sport_reports import (
 )
 
 
-def test_compute_report_validity_len_free_training_v1():
+def test_compute_report_validity_len_free_training_v1() -> None:
     assert compute_report_validity_len(FREE_TRAINING_REPORT_FIELDS, 1) == 2
 
 
-def test_compute_report_validity_len_outdoor_v1():
+def test_compute_report_validity_len_outdoor_v1() -> None:
     assert compute_report_validity_len(OUTDOOR_SPORT_REPORT_FIELDS, 1) == 4
 
 
-def test_compute_report_validity_len_outdoor_v4():
+def test_compute_report_validity_len_outdoor_v4() -> None:
     assert compute_report_validity_len(OUTDOOR_SPORT_REPORT_FIELDS, 4) == 5
 
 
-def test_parse_report_validity_bitmap():
+def test_parse_report_validity_bitmap() -> None:
     data_valid = bytes([0xFF, 0xFE])
     valid_map = parse_report_validity(FREE_TRAINING_REPORT_FIELDS, version=1, data_valid=data_valid)
     assert valid_map[1] is True
@@ -33,7 +33,7 @@ def test_parse_report_validity_bitmap():
     assert valid_map[34] is True
 
 
-def test_parse_free_training_report_v1():
+def test_parse_free_training_report_v1() -> None:
     sport_type = 8
     version = 1
     timestamp = 1700000000
@@ -66,13 +66,14 @@ def test_parse_free_training_report_v1():
     assert report.avg_hr == 130
     assert report.max_hr == 175
     assert report.min_hr == 95
+    assert report.train_effect is not None
     assert abs(report.train_effect - 3.5) < 0.01
     assert report.recovery_time == 600
     assert report.hr_extreme_duration == 120
     assert report.hr_aerobic_duration == 1800
 
 
-def test_parse_outdoor_sport_report_v1():
+def test_parse_outdoor_sport_report_v1() -> None:
     sport_type = 1
     version = 1
 
@@ -115,13 +116,15 @@ def test_parse_outdoor_sport_report_v1():
     assert report.max_hr == 180
     assert report.min_hr == 110
     assert report.vo2max == 55
+    assert report.max_speed is not None
     assert abs(report.max_speed - 4.2) < 0.01
+    assert report.rise_height is not None
     assert abs(report.rise_height - 50.5) < 0.1
     assert report.max_pace == 400
     assert report.min_pace == 300
 
 
-def test_parse_report_partial_validity():
+def test_parse_report_partial_validity() -> None:
     sport_type = 8
     version = 1
 
@@ -156,19 +159,19 @@ def test_parse_report_partial_validity():
     assert report.recovery_time is None
 
 
-def test_parse_report_unsupported_sport_type():
+def test_parse_report_unsupported_sport_type() -> None:
     header = struct.pack("<I", 1700000000) + bytes([32, 1, 99, 0x00])
     assert parse_sport_report(header, 99) is None
 
 
-def test_get_report_data_valid_len_free_training_v1():
+def test_get_report_data_valid_len_free_training_v1() -> None:
     assert get_report_data_valid_len(8, 1) == 2
 
 
-def test_get_report_data_valid_len_outdoor_run_versions():
+def test_get_report_data_valid_len_outdoor_run_versions() -> None:
     assert get_report_data_valid_len(1, 1) == 4
     assert get_report_data_valid_len(1, 4) == 5
 
 
-def test_get_report_data_valid_len_unsupported_sport_type():
+def test_get_report_data_valid_len_unsupported_sport_type() -> None:
     assert get_report_data_valid_len(99, 1) is None

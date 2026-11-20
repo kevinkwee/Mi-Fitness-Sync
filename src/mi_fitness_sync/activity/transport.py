@@ -3,17 +3,27 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any
 
 import requests
 
-from mi_fitness_sync.activity.crypto import decrypt_response_payload, encrypt_query_params, generate_nonce
-from mi_fitness_sync.auth.state import AuthState
+from mi_fitness_sync.activity.crypto import (
+    decrypt_response_payload,
+    encrypt_query_params,
+    generate_nonce,
+)
+from mi_fitness_sync.activity.region_mapping import region_for_country_code
 from mi_fitness_sync.config import USER_AGENT
 from mi_fitness_sync.exceptions import XiaomiApiError
-from mi_fitness_sync.http_retry import DEFAULT_MAX_ATTEMPTS, is_retryable_status_code, retry_delay_seconds
-from mi_fitness_sync.activity.region_mapping import region_for_country_code
+from mi_fitness_sync.http_retry import (
+    DEFAULT_MAX_ATTEMPTS,
+    is_retryable_status_code,
+    retry_delay_seconds,
+)
 
+if TYPE_CHECKING:
+    from mi_fitness_sync.auth.state import AuthState
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +62,7 @@ class ActivityTransport:
         *,
         timeout: int,
         country_code: str | None,
-    ):
+    ) -> None:
         self._session = session
         self._auth_state = auth_state
         self._timeout = timeout
@@ -202,13 +212,17 @@ class ActivityTransport:
                 time.sleep(delay)
                 continue
 
-            if response.status_code == 401:
-                raise XiaomiApiError(f"{request_label} was rejected with 401 auth err.")
+            if response.status_code == HTTPStatus.UNAUTHORIZED:
+                msg = f"{request_label} was rejected with 401 auth err."
+                raise XiaomiApiError(msg)
             if response.ok:
                 return response
-            if attempt_index >= DEFAULT_MAX_ATTEMPTS - 1 or not is_retryable_status_code(response.status_code):
+            if attempt_index >= DEFAULT_MAX_ATTEMPTS - 1 or not is_retryable_status_code(
+                response.status_code
+            ):
+                msg = f"{request_label} failed with HTTP {response.status_code}."
                 raise XiaomiApiError(
-                    f"{request_label} failed with HTTP {response.status_code}.",
+                    msg,
                     payload={"response_text": response.text[:500]},
                 )
 
@@ -222,3 +236,6 @@ class ActivityTransport:
                 DEFAULT_MAX_ATTEMPTS - 1,
             )
             time.sleep(delay)
+
+        msg = f"{request_label} failed after {DEFAULT_MAX_ATTEMPTS} attempts."
+        raise XiaomiApiError(msg)

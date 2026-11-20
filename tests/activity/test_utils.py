@@ -10,25 +10,28 @@ from mi_fitness_sync.activity.utils import (
 )
 
 
-def test_render_activities_table_handles_empty_list():
+def test_render_activities_table_handles_empty_list() -> None:
     assert render_activities_table([]) == "No activities matched the requested time window."
 
 
-def test_parse_activity_id_round_trips_list_format():
+def test_parse_activity_id_round_trips_list_format() -> None:
     assert parse_activity_id("sid-1:key-1:1717200000") == ("sid-1", "key-1", 1717200000)
 
 
-def test_build_fds_suffix_matches_android_server_key_format():
-    assert build_fds_suffix(
-        sid="123456789",
-        timestamp=1700000003,
-        timezone_offset=28,
-        sport_type=22,
-        file_type=0,
-    ) == "A_FTZRzY_98O8HYCOBHMq32eZZczDTKeuNEE"
+def test_build_fds_suffix_matches_android_server_key_format() -> None:
+    assert (
+        build_fds_suffix(
+            sid="123456789",
+            timestamp=1700000003,
+            timezone_offset=28,
+            sport_type=22,
+            file_type=0,
+        )
+        == "A_FTZRzY_98O8HYCOBHMq32eZZczDTKeuNEE"
+    )
 
 
-def test_build_fds_suffix_uses_underscore_separator():
+def test_build_fds_suffix_uses_underscore_separator() -> None:
     result = build_fds_suffix(
         sid="test-sid",
         timestamp=1000000,
@@ -41,18 +44,18 @@ def test_build_fds_suffix_uses_underscore_separator():
     assert ":" not in result.split("_", 1)[0]
 
 
-def test_find_fds_entry_exact_server_key_match():
+def test_find_fds_entry_exact_server_key_match() -> None:
     downloads = {"abc_123": {"url": "http://x", "obj_key": "k"}}
     assert find_fds_entry(downloads, "abc", 123) == {"url": "http://x", "obj_key": "k"}
 
 
-def test_find_fds_entry_no_match_returns_none():
+def test_find_fds_entry_no_match_returns_none() -> None:
     downloads = {"xyz": {"url": "http://x", "obj_key": "k"}}
     assert find_fds_entry(downloads, "abc", 123) is None
 
 
 class TestMergeFdsSamplesIntoTrackPoints:
-    def test_merges_hr_and_cadence_by_timestamp(self):
+    def test_merges_hr_and_cadence_by_timestamp(self) -> None:
         track_points = [
             TrackPoint(
                 timestamp=1000,
@@ -115,7 +118,7 @@ class TestMergeFdsSamplesIntoTrackPoints:
         assert track_points[1].heart_rate == 125
         assert track_points[1].cadence == 82
 
-    def test_no_overwrite_existing_values(self):
+    def test_no_overwrite_existing_values(self) -> None:
         track_points = [
             TrackPoint(
                 timestamp=1000,
@@ -151,7 +154,7 @@ class TestMergeFdsSamplesIntoTrackPoints:
         assert track_points[0].heart_rate == 115
         assert track_points[0].cadence == 80
 
-    def test_unmatched_timestamps_left_alone(self):
+    def test_unmatched_timestamps_left_alone(self) -> None:
         track_points = [
             TrackPoint(
                 timestamp=1000,
@@ -186,12 +189,13 @@ class TestMergeFdsSamplesIntoTrackPoints:
 
         assert track_points[0].heart_rate is None
 
-    def test_empty_inputs(self):
+    def test_empty_inputs(self) -> None:
         merge_fds_samples_into_track_points([], [])
 
 
-def _make_activity(**overrides) -> Activity:
-    defaults = dict(
+def _make_activity() -> Activity:
+    """Build the activity the table tests render."""
+    return Activity(
         activity_id="sid:key:1",
         sid="sid",
         key="key",
@@ -209,25 +213,23 @@ def _make_activity(**overrides) -> Activity:
         raw_record={},
         raw_report={},
     )
-    defaults.update(overrides)
-    return Activity(**defaults)
 
 
-def test_render_activities_table_with_strava_matched():
+def test_render_activities_table_with_strava_matched() -> None:
     activities = [_make_activity()]
     result = render_activities_table(activities, strava_status={"sid:key:1": True})
     assert "Strava" in result
     assert "\u2713" in result
 
 
-def test_render_activities_table_with_strava_not_matched():
+def test_render_activities_table_with_strava_not_matched() -> None:
     activities = [_make_activity()]
     result = render_activities_table(activities, strava_status={"sid:key:1": False})
     assert "Strava" in result
     assert "\u2717" in result
 
 
-def test_render_activities_table_without_strava():
+def test_render_activities_table_without_strava() -> None:
     activities = [_make_activity()]
     result = render_activities_table(activities)
     assert "Strava" not in result

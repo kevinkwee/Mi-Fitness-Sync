@@ -8,11 +8,16 @@ from dataclasses import dataclass
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-
 logger = logging.getLogger(__name__)
 
 _AES_IV = b"1234567887654321"
 SPORT_SERVER_DATA_ID_LEN = 7
+
+UINT8_BYTES = 1
+UINT16_BYTES = 2
+UINT32_BYTES = 4
+UINT64_BYTES = 8
+FLOAT32_BYTES = 4
 
 TYPE_END_TIME = 1
 TYPE_CALORIES = 2
@@ -81,9 +86,10 @@ class FdsHeader:
 def parse_fds_header(data: bytes, data_valid_len: int) -> FdsHeader:
     header_len = SPORT_SERVER_DATA_ID_LEN + 1 + data_valid_len
     if len(data) < header_len:
-        raise ValueError(
+        msg = (
             f"Decrypted data too short ({len(data)} bytes) for expected header ({header_len} bytes)"
         )
+        raise ValueError(msg)
 
     timestamp = struct.unpack_from("<I", data, 0)[0]
     tz_in_15min = data[4]
@@ -182,6 +188,9 @@ class FourDimenValid:
     low: bool
 
 
+_ABSENT_FOUR_DIMEN = FourDimenValid(exist=False, high=False, middle=False, low=False)
+
+
 def parse_one_dimen_valid(
     data_types: list[OneDimenType],
     version: int,
@@ -201,7 +210,8 @@ def parse_one_dimen_valid(
         byte_idx = bit_index // 8
         bit_idx = bit_index % 8
         if byte_idx >= len(data_valid):
-            raise ValueError(f"dataValid too short: need byte {byte_idx}, have {len(data_valid)}")
+            msg = f"dataValid too short: need byte {byte_idx}, have {len(data_valid)}"
+            raise ValueError(msg)
         valid_map[data_type.type_id] = bool(data_valid[byte_idx] & (1 << (7 - bit_idx)))
         bit_index += 1
     return valid_map
@@ -216,15 +226,20 @@ def parse_four_dimen_valid(
     nibble_index = 0
     for data_type in data_types:
         if data_type.max_support_version is not None and version > data_type.max_support_version:
-            valid_map[data_type.type_id] = FourDimenValid(False, False, False, False)
+            valid_map[data_type.type_id] = _ABSENT_FOUR_DIMEN
             continue
         if data_type.support_version > version:
-            valid_map[data_type.type_id] = FourDimenValid(False, False, False, False)
+            valid_map[data_type.type_id] = _ABSENT_FOUR_DIMEN
             continue
         byte_idx = nibble_index // 2
         if byte_idx >= len(data_valid):
-            raise ValueError(f"dataValid too short: need byte {byte_idx}, have {len(data_valid)}")
-        nibble = (data_valid[byte_idx] & 0xF0) >> 4 if nibble_index % 2 == 0 else data_valid[byte_idx] & 0x0F
+            msg = f"dataValid too short: need byte {byte_idx}, have {len(data_valid)}"
+            raise ValueError(msg)
+        nibble = (
+            (data_valid[byte_idx] & 0xF0) >> 4
+            if nibble_index % 2 == 0
+            else data_valid[byte_idx] & 0x0F
+        )
         valid_map[data_type.type_id] = FourDimenValid(
             exist=bool(nibble & 0x8),
             high=bool(nibble & 0x4),
@@ -236,13 +251,14 @@ def parse_four_dimen_valid(
 
 
 def read_uint(data: memoryview | bytes, offset: int, size: int) -> tuple[int, int]:
-    if size == 1:
+    if size == UINT8_BYTES:
         return data[offset], offset + 1
-    if size == 2:
+    if size == UINT16_BYTES:
         return struct.unpack_from("<H", data, offset)[0], offset + 2
-    if size == 4:
+    if size == UINT32_BYTES:
         return struct.unpack_from("<I", data, offset)[0], offset + 4
-    raise ValueError(f"Unsupported read size {size}")
+    msg = f"Unsupported read size {size}"
+    raise ValueError(msg)
 
 
 def extract_high_value(raw_value: int, data_type: FourDimenType) -> int:

@@ -1,28 +1,70 @@
 from __future__ import annotations
 
 import gzip
+import itertools
+from typing import Any
 from xml.etree import ElementTree as ET
 
+import pytest
 from fit_tool.fit_file import FitFile
 from fit_tool.profile.messages.activity_message import ActivityMessage
 from fit_tool.profile.messages.lap_message import LapMessage
 from fit_tool.profile.messages.record_message import RecordMessage
 from fit_tool.profile.messages.session_message import SessionMessage
-from fit_tool.profile.profile_type import DisplayMeasure, Event, EventType, LengthType, Sport, SubSport, SwimStroke
-
-import pytest
+from fit_tool.profile.profile_type import (
+    DisplayMeasure,
+    Event,
+    EventType,
+    LengthType,
+    Sport,
+    SubSport,
+    SwimStroke,
+)
 
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
-from mi_fitness_sync.export.render import render_export, _clamp_heart_rate, _clamp_cadence, _is_valid_coordinate, _clamp_calories, _cadence_spm_to_rpm, _fit_local_timestamp
+from mi_fitness_sync.exceptions import MiFitnessError
+from mi_fitness_sync.export.render import (
+    _cadence_spm_to_rpm,
+    _clamp_cadence,
+    _clamp_calories,
+    _clamp_heart_rate,
+    _fit_local_timestamp,
+    render_export,
+)
 from mi_fitness_sync.export.smoothing import smooth_track, total_haversine_distance
 from mi_fitness_sync.fds.sport_reports import SportReport
+
+
+def _require_longitude(point: TrackPoint) -> float:
+    """Return the longitude of *point*, failing the test when it is unset."""
+    if point.longitude is None:
+        msg = "expected track point longitude was not set"
+        raise AssertionError(msg)
+    return point.longitude
+
+
+def _require_element(element: ET.Element | None) -> ET.Element:
+    """Return *element*, failing the test when the lookup found nothing."""
+    if element is None:
+        msg = "expected XML element was not found"
+        raise AssertionError(msg)
+    return element
+
+
+def _element_text(element: ET.Element) -> str:
+    """Return the text of *element*, which must be set."""
+    if element.text is None:
+        msg = "expected XML element text was not set"
+        raise AssertionError(msg)
+    return element.text
+
 
 GPX_NS = {"gpx": "http://www.topografix.com/GPX/1/1"}
 TPX_NS = {"gpxtpx": "http://www.garmin.com/xmlschemas/TrackPointExtension/v1"}
 ALL_NS = {**GPX_NS, **TPX_NS}
 
 
-def test_render_export_gpx_contains_track_points(sample_activity_detail):
+def test_render_export_gpx_contains_track_points(sample_activity_detail: ActivityDetail) -> None:
     export = render_export(sample_activity_detail, "gpx")
 
     root = ET.fromstring(export.payload)
@@ -32,7 +74,7 @@ def test_render_export_gpx_contains_track_points(sample_activity_detail):
     assert len(root.findall(".//gpx:trkpt", namespace)) == 1
 
 
-def test_render_export_tcx_contains_trackpoints(sample_activity_detail):
+def test_render_export_tcx_contains_trackpoints(sample_activity_detail: ActivityDetail) -> None:
     export = render_export(sample_activity_detail, "tcx")
 
     root = ET.fromstring(export.payload)
@@ -42,14 +84,14 @@ def test_render_export_tcx_contains_trackpoints(sample_activity_detail):
     assert len(root.findall(".//tcx:Trackpoint", namespace)) == 1
 
 
-def test_render_export_fit_returns_fit_bytes(sample_activity_detail):
+def test_render_export_fit_returns_fit_bytes(sample_activity_detail: ActivityDetail) -> None:
     export = render_export(sample_activity_detail, "fit")
 
     assert export.file_format == "fit"
     assert b".FIT" in export.payload[:16]
 
 
-def test_render_export_gzip_wraps_output(sample_activity_detail):
+def test_render_export_gzip_wraps_output(sample_activity_detail: ActivityDetail) -> None:
     export = render_export(sample_activity_detail, "gpx", compress=True)
 
     assert export.compressed is True
@@ -134,25 +176,23 @@ def _strength_detail_with_samples() -> ActivityDetail:
     )
 
 
-def test_tcx_export_uses_summary_calories_and_sample_hr():
+def test_tcx_export_uses_summary_calories_and_sample_hr() -> None:
     detail = _strength_detail_with_samples()
     export = render_export(detail, "tcx")
     root = ET.fromstring(export.payload)
     ns = {"tcx": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
 
-    lap_calories = root.find(".//tcx:Lap/tcx:Calories", ns)
-    avg_hr = root.find(".//tcx:Lap/tcx:AverageHeartRateBpm/tcx:Value", ns)
-    max_hr = root.find(".//tcx:Lap/tcx:MaximumHeartRateBpm/tcx:Value", ns)
-
-    assert lap_calories is not None
-    assert int(lap_calories.text) == 372
+    lap_calories = _require_element(root.find(".//tcx:Lap/tcx:Calories", ns))
+    avg_hr = _require_element(root.find(".//tcx:Lap/tcx:AverageHeartRateBpm/tcx:Value", ns))
+    max_hr = _require_element(root.find(".//tcx:Lap/tcx:MaximumHeartRateBpm/tcx:Value", ns))
+    assert int(_element_text(lap_calories)) == 372
     assert avg_hr is not None
-    assert int(avg_hr.text) == 118
+    assert int(_element_text(avg_hr)) == 118
     assert max_hr is not None
-    assert int(max_hr.text) == 145
+    assert int(_element_text(max_hr)) == 145
 
 
-def test_fit_export_uses_summary_calories_and_sample_hr():
+def test_fit_export_uses_summary_calories_and_sample_hr() -> None:
     detail = _strength_detail_with_samples()
     export = render_export(detail, "fit")
 
@@ -161,7 +201,9 @@ def test_fit_export_uses_summary_calories_and_sample_hr():
 
     fit = FitFile.from_bytes(export.payload)
     laps = [record.message for record in fit.records if isinstance(record.message, LapMessage)]
-    sessions = [record.message for record in fit.records if isinstance(record.message, SessionMessage)]
+    sessions = [
+        record.message for record in fit.records if isinstance(record.message, SessionMessage)
+    ]
 
     assert len(laps) == 1
     assert laps[0].total_calories == 372
@@ -191,12 +233,12 @@ def _fit_activities(fit: FitFile) -> list[ActivityMessage]:
 
 def _outdoor_run_detail(
     *,
-    sport_type: int = 1,
+    sport_type: int | None = 1,
     category: str = "outdoor_run",
     zone_offset_seconds: int | None = 28800,
     steps: int | None = 10000,
     sport_report: SportReport | None = None,
-    raw_report: dict | None = None,
+    raw_report: dict[str, Any] | None = None,
 ) -> ActivityDetail:
     activity = Activity(
         activity_id="sid:key:1",
@@ -224,9 +266,39 @@ def _outdoor_run_detail(
         zone_name="Asia/Singapore",
         zone_offset_seconds=zone_offset_seconds,
         track_points=[
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=160, raw_point={}),
-            TrackPoint(timestamp=1717201800, latitude=1.31, longitude=103.81, altitude_meters=25.0, speed_mps=1.5, distance_meters=2500.0, heart_rate=140, cadence=170, raw_point={}),
-            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=1.3, distance_meters=5000.0, heart_rate=130, cadence=165, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=1.2,
+                distance_meters=0.0,
+                heart_rate=120,
+                cadence=160,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717201800,
+                latitude=1.31,
+                longitude=103.81,
+                altitude_meters=25.0,
+                speed_mps=1.5,
+                distance_meters=2500.0,
+                heart_rate=140,
+                cadence=170,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717203600,
+                latitude=1.32,
+                longitude=103.82,
+                altitude_meters=15.0,
+                speed_mps=1.3,
+                distance_meters=5000.0,
+                heart_rate=130,
+                cadence=165,
+                raw_point={},
+            ),
         ],
         samples=[],
         sport_report=sport_report,
@@ -239,98 +311,98 @@ def _outdoor_run_detail(
 class TestFitSportSubSportMapping:
     # -- sport_type primary mapping --
 
-    def test_outdoor_run_maps_to_running_street(self):
+    def test_outdoor_run_maps_to_running_street(self) -> None:
         detail = _outdoor_run_detail(sport_type=1)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.STREET.value
 
-    def test_outdoor_walk_maps_to_walking(self):
+    def test_outdoor_walk_maps_to_walking(self) -> None:
         detail = _outdoor_run_detail(sport_type=2)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.WALKING.value
         assert session.sub_sport == SubSport.CASUAL_WALKING.value
 
-    def test_treadmill_maps_to_running_treadmill(self):
+    def test_treadmill_maps_to_running_treadmill(self) -> None:
         detail = _outdoor_run_detail(sport_type=3)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.TREADMILL.value
 
-    def test_trail_run_maps_to_running_trail(self):
+    def test_trail_run_maps_to_running_trail(self) -> None:
         detail = _outdoor_run_detail(sport_type=5)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.TRAIL.value
 
-    def test_indoor_cycling_maps_correctly(self):
+    def test_indoor_cycling_maps_correctly(self) -> None:
         detail = _outdoor_run_detail(sport_type=7)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.CYCLING.value
         assert session.sub_sport == SubSport.INDOOR_CYCLING.value
 
-    def test_free_training_maps_to_training_generic(self):
+    def test_free_training_maps_to_training_generic(self) -> None:
         detail = _outdoor_run_detail(sport_type=8)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.TRAINING.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_pool_swimming_maps_to_lap_swimming(self):
+    def test_pool_swimming_maps_to_lap_swimming(self) -> None:
         detail = _outdoor_run_detail(sport_type=9)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.SWIMMING.value
         assert session.sub_sport == SubSport.LAP_SWIMMING.value
 
-    def test_hiking_maps_correctly(self):
+    def test_hiking_maps_correctly(self) -> None:
         detail = _outdoor_run_detail(sport_type=15)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.HIKING.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_hiit_maps_to_cardio_training(self):
+    def test_hiit_maps_to_cardio_training(self) -> None:
         detail = _outdoor_run_detail(sport_type=16)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.TRAINING.value
         assert session.sub_sport == SubSport.CARDIO_TRAINING.value
 
-    def test_jump_rope_maps_to_cardio_training(self):
+    def test_jump_rope_maps_to_cardio_training(self) -> None:
         detail = _outdoor_run_detail(sport_type=14)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.TRAINING.value
         assert session.sub_sport == SubSport.CARDIO_TRAINING.value
 
-    def test_strength_training_308(self):
+    def test_strength_training_308(self) -> None:
         detail = _outdoor_run_detail(sport_type=308)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.TRAINING.value
         assert session.sub_sport == SubSport.STRENGTH_TRAINING.value
 
-    def test_indoor_walking_333(self):
+    def test_indoor_walking_333(self) -> None:
         detail = _outdoor_run_detail(sport_type=333)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.WALKING.value
         assert session.sub_sport == SubSport.INDOOR_WALKING.value
 
-    def test_snowboarding_708(self):
+    def test_snowboarding_708(self) -> None:
         detail = _outdoor_run_detail(sport_type=708)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.SNOWBOARDING.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_soccer_600(self):
+    def test_soccer_600(self) -> None:
         detail = _outdoor_run_detail(sport_type=600)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
@@ -339,21 +411,21 @@ class TestFitSportSubSportMapping:
 
     # -- proto_type fallback --
 
-    def test_proto_type_fallback_when_sport_type_none(self):
+    def test_proto_type_fallback_when_sport_type_none(self) -> None:
         detail = _outdoor_run_detail(sport_type=None, raw_report={"proto_type": 1})
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.STREET.value
 
-    def test_proto_type_track_running_fallback(self):
+    def test_proto_type_track_running_fallback(self) -> None:
         detail = _outdoor_run_detail(sport_type=None, raw_report={"proto_type": 2})
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.RUNNING.value
         assert session.sub_sport == SubSport.TRACK.value
 
-    def test_proto_type_outdoor_step_maps_to_generic(self):
+    def test_proto_type_outdoor_step_maps_to_generic(self) -> None:
         detail = _outdoor_run_detail(sport_type=None, raw_report={"proto_type": 22})
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
@@ -362,35 +434,35 @@ class TestFitSportSubSportMapping:
 
     # -- priority & fallback --
 
-    def test_sport_type_takes_priority_over_proto_type(self):
+    def test_sport_type_takes_priority_over_proto_type(self) -> None:
         detail = _outdoor_run_detail(sport_type=15, raw_report={"proto_type": 1})
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.HIKING.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_unknown_types_fall_to_generic(self):
+    def test_unknown_types_fall_to_generic(self) -> None:
         detail = _outdoor_run_detail(sport_type=999, raw_report={"proto_type": 999})
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.GENERIC.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_no_sport_type_or_proto_type_falls_to_generic(self):
+    def test_no_sport_type_or_proto_type_falls_to_generic(self) -> None:
         detail = _outdoor_run_detail(sport_type=None)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.GENERIC.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_unmapped_sport_type_22_falls_to_generic(self):
+    def test_unmapped_sport_type_22_falls_to_generic(self) -> None:
         detail = _outdoor_run_detail(sport_type=22)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.sport == Sport.GENERIC.value
         assert session.sub_sport == SubSport.GENERIC.value
 
-    def test_sub_sport_set_on_lap(self):
+    def test_sub_sport_set_on_lap(self) -> None:
         detail = _outdoor_run_detail(sport_type=1)
         fit = _parse_fit(render_export(detail, "fit").payload)
         lap = _fit_laps(fit)[0]
@@ -399,81 +471,81 @@ class TestFitSportSubSportMapping:
 
 
 class TestFitSessionAggregates:
-    def test_num_laps_is_set(self):
+    def test_num_laps_is_set(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.num_laps == 1
 
-    def test_avg_speed_computed_from_distance_and_time(self):
+    def test_avg_speed_computed_from_distance_and_time(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         expected = 5000.0 / 3600.0
         assert abs(session.avg_speed - expected) < 0.01
 
-    def test_avg_speed_prefers_sport_report(self):
+    def test_avg_speed_prefers_sport_report(self) -> None:
         report = SportReport(avg_speed=9.0)  # 9.0 km/h from Mi Fitness
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert abs(session.avg_speed - 2.5) < 0.01  # 9.0 / 3.6 = 2.5 m/s
 
-    def test_max_speed_computed_from_points(self):
+    def test_max_speed_computed_from_points(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert abs(session.max_speed - 1.5) < 0.01
 
-    def test_max_speed_prefers_sport_report(self):
+    def test_max_speed_prefers_sport_report(self) -> None:
         report = SportReport(max_speed=10.8)  # 10.8 km/h from Mi Fitness
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert abs(session.max_speed - 3.0) < 0.01  # 10.8 / 3.6 = 3.0 m/s
 
-    def test_avg_cadence_computed_from_points(self):
+    def test_avg_cadence_computed_from_points(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.avg_cadence == 82  # (160+170+165)/3=165 SPM -> 165//2=82 RPM
 
-    def test_avg_cadence_prefers_sport_report(self):
+    def test_avg_cadence_prefers_sport_report(self) -> None:
         report = SportReport(avg_cadence=150)
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.avg_cadence == 75  # 150 SPM -> 150//2=75 RPM
 
-    def test_total_ascent_from_sport_report(self):
+    def test_total_ascent_from_sport_report(self) -> None:
         report = SportReport(rise_height=120.7)
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.total_ascent == 121
 
-    def test_total_descent_from_sport_report(self):
+    def test_total_descent_from_sport_report(self) -> None:
         report = SportReport(fall_height=80.3)
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.total_descent == 80
 
-    def test_total_ascent_computed_from_altitude(self):
+    def test_total_ascent_computed_from_altitude(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         # 10 -> 25 (+15), 25 -> 15 (-10)
         assert session.total_ascent == 15
 
-    def test_total_descent_computed_from_altitude(self):
+    def test_total_descent_computed_from_altitude(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         # 10 -> 25 (no descent), 25 -> 15 (-10)
         assert session.total_descent == 10
 
-    def test_lap_total_ascent_set(self):
+    def test_lap_total_ascent_set(self) -> None:
         report = SportReport(rise_height=50.0)
         detail = _outdoor_run_detail(sport_report=report)
         fit = _parse_fit(render_export(detail, "fit").payload)
@@ -482,16 +554,16 @@ class TestFitSessionAggregates:
 
 
 class TestFitLocalTimestamp:
-    def test_local_timestamp_set_with_zone_offset(self):
+    def test_local_timestamp_set_with_zone_offset(self) -> None:
         detail = _outdoor_run_detail(zone_offset_seconds=28800)
         fit = _parse_fit(render_export(detail, "fit").payload)
         activities = _fit_activities(fit)
         assert len(activities) == 1
-        # local_timestamp = end_time + offset - FIT_EPOCH_OFFSET
+        # local_timestamp = end_time + offset - FIT_EPOCH_OFFSET  # noqa: ERA001 - states the formula
         expected = 1717203600 + 28800 - 631065600
         assert activities[0].local_timestamp == expected
 
-    def test_local_timestamp_omitted_when_offset_is_none(self):
+    def test_local_timestamp_omitted_when_offset_is_none(self) -> None:
         detail = _outdoor_run_detail(zone_offset_seconds=None)
         fit = _parse_fit(render_export(detail, "fit").payload)
         activities = _fit_activities(fit)
@@ -501,29 +573,25 @@ class TestFitLocalTimestamp:
 
 
 class TestFitStridesAndStepLength:
-    def test_total_strides_from_steps(self):
+    def test_total_strides_from_steps(self) -> None:
         detail = _outdoor_run_detail(steps=10000)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.total_strides == 5000
 
-    def test_avg_step_length_computed(self):
+    def test_avg_step_length_computed(self) -> None:
         detail = _outdoor_run_detail(steps=10000)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         # 5000m / 5000 strides = 1.0m
         assert abs(session.avg_step_length - 1.0) < 0.01
 
-    def test_no_strides_when_no_steps(self):
+    def test_no_strides_when_no_steps(self) -> None:
         detail = _outdoor_run_detail(steps=None)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
         assert session.total_strides is None
 
-
-# ---------------------------------------------------------------------------
-# GPX compliance tests
-# ---------------------------------------------------------------------------
 
 def _gpx_detail(
     *,
@@ -549,9 +617,39 @@ def _gpx_detail(
     )
     if track_points is None:
         track_points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=80, raw_point={}),
-            TrackPoint(timestamp=1717201800, latitude=1.31, longitude=103.81, altitude_meters=25.0, speed_mps=1.5, distance_meters=2500.0, heart_rate=140, cadence=85, raw_point={}),
-            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=1.3, distance_meters=5000.0, heart_rate=130, cadence=82, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=1.2,
+                distance_meters=0.0,
+                heart_rate=120,
+                cadence=80,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717201800,
+                latitude=1.31,
+                longitude=103.81,
+                altitude_meters=25.0,
+                speed_mps=1.5,
+                distance_meters=2500.0,
+                heart_rate=140,
+                cadence=85,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717203600,
+                latitude=1.32,
+                longitude=103.82,
+                altitude_meters=15.0,
+                speed_mps=1.3,
+                distance_meters=5000.0,
+                heart_rate=130,
+                cadence=82,
+                raw_point={},
+            ),
         ]
     return ActivityDetail(
         activity=activity,
@@ -570,7 +668,7 @@ def _gpx_detail(
 
 
 class TestGpxSchemaLocation:
-    def test_garmin_xsd_url_is_correct(self):
+    def test_garmin_xsd_url_is_correct(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
         schema_loc = root.attrib["{http://www.w3.org/2001/XMLSchema-instance}schemaLocation"]
@@ -578,7 +676,7 @@ class TestGpxSchemaLocation:
         # Must NOT contain the old broken path
         assert "TrackPointExtension/v1/TrackPointExtensionv1.xsd" not in schema_loc
 
-    def test_gpx_schema_location_present(self):
+    def test_gpx_schema_location_present(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
         schema_loc = root.attrib["{http://www.w3.org/2001/XMLSchema-instance}schemaLocation"]
@@ -586,159 +684,216 @@ class TestGpxSchemaLocation:
 
 
 class TestGpxCreator:
-    def test_creator_contains_barometer_hint_when_altitude_present(self):
+    def test_creator_contains_barometer_hint_when_altitude_present(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
         assert root.attrib["creator"] == "Strava with barometer"
 
-    def test_creator_omits_barometer_hint_when_no_altitude(self):
+    def test_creator_omits_barometer_hint_when_no_altitude(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=80, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=1.2,
+                distance_meters=0.0,
+                heart_rate=120,
+                cadence=80,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
         assert root.attrib["creator"] == "Strava"
 
-    def test_creator_starts_with_app_name(self):
+    def test_creator_starts_with_app_name(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
         assert root.attrib["creator"].startswith("Strava")
 
 
 class TestGpxHeartRateAndCadenceBounds:
-    """Garmin TrackPointExtension v1 schema bounds:
-    - BeatsPerMinute_t: xsd:unsignedByte, minInclusive=1 → [1, 255]
-    - RevolutionsPerMinute_t: xsd:unsignedByte, maxInclusive=254 → [0, 254]
+    """Cover the Garmin TrackPointExtension v1 schema bounds.
+
+    BeatsPerMinute_t is an xsd:unsignedByte with minInclusive=1, so [1, 255], and
+    RevolutionsPerMinute_t is an xsd:unsignedByte with maxInclusive=254, so [0, 254].
     """
 
     # -- _clamp_heart_rate unit tests --
 
-    def test_hr_normal_value(self):
+    def test_hr_normal_value(self) -> None:
         assert _clamp_heart_rate(120) == 120
 
-    def test_hr_min_valid(self):
+    def test_hr_min_valid(self) -> None:
         assert _clamp_heart_rate(1) == 1
 
-    def test_hr_max_valid(self):
+    def test_hr_max_valid(self) -> None:
         assert _clamp_heart_rate(255) == 255
 
-    def test_hr_zero_returns_none(self):
+    def test_hr_zero_returns_none(self) -> None:
         assert _clamp_heart_rate(0) is None
 
-    def test_hr_negative_returns_none(self):
+    def test_hr_negative_returns_none(self) -> None:
         assert _clamp_heart_rate(-5) is None
 
-    def test_hr_over_255_clamped(self):
+    def test_hr_over_255_clamped(self) -> None:
         assert _clamp_heart_rate(300) == 255
 
     # -- _clamp_cadence unit tests --
 
-    def test_cad_normal_value(self):
+    def test_cad_normal_value(self) -> None:
         assert _clamp_cadence(80) == 80
 
-    def test_cad_zero_valid(self):
+    def test_cad_zero_valid(self) -> None:
         assert _clamp_cadence(0) == 0
 
-    def test_cad_max_valid(self):
+    def test_cad_max_valid(self) -> None:
         assert _clamp_cadence(254) == 254
 
-    def test_cad_over_254_clamped(self):
+    def test_cad_over_254_clamped(self) -> None:
         assert _clamp_cadence(260) == 254
 
-    def test_cad_negative_clamped_to_zero(self):
+    def test_cad_negative_clamped_to_zero(self) -> None:
         assert _clamp_cadence(-5) == 0
 
     # -- GPX integration tests --
 
-    def test_hr_clamped_in_gpx_output(self):
+    def test_hr_clamped_in_gpx_output(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=300,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        hr = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS)
-        assert hr is not None
-        assert int(hr.text) == 255
+        hr = _require_element(root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS))
+        assert int(_element_text(hr)) == 255
 
-    def test_cadence_clamped_in_gpx_output(self):
+    def test_cadence_clamped_in_gpx_output(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=520, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=520,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
-        assert cad is not None
+        cad = _require_element(root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS))
         # 520 SPM (running) -> 260 RPM -> clamped to 254
-        assert int(cad.text) == 254
+        assert int(_element_text(cad)) == 254
 
-    def test_zero_hr_omitted_from_gpx(self):
+    def test_zero_hr_omitted_from_gpx(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=0, cadence=80, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=0,
+                cadence=80,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
         hr = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS)
         assert hr is None
         # cadence should still be present
-        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
-        assert cad is not None
+        assert root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS) is not None
 
-    def test_negative_hr_omitted_from_gpx(self):
+    def test_negative_hr_omitted_from_gpx(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=-10, cadence=80, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=-10,
+                cadence=80,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
         hr = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:hr", TPX_NS)
         assert hr is None
 
-    def test_zero_cadence_emitted_in_gpx(self):
+    def test_zero_cadence_emitted_in_gpx(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=120, cadence=0, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=120,
+                cadence=0,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
-        assert cad is not None
-        assert int(cad.text) == 0
+        cad = _require_element(root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS))
+        assert int(_element_text(cad)) == 0
 
 
 class TestGpxCoordinateBoundsCheck:
-    def test_valid_coordinate(self):
-        assert _is_valid_coordinate(45.0, 90.0) is True
-
-    def test_none_latitude(self):
-        assert _is_valid_coordinate(None, 90.0) is False
-
-    def test_none_longitude(self):
-        assert _is_valid_coordinate(45.0, None) is False
-
-    def test_lat_too_high(self):
-        assert _is_valid_coordinate(91.0, 0.0) is False
-
-    def test_lat_too_low(self):
-        assert _is_valid_coordinate(-91.0, 0.0) is False
-
-    def test_lon_at_180_excluded(self):
-        assert _is_valid_coordinate(0.0, 180.0) is False
-
-    def test_lon_at_negative_180_included(self):
-        assert _is_valid_coordinate(0.0, -180.0) is True
-
-    def test_lat_boundary_90(self):
-        assert _is_valid_coordinate(90.0, 0.0) is True
-
-    def test_lat_boundary_neg_90(self):
-        assert _is_valid_coordinate(-90.0, 0.0) is True
-
-    def test_lon_just_under_180(self):
-        assert _is_valid_coordinate(0.0, 179.9999999) is True
-
-    def test_invalid_points_excluded_from_gpx(self):
+    def test_invalid_points_excluded_from_gpx(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=None, distance_meters=None, heart_rate=120, cadence=None, raw_point={}),
-            TrackPoint(timestamp=1717200060, latitude=91.0, longitude=103.8, altitude_meters=10.0, speed_mps=None, distance_meters=None, heart_rate=130, cadence=None, raw_point={}),
-            TrackPoint(timestamp=1717200120, latitude=1.31, longitude=200.0, altitude_meters=10.0, speed_mps=None, distance_meters=None, heart_rate=140, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=120,
+                cadence=None,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717200060,
+                latitude=91.0,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=130,
+                cadence=None,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717200120,
+                latitude=1.31,
+                longitude=200.0,
+                altitude_meters=10.0,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=140,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
@@ -746,12 +901,22 @@ class TestGpxCoordinateBoundsCheck:
         assert len(trkpts) == 1
         assert trkpts[0].attrib["lat"] == "1.30000000"
 
-    def test_all_invalid_coordinates_raises(self):
+    def test_all_invalid_coordinates_raises(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=91.0, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=91.0,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
-        with pytest.raises(Exception, match="GPS track points"):
+        with pytest.raises(MiFitnessError, match="GPS track points"):
             render_export(detail, "gpx")
 
 
@@ -762,67 +927,73 @@ class TestGpxElementOrdering:
         """Return local names (without namespace) for all child elements."""
         return [child.tag.split("}")[-1] if "}" in child.tag else child.tag for child in element]
 
-    def test_gpx_root_children_order(self):
+    def test_gpx_root_children_order(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
         children = self._child_local_names(root)
         # gpxType: metadata, wpt*, rte*, trk*, extensions
         assert children == ["metadata", "trk"]
 
-    def test_metadata_children_order(self):
+    def test_metadata_children_order(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        metadata = root.find("{http://www.topografix.com/GPX/1/1}metadata")
+        metadata = _require_element(root.find("{http://www.topografix.com/GPX/1/1}metadata"))
         children = self._child_local_names(metadata)
         # metadataType: name, desc, author, copyright, link*, time, keywords, bounds, extensions
         assert children == ["name", "time"]
 
-    def test_trk_children_order(self):
+    def test_trk_children_order(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        trk = root.find("{http://www.topografix.com/GPX/1/1}trk")
+        trk = _require_element(root.find("{http://www.topografix.com/GPX/1/1}trk"))
         children = self._child_local_names(trk)
         # trkType: name, cmt, desc, src, link*, number, type, extensions, trkseg*
         assert children == ["name", "type", "trkseg"]
 
-    def test_trkpt_children_order(self):
+    def test_trkpt_children_order(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        trkpt = root.find(".//gpx:trkpt", GPX_NS)
+        trkpt = _require_element(root.find(".//gpx:trkpt", GPX_NS))
         children = self._child_local_names(trkpt)
         # wptType: ele, time, ..., extensions
         assert children == ["ele", "time", "extensions"]
 
-    def test_trkpt_without_altitude_order(self):
+    def test_trkpt_without_altitude_order(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=100.0, heart_rate=120, cadence=80, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=100.0,
+                heart_rate=120,
+                cadence=80,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        trkpt = root.find(".//gpx:trkpt", GPX_NS)
+        trkpt = _require_element(root.find(".//gpx:trkpt", GPX_NS))
         children = self._child_local_names(trkpt)
         # ele omitted, so time then extensions
         assert children == ["time", "extensions"]
 
-    def test_extension_children_order(self):
+    def test_extension_children_order(self) -> None:
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        extensions = root.find(".//gpx:trkpt/gpx:extensions", GPX_NS)
+        extensions = _require_element(root.find(".//gpx:trkpt/gpx:extensions", GPX_NS))
         children = self._child_local_names(extensions)
         assert children == ["TrackPointExtension"]
 
-    def test_trackpoint_extension_children_order(self):
-        """hr must come before cad per Garmin TPE v1 XSD."""
+    def test_trackpoint_extension_children_order(self) -> None:
+        """The hr element precedes cad per the Garmin TPE v1 XSD."""
         detail = _gpx_detail()
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        tpe = root.find(".//gpxtpx:TrackPointExtension", TPX_NS)
+        tpe = _require_element(root.find(".//gpxtpx:TrackPointExtension", TPX_NS))
         children = self._child_local_names(tpe)
         assert children == ["hr", "cad"]
 
-
-# ---------------------------------------------------------------------------
-# TCX compliance tests
-# ---------------------------------------------------------------------------
 
 TCX_NS_MAP = {"tcx": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
 AEXT_NS_MAP = {"aext": "http://www.garmin.com/xmlschemas/ActivityExtension/v2"}
@@ -831,7 +1002,7 @@ ALL_TCX_NS = {**TCX_NS_MAP, **AEXT_NS_MAP}
 
 def _tcx_detail(
     *,
-    sport_type: int = 1,
+    sport_type: int | None = 1,
     track_points: list[TrackPoint] | None = None,
     calories: int = 400,
 ) -> ActivityDetail:
@@ -855,9 +1026,39 @@ def _tcx_detail(
     )
     if track_points is None:
         track_points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=120, cadence=80, raw_point={}),
-            TrackPoint(timestamp=1717201800, latitude=1.31, longitude=103.81, altitude_meters=25.0, speed_mps=1.5, distance_meters=2500.0, heart_rate=140, cadence=85, raw_point={}),
-            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=1.3, distance_meters=5000.0, heart_rate=130, cadence=82, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=1.2,
+                distance_meters=0.0,
+                heart_rate=120,
+                cadence=80,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717201800,
+                latitude=1.31,
+                longitude=103.81,
+                altitude_meters=25.0,
+                speed_mps=1.5,
+                distance_meters=2500.0,
+                heart_rate=140,
+                cadence=85,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717203600,
+                latitude=1.32,
+                longitude=103.82,
+                altitude_meters=15.0,
+                speed_mps=1.3,
+                distance_meters=5000.0,
+                heart_rate=130,
+                cadence=82,
+                raw_point={},
+            ),
         ]
     return ActivityDetail(
         activity=activity,
@@ -880,115 +1081,216 @@ def _tcx_child_local_names(element: ET.Element) -> list[str]:
 
 
 class TestTcxLapElementOrdering:
-    """Verify Lap children follow ActivityLap_t XSD sequence:
-    TotalTimeSeconds, DistanceMeters, MaximumSpeed, Calories,
+    """Verify Lap children follow the ActivityLap_t XSD sequence.
+
+    The sequence is TotalTimeSeconds, DistanceMeters, MaximumSpeed, Calories,
     AverageHeartRateBpm, MaximumHeartRateBpm, Intensity, Cadence,
-    TriggerMethod, Track, Notes, Extensions
+    TriggerMethod, Track, Notes, Extensions.
     """
 
-    def test_lap_children_order_with_hr(self):
+    def test_lap_children_order_with_hr(self) -> None:
         detail = _tcx_detail()
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        lap = root.find(".//tcx:Lap", TCX_NS_MAP)
+        lap = _require_element(root.find(".//tcx:Lap", TCX_NS_MAP))
         children = _tcx_child_local_names(lap)
         assert children == [
-            "TotalTimeSeconds", "DistanceMeters", "Calories",
-            "AverageHeartRateBpm", "MaximumHeartRateBpm",
-            "Intensity", "TriggerMethod", "Track",
+            "TotalTimeSeconds",
+            "DistanceMeters",
+            "Calories",
+            "AverageHeartRateBpm",
+            "MaximumHeartRateBpm",
+            "Intensity",
+            "TriggerMethod",
+            "Track",
         ]
 
-    def test_lap_children_order_without_hr(self):
+    def test_lap_children_order_without_hr(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=1.2, distance_meters=0.0, heart_rate=None, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=1.2,
+                distance_meters=0.0,
+                heart_rate=None,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        lap = root.find(".//tcx:Lap", TCX_NS_MAP)
+        lap = _require_element(root.find(".//tcx:Lap", TCX_NS_MAP))
         children = _tcx_child_local_names(lap)
         assert children == [
-            "TotalTimeSeconds", "DistanceMeters", "Calories",
-            "Intensity", "TriggerMethod", "Track",
+            "TotalTimeSeconds",
+            "DistanceMeters",
+            "Calories",
+            "Intensity",
+            "TriggerMethod",
+            "Track",
         ]
 
 
 class TestTcxTrackpointElementOrdering:
-    """Verify Trackpoint children follow Trackpoint_t XSD sequence:
-    Time, Position, AltitudeMeters, DistanceMeters,
-    HeartRateBpm, Cadence, SensorState, Extensions
+    """Verify Trackpoint children follow the Trackpoint_t XSD sequence.
+
+    The sequence is Time, Position, AltitudeMeters, DistanceMeters,
+    HeartRateBpm, Cadence, SensorState, Extensions.
     """
 
-    def test_full_trackpoint_order_biking(self):
+    def test_full_trackpoint_order_biking(self) -> None:
         detail = _tcx_detail(sport_type=6)  # Biking
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        tp = root.find(".//tcx:Trackpoint", TCX_NS_MAP)
+        tp = _require_element(root.find(".//tcx:Trackpoint", TCX_NS_MAP))
         children = _tcx_child_local_names(tp)
         # Biking: base Cadence, Extensions has Speed only
-        assert children == ["Time", "Position", "AltitudeMeters", "DistanceMeters", "HeartRateBpm", "Cadence", "Extensions"]
+        assert children == [
+            "Time",
+            "Position",
+            "AltitudeMeters",
+            "DistanceMeters",
+            "HeartRateBpm",
+            "Cadence",
+            "Extensions",
+        ]
 
-    def test_full_trackpoint_order_running(self):
+    def test_full_trackpoint_order_running(self) -> None:
         detail = _tcx_detail(sport_type=1)  # Running
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        tp = root.find(".//tcx:Trackpoint", TCX_NS_MAP)
+        tp = _require_element(root.find(".//tcx:Trackpoint", TCX_NS_MAP))
         children = _tcx_child_local_names(tp)
         # Running: no base Cadence, Extensions has Speed + RunCadence
-        assert children == ["Time", "Position", "AltitudeMeters", "DistanceMeters", "HeartRateBpm", "Extensions"]
+        assert children == [
+            "Time",
+            "Position",
+            "AltitudeMeters",
+            "DistanceMeters",
+            "HeartRateBpm",
+            "Extensions",
+        ]
 
 
 class TestTcxHeartRateClamping:
-    def test_trackpoint_hr_clamped_to_255(self):
+    def test_trackpoint_hr_clamped_to_255(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=300,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        val = root.find(".//tcx:Trackpoint/tcx:HeartRateBpm/tcx:Value", TCX_NS_MAP)
+        val = _require_element(
+            root.find(".//tcx:Trackpoint/tcx:HeartRateBpm/tcx:Value", TCX_NS_MAP)
+        )
         assert val is not None
-        assert int(val.text) == 255
+        assert int(_element_text(val)) == 255
 
-    def test_trackpoint_hr_zero_omitted(self):
+    def test_trackpoint_hr_zero_omitted(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=0, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=0,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
         val = root.find(".//tcx:Trackpoint/tcx:HeartRateBpm", TCX_NS_MAP)
         assert val is None
 
-    def test_lap_avg_hr_clamped(self):
+    def test_lap_avg_hr_clamped(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=None, longitude=None, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=None,
+                longitude=None,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=300,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        val = root.find(".//tcx:Lap/tcx:AverageHeartRateBpm/tcx:Value", TCX_NS_MAP)
+        val = _require_element(
+            root.find(".//tcx:Lap/tcx:AverageHeartRateBpm/tcx:Value", TCX_NS_MAP)
+        )
         assert val is not None
-        assert int(val.text) == 255
+        assert int(_element_text(val)) == 255
 
-    def test_lap_max_hr_clamped(self):
+    def test_lap_max_hr_clamped(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=None, longitude=None, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=300, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=None,
+                longitude=None,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=300,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        val = root.find(".//tcx:Lap/tcx:MaximumHeartRateBpm/tcx:Value", TCX_NS_MAP)
+        val = _require_element(
+            root.find(".//tcx:Lap/tcx:MaximumHeartRateBpm/tcx:Value", TCX_NS_MAP)
+        )
         assert val is not None
-        assert int(val.text) == 255
+        assert int(_element_text(val)) == 255
 
 
 class TestTcxCadenceClamping:
-    def test_bike_cadence_clamped_to_254(self):
+    def test_bike_cadence_clamped_to_254(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=260, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=260,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=6, track_points=points)  # Biking
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
-        assert cad is not None
-        assert int(cad.text) == 254
+        cad = _require_element(root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP))
+        assert int(_element_text(cad)) == 254
 
-    def test_run_cadence_clamped_in_extension(self):
+    def test_run_cadence_clamped_in_extension(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=520, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=520,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=1, track_points=points)  # Running
         root = ET.fromstring(render_export(detail, "tcx").payload)
@@ -998,172 +1300,248 @@ class TestTcxCadenceClamping:
         # RunCadence in Extensions: 520 SPM -> 260 RPM -> clamped to 254
         run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
         assert run_cad is not None
-        assert int(run_cad.text) == 254
+        assert int(_element_text(run_cad)) == 254
 
 
 class TestTcxCoordinateValidation:
-    def test_invalid_coords_excluded_from_tcx(self):
+    def test_invalid_coords_excluded_from_tcx(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
-            TrackPoint(timestamp=1717200060, latitude=91.0, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
-            TrackPoint(timestamp=1717200120, latitude=1.31, longitude=200.0, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=None,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717200060,
+                latitude=91.0,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=None,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717200120,
+                latitude=1.31,
+                longitude=200.0,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
         positions = root.findall(".//tcx:Trackpoint/tcx:Position", TCX_NS_MAP)
         assert len(positions) == 1
-        lat = positions[0].find("tcx:LatitudeDegrees", TCX_NS_MAP)
+        lat = _require_element(positions[0].find("tcx:LatitudeDegrees", TCX_NS_MAP))
         assert lat.text == "1.30000000"
 
 
 class TestTcxCaloriesBounding:
-    def test_clamp_calories_normal(self):
+    def test_clamp_calories_normal(self) -> None:
         assert _clamp_calories(400) == 400
 
-    def test_clamp_calories_zero(self):
+    def test_clamp_calories_zero(self) -> None:
         assert _clamp_calories(0) == 0
 
-    def test_clamp_calories_max_valid(self):
+    def test_clamp_calories_max_valid(self) -> None:
         assert _clamp_calories(65535) == 65535
 
-    def test_clamp_calories_over_max(self):
+    def test_clamp_calories_over_max(self) -> None:
         assert _clamp_calories(70000) == 65535
 
-    def test_clamp_calories_negative(self):
+    def test_clamp_calories_negative(self) -> None:
         assert _clamp_calories(-5) == 0
 
-    def test_calories_clamped_in_tcx_output(self):
+    def test_calories_clamped_in_tcx_output(self) -> None:
         detail = _tcx_detail(calories=70000)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        cal = root.find(".//tcx:Lap/tcx:Calories", TCX_NS_MAP)
-        assert int(cal.text) == 65535
+        cal = _require_element(root.find(".//tcx:Lap/tcx:Calories", TCX_NS_MAP))
+        assert int(_element_text(cal)) == 65535
 
 
 class TestTcxSportAttribute:
-    def test_running_sport(self):
+    def test_running_sport(self) -> None:
         detail = _tcx_detail(sport_type=1)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        activity = _require_element(root.find(".//tcx:Activity", TCX_NS_MAP))
         assert activity.attrib["Sport"] == "Running"
 
-    def test_biking_sport(self):
+    def test_biking_sport(self) -> None:
         detail = _tcx_detail(sport_type=6)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        activity = _require_element(root.find(".//tcx:Activity", TCX_NS_MAP))
         assert activity.attrib["Sport"] == "Biking"
 
-    def test_hiking_maps_to_other(self):
+    def test_hiking_maps_to_other(self) -> None:
         detail = _tcx_detail(sport_type=15)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        activity = _require_element(root.find(".//tcx:Activity", TCX_NS_MAP))
         assert activity.attrib["Sport"] == "Other"
 
-    def test_swimming_maps_to_other(self):
+    def test_swimming_maps_to_other(self) -> None:
         detail = _tcx_detail(sport_type=9)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        activity = _require_element(root.find(".//tcx:Activity", TCX_NS_MAP))
         assert activity.attrib["Sport"] == "Other"
 
 
 class TestTcxCreatorElement:
-    def test_creator_present(self):
+    def test_creator_present(self) -> None:
         detail = _tcx_detail()
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
-        assert creator is not None
+        assert root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP) is not None
 
-    def test_creator_barometer_hint_with_altitude(self):
+    def test_creator_barometer_hint_with_altitude(self) -> None:
         detail = _tcx_detail()  # default points have altitude
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        name = root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP)
+        name = _require_element(root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP))
         assert name.text == "Strava with barometer"
 
-    def test_creator_no_barometer_without_altitude(self):
+    def test_creator_no_barometer_without_altitude(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=120, cadence=None, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=120,
+                cadence=None,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        name = root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP)
+        name = _require_element(root.find(".//tcx:Activity/tcx:Creator/tcx:Name", TCX_NS_MAP))
         assert name.text == "Strava"
 
-    def test_creator_has_device_type(self):
+    def test_creator_has_device_type(self) -> None:
         detail = _tcx_detail()
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
+        creator = _require_element(root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP))
         assert creator.attrib.get("{http://www.w3.org/2001/XMLSchema-instance}type") == "Device_t"
 
-    def test_creator_has_required_children(self):
+    def test_creator_has_required_children(self) -> None:
         detail = _tcx_detail()
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        creator = root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP)
+        creator = _require_element(root.find(".//tcx:Activity/tcx:Creator", TCX_NS_MAP))
         children = _tcx_child_local_names(creator)
         assert children == ["Name", "UnitId", "ProductID", "Version"]
 
-    def test_product_id_equals_102(self):
+    def test_product_id_equals_102(self) -> None:
         detail = _tcx_detail()
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        product_id = root.find(".//tcx:Activity/tcx:Creator/tcx:ProductID", TCX_NS_MAP)
+        product_id = _require_element(
+            root.find(".//tcx:Activity/tcx:Creator/tcx:ProductID", TCX_NS_MAP)
+        )
         assert product_id is not None
         assert product_id.text == "102"
 
-    def test_creator_after_lap(self):
+    def test_creator_after_lap(self) -> None:
         """Creator must appear after Lap (and optional Notes/Training) in Activity_t sequence."""
         detail = _tcx_detail()
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        activity = root.find(".//tcx:Activity", TCX_NS_MAP)
+        activity = _require_element(root.find(".//tcx:Activity", TCX_NS_MAP))
         children = _tcx_child_local_names(activity)
         assert children == ["Id", "Lap", "Creator"]
 
 
 class TestTcxRunningCadence:
-    def test_running_cadence_in_extensions(self):
+    def test_running_cadence_in_extensions(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=160,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=1, track_points=points)  # Running
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        run_cad = _require_element(
+            root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        )
         assert run_cad is not None
-        assert int(run_cad.text) == 80  # 160 SPM -> 160//2=80 RPM
+        assert int(_element_text(run_cad)) == 80  # 160 SPM -> 160//2=80 RPM
 
-    def test_running_no_base_cadence(self):
+    def test_running_no_base_cadence(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=160,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=1, track_points=points)  # Running
         root = ET.fromstring(render_export(detail, "tcx").payload)
         base_cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
         assert base_cad is None
 
-    def test_biking_uses_base_cadence(self):
+    def test_biking_uses_base_cadence(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=80, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=80,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=6, track_points=points)  # Biking
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        base_cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
-        assert base_cad is not None
-        assert int(base_cad.text) == 80
+        base_cad = _require_element(root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP))
+        assert int(_element_text(base_cad)) == 80
         # No RunCadence for biking
         run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
         assert run_cad is None
 
-    def test_running_speed_and_cadence_in_same_tpx(self):
+    def test_running_speed_and_cadence_in_same_tpx(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=2.5, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=2.5,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=160,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=1, track_points=points)  # Running
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        tpx = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX", ALL_TCX_NS)
-        assert tpx is not None
+        tpx = _require_element(root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX", ALL_TCX_NS))
         tpx_children = _tcx_child_local_names(tpx)
         assert tpx_children == ["Speed", "RunCadence"]
-
-
-# ---------------------------------------------------------------------------
-# Cadence SPM→RPM conversion tests
-# ---------------------------------------------------------------------------
 
 
 def _cycling_detail(*, cadence: int = 80) -> ActivityDetail:
@@ -1193,8 +1571,28 @@ def _cycling_detail(*, cadence: int = 80) -> ActivityDetail:
         zone_name="UTC",
         zone_offset_seconds=0,
         track_points=[
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=10.0, speed_mps=5.0, distance_meters=0.0, heart_rate=120, cadence=cadence, raw_point={}),
-            TrackPoint(timestamp=1717203600, latitude=1.32, longitude=103.82, altitude_meters=15.0, speed_mps=6.0, distance_meters=20000.0, heart_rate=140, cadence=cadence + 10, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=10.0,
+                speed_mps=5.0,
+                distance_meters=0.0,
+                heart_rate=120,
+                cadence=cadence,
+                raw_point={},
+            ),
+            TrackPoint(
+                timestamp=1717203600,
+                latitude=1.32,
+                longitude=103.82,
+                altitude_meters=15.0,
+                speed_mps=6.0,
+                distance_meters=20000.0,
+                heart_rate=140,
+                cadence=cadence + 10,
+                raw_point={},
+            ),
         ],
         samples=[],
         sport_report=None,
@@ -1205,42 +1603,42 @@ def _cycling_detail(*, cadence: int = 80) -> ActivityDetail:
 
 
 class TestCadenceSpmToRpm:
-    def test_running_cadence_halved(self):
+    def test_running_cadence_halved(self) -> None:
         assert _cadence_spm_to_rpm(160, 1) == 80
 
-    def test_walking_cadence_halved(self):
+    def test_walking_cadence_halved(self) -> None:
         assert _cadence_spm_to_rpm(120, 2) == 60
 
-    def test_treadmill_cadence_halved(self):
+    def test_treadmill_cadence_halved(self) -> None:
         assert _cadence_spm_to_rpm(170, 3) == 85
 
-    def test_trail_run_cadence_halved(self):
+    def test_trail_run_cadence_halved(self) -> None:
         assert _cadence_spm_to_rpm(150, 5) == 75
 
-    def test_cycling_cadence_unchanged(self):
+    def test_cycling_cadence_unchanged(self) -> None:
         assert _cadence_spm_to_rpm(80, 6) == 80
 
-    def test_indoor_cycling_cadence_unchanged(self):
+    def test_indoor_cycling_cadence_unchanged(self) -> None:
         assert _cadence_spm_to_rpm(90, 7) == 90
 
-    def test_bmx_cadence_unchanged(self):
+    def test_bmx_cadence_unchanged(self) -> None:
         assert _cadence_spm_to_rpm(70, 206) == 70
 
-    def test_spinning_cadence_unchanged(self):
+    def test_spinning_cadence_unchanged(self) -> None:
         assert _cadence_spm_to_rpm(95, 324) == 95
 
-    def test_odd_spm_rounds_down(self):
+    def test_odd_spm_rounds_down(self) -> None:
         assert _cadence_spm_to_rpm(165, 1) == 82
 
-    def test_zero_cadence(self):
+    def test_zero_cadence(self) -> None:
         assert _cadence_spm_to_rpm(0, 1) == 0
 
-    def test_none_sport_type_treated_as_step_based(self):
+    def test_none_sport_type_treated_as_step_based(self) -> None:
         assert _cadence_spm_to_rpm(160, None) == 80
 
 
 class TestFitCadenceConversion:
-    def test_running_record_cadence_is_rpm(self):
+    def test_running_record_cadence_is_rpm(self) -> None:
         detail = _outdoor_run_detail()
         fit = _parse_fit(render_export(detail, "fit").payload)
         records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
@@ -1251,14 +1649,14 @@ class TestFitCadenceConversion:
         # Third point: 165 SPM -> 82 RPM
         assert records[2].cadence == 82
 
-    def test_cycling_record_cadence_unchanged(self):
+    def test_cycling_record_cadence_unchanged(self) -> None:
         detail = _cycling_detail(cadence=80)
         fit = _parse_fit(render_export(detail, "fit").payload)
         records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
         assert records[0].cadence == 80
         assert records[1].cadence == 90  # cadence + 10
 
-    def test_cycling_avg_cadence_unchanged(self):
+    def test_cycling_avg_cadence_unchanged(self) -> None:
         detail = _cycling_detail(cadence=80)
         fit = _parse_fit(render_export(detail, "fit").payload)
         session = _fit_sessions(fit)[0]
@@ -1266,63 +1664,116 @@ class TestFitCadenceConversion:
 
 
 class TestGpxCadenceConversion:
-    def test_running_gpx_cadence_is_rpm(self):
+    def test_running_gpx_cadence_is_rpm(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=160, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=160,
+                raw_point={},
+            ),
         ]
         detail = _gpx_detail(track_points=points)  # sport_type=1 (Running)
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
-        assert cad is not None
-        assert int(cad.text) == 80  # 160 SPM -> 80 RPM
+        cad = _require_element(root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS))
+        assert int(_element_text(cad)) == 80  # 160 SPM -> 80 RPM
 
-    def test_cycling_gpx_cadence_unchanged(self):
+    def test_cycling_gpx_cadence_unchanged(self) -> None:
         activity = Activity(
-            activity_id="sid:key:1", sid="sid", key="key", category="outdoor_cycling",
-            sport_type=6, title="Ride", start_time=1717200000, end_time=1717203600,
-            duration_seconds=3600, distance_meters=20000, calories=500, steps=None,
-            sync_state="server", next_key=None, raw_record={}, raw_report={},
+            activity_id="sid:key:1",
+            sid="sid",
+            key="key",
+            category="outdoor_cycling",
+            sport_type=6,
+            title="Ride",
+            start_time=1717200000,
+            end_time=1717203600,
+            duration_seconds=3600,
+            distance_meters=20000,
+            calories=500,
+            steps=None,
+            sync_state="server",
+            next_key=None,
+            raw_record={},
+            raw_report={},
         )
         detail = ActivityDetail(
-            activity=activity, detail_sid="sid", detail_key="key",
-            detail_time=1717200000, zone_name="UTC", zone_offset_seconds=0,
+            activity=activity,
+            detail_sid="sid",
+            detail_key="key",
+            detail_time=1717200000,
+            zone_name="UTC",
+            zone_offset_seconds=0,
             track_points=[
-                TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=80, raw_point={}),
+                TrackPoint(
+                    timestamp=1717200000,
+                    latitude=1.3,
+                    longitude=103.8,
+                    altitude_meters=None,
+                    speed_mps=None,
+                    distance_meters=None,
+                    heart_rate=None,
+                    cadence=80,
+                    raw_point={},
+                ),
             ],
-            samples=[], sport_report=None, recovery_rate=None,
-            raw_fitness_item={}, raw_detail={},
+            samples=[],
+            sport_report=None,
+            recovery_rate=None,
+            raw_fitness_item={},
+            raw_detail={},
         )
         root = ET.fromstring(render_export(detail, "gpx").payload)
-        cad = root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS)
-        assert cad is not None
-        assert int(cad.text) == 80  # Cycling: 80 RPM stays 80
+        cad = _require_element(root.find(".//gpxtpx:TrackPointExtension/gpxtpx:cad", TPX_NS))
+        assert int(_element_text(cad)) == 80  # Cycling: 80 RPM stays 80
 
 
 class TestTcxCadenceConversion:
-    def test_running_run_cadence_halved(self):
+    def test_running_run_cadence_halved(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=170, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=170,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=1, track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        run_cad = root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        run_cad = _require_element(
+            root.find(".//tcx:Trackpoint/tcx:Extensions/aext:TPX/aext:RunCadence", ALL_TCX_NS)
+        )
         assert run_cad is not None
-        assert int(run_cad.text) == 85  # 170 SPM -> 85 RPM
+        assert int(_element_text(run_cad)) == 85  # 170 SPM -> 85 RPM
 
-    def test_cycling_base_cadence_unchanged(self):
+    def test_cycling_base_cadence_unchanged(self) -> None:
         points = [
-            TrackPoint(timestamp=1717200000, latitude=1.3, longitude=103.8, altitude_meters=None, speed_mps=None, distance_meters=None, heart_rate=None, cadence=90, raw_point={}),
+            TrackPoint(
+                timestamp=1717200000,
+                latitude=1.3,
+                longitude=103.8,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=90,
+                raw_point={},
+            ),
         ]
         detail = _tcx_detail(sport_type=6, track_points=points)
         root = ET.fromstring(render_export(detail, "tcx").payload)
-        cad = root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP)
-        assert cad is not None
-        assert int(cad.text) == 90  # Cycling: 90 RPM stays 90
-
-
-# ---------------------------------------------------------------------------
-# Smoothing integration — verify smoothed coordinates propagate to all formats
-# ---------------------------------------------------------------------------
+        cad = _require_element(root.find(".//tcx:Trackpoint/tcx:Cadence", TCX_NS_MAP))
+        assert int(_element_text(cad)) == 90  # Cycling: 90 RPM stays 90
 
 
 def _noisy_gps_detail(distance_meters: float) -> ActivityDetail:
@@ -1352,7 +1803,7 @@ def _noisy_gps_detail(distance_meters: float) -> ActivityDetail:
         start_time=1717200000,
         end_time=1717200000 + (n - 1) * 10,
         duration_seconds=(n - 1) * 10,
-        distance_meters=distance_meters,
+        distance_meters=int(distance_meters),
         calories=200,
         steps=5000,
         sync_state="server",
@@ -1379,7 +1830,7 @@ def _noisy_gps_detail(distance_meters: float) -> ActivityDetail:
 class TestSmoothingIntegration:
     """Smoothed coordinates must propagate into GPX, TCX, and FIT outputs."""
 
-    def _make_detail(self) -> ActivityDetail:
+    def _make_detail(self) -> tuple[ActivityDetail, list[TrackPoint]]:
         """Detail whose noisy GPS distance exceeds the summary distance."""
         raw_points = [
             TrackPoint(
@@ -1400,9 +1851,14 @@ class TestSmoothingIntegration:
         clean_points = [
             TrackPoint(
                 timestamp=1717200000 + i * 10,
-                latitude=1.0 + i * 0.001, longitude=103.0,
-                altitude_meters=None, speed_mps=None, distance_meters=None,
-                heart_rate=None, cadence=None, raw_point={},
+                latitude=1.0 + i * 0.001,
+                longitude=103.0,
+                altitude_meters=None,
+                speed_mps=None,
+                distance_meters=None,
+                heart_rate=None,
+                cadence=None,
+                raw_point={},
             )
             for i in range(40)
         ]
@@ -1410,7 +1866,7 @@ class TestSmoothingIntegration:
         assert noisy_distance > clean_distance * 1.01  # sanity
         return _noisy_gps_detail(clean_distance), raw_points
 
-    def test_gpx_uses_smoothed_coords(self):
+    def test_gpx_uses_smoothed_coords(self) -> None:
         detail, original_points = self._make_detail()
         export = render_export(detail, "gpx")
         root = ET.fromstring(export.payload)
@@ -1419,12 +1875,12 @@ class TestSmoothingIntegration:
         assert len(trkpts) == 40
         # At least one interior point's longitude should differ from the original zigzag
         changed = any(
-            float(tp.attrib["lon"]) != original_points[i].longitude
+            float(tp.attrib["lon"]) != _require_longitude(original_points[i])
             for i, tp in enumerate(trkpts)
         )
         assert changed, "GPX output should contain smoothed (different) coordinates"
 
-    def test_tcx_uses_smoothed_coords(self):
+    def test_tcx_uses_smoothed_coords(self) -> None:
         detail, original_points = self._make_detail()
         export = render_export(detail, "tcx")
         root = ET.fromstring(export.payload)
@@ -1432,16 +1888,21 @@ class TestSmoothingIntegration:
         positions = root.findall(".//tcx:Trackpoint/tcx:Position", ns)
         assert len(positions) == 40
         changed = any(
-            float(pos.find("tcx:LongitudeDegrees", ns).text) != original_points[i].longitude
+            float(_element_text(_require_element(pos.find("tcx:LongitudeDegrees", ns))))
+            != _require_longitude(original_points[i])
             for i, pos in enumerate(positions)
         )
         assert changed, "TCX output should contain smoothed (different) coordinates"
 
-    def test_fit_uses_smoothed_coords(self):
+    def test_fit_uses_smoothed_coords(self) -> None:
         detail, original_points = self._make_detail()
         # Independently compute expected smoothed coordinates
-        expected_smoothed = smooth_track(detail.track_points, detail.activity.distance_meters)
-        assert expected_smoothed is not detail.track_points, "smooth_track should have modified coords"
+        expected_smoothed = smooth_track(
+            detail.track_points, float(detail.activity.distance_meters or 0)
+        )
+        assert expected_smoothed is not detail.track_points, (
+            "smooth_track should have modified coords"
+        )
 
         export = render_export(detail, "fit")
         fit = FitFile.from_bytes(export.payload)
@@ -1455,28 +1916,25 @@ class TestSmoothingIntegration:
             if records[i].position_long is None:
                 continue
             fit_lon = records[i].position_long
-            original_lon = original_points[i].longitude
-            smoothed_lon = expected_smoothed[i].longitude
+            original_lon = _require_longitude(original_points[i])
+            smoothed_lon = _require_longitude(expected_smoothed[i])
             if abs(original_lon - smoothed_lon) < 1e-12:
                 continue  # skip points where smoothing didn't change the value
             total_compared += 1
             if abs(fit_lon - smoothed_lon) < abs(fit_lon - original_lon):
                 closer_to_smoothed += 1
 
-        assert total_compared > 0, "At least some points should differ between original and smoothed"
+        assert total_compared > 0, (
+            "At least some points should differ between original and smoothed"
+        )
         assert closer_to_smoothed == total_compared, (
             f"All compared FIT coords should be closer to smoothed than original, "
             f"but only {closer_to_smoothed}/{total_compared} were"
         )
 
 
-# ---------------------------------------------------------------------------
-# render_export smoothing options
-# ---------------------------------------------------------------------------
-
-
 class TestRenderExportSmoothingOptions:
-    def test_no_smooth_skips_smoothing(self, sample_activity_detail):
+    def test_no_smooth_skips_smoothing(self, sample_activity_detail: ActivityDetail) -> None:
         """When smooth=False, track_points should pass through unchanged."""
         export = render_export(sample_activity_detail, "gpx", smooth=False)
         assert export.file_format == "gpx"
@@ -1484,18 +1942,20 @@ class TestRenderExportSmoothingOptions:
         root = ET.fromstring(export.payload)
         assert len(root.findall(".//gpx:trkpt", GPX_NS)) == 1
 
-    def test_smooth_mode_full_accepted(self, sample_activity_detail):
+    def test_smooth_mode_full_accepted(self, sample_activity_detail: ActivityDetail) -> None:
         """smooth_mode='full' should not raise."""
         export = render_export(sample_activity_detail, "gpx", smooth_mode="full")
         assert export.file_format == "gpx"
 
-    def test_outlier_speed_mps_accepted(self, sample_activity_detail):
+    def test_outlier_speed_mps_accepted(self, sample_activity_detail: ActivityDetail) -> None:
         """Custom outlier_speed_mps should not raise."""
         export = render_export(sample_activity_detail, "gpx", outlier_speed_mps=10.0)
         assert export.file_format == "gpx"
 
 
-def _pool_swim_detail(raw_report: dict | None = None, *, sport_type: int = 9) -> ActivityDetail:
+def _pool_swim_detail(
+    raw_report: dict[str, Any] | None = None, *, sport_type: int = 9
+) -> ActivityDetail:
     report = {
         "avg_stroke_frequency": 0,
         "avg_swolf": 68,
@@ -1560,7 +2020,7 @@ def _pool_swim_detail(raw_report: dict | None = None, *, sport_type: int = 9) ->
     )
 
 
-def test_fit_export_pool_swim_includes_swim_summary():
+def test_fit_export_pool_swim_includes_swim_summary() -> None:
     fit = _parse_fit(render_export(_pool_swim_detail(), "fit").payload)
     session = _fit_sessions(fit)[0]
     lap = _fit_laps(fit)[0]
@@ -1583,8 +2043,10 @@ def test_fit_export_pool_swim_includes_swim_summary():
     assert lap.max_cadence == 34
 
 
-def test_fit_export_pool_swim_prefers_reported_pool_width_and_frequency():
-    detail = _pool_swim_detail({"pool_width": 50, "turn_count": 60, "stroke_count": 600, "avg_stroke_frequency": 28})
+def test_fit_export_pool_swim_prefers_reported_pool_width_and_frequency() -> None:
+    detail = _pool_swim_detail(
+        {"pool_width": 50, "turn_count": 60, "stroke_count": 600, "avg_stroke_frequency": 28}
+    )
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
     # The report width is 50 m and the distance over turn count would give 25 m.
@@ -1592,7 +2054,7 @@ def test_fit_export_pool_swim_prefers_reported_pool_width_and_frequency():
     assert session.avg_cadence == 28
 
 
-def test_fit_export_pool_swim_skips_implausible_pool_length():
+def test_fit_export_pool_swim_skips_implausible_pool_length() -> None:
     detail = _pool_swim_detail({"turn_count": 3, "stroke_count": 1377})
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
@@ -1601,7 +2063,7 @@ def test_fit_export_pool_swim_skips_implausible_pool_length():
     assert session.total_cycles == 1377
 
 
-def test_fit_export_swim_without_swim_report_has_no_swim_fields():
+def test_fit_export_swim_without_swim_report_has_no_swim_fields() -> None:
     detail = _pool_swim_detail({})
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
@@ -1610,7 +2072,7 @@ def test_fit_export_swim_without_swim_report_has_no_swim_fields():
     assert session.num_lengths is None
 
 
-def test_fit_export_non_swim_ignores_stroke_fields():
+def test_fit_export_non_swim_ignores_stroke_fields() -> None:
     detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60}, sport_type=8)
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
@@ -1632,18 +2094,31 @@ _REAL_SWIM_LENGTHS = [
 ]
 
 
-def _real_swim_sample(index: int, values: tuple | None) -> ActivitySample:
+def _real_swim_sample(
+    index: int, values: tuple[int, int, int, int, int, int] | None
+) -> ActivitySample:
     if values is None:
         distance = None
         calories = None
-        raw_sample = {"source": "fds_sport_record", "pace": 177, "extras": {"1": 1793700677, "11": 1, "13": 252}}
+        raw_sample = {
+            "source": "fds_sport_record",
+            "pace": 177,
+            "extras": {"1": 1793700677, "11": 1, "13": 252},
+        }
     else:
         end_time, pace, swolf, strokes, stroke_rate, calories = values
         distance = 25.0
         raw_sample = {
             "source": "fds_sport_record",
             "pace": pace,
-            "extras": {"1": end_time, "10": 1, "11": 1, "13": swolf, "16": strokes, "17": stroke_rate},
+            "extras": {
+                "1": end_time,
+                "10": 1,
+                "11": 1,
+                "13": swolf,
+                "16": strokes,
+                "17": stroke_rate,
+            },
         }
     return ActivitySample(
         timestamp=1793700499 + index,
@@ -1662,23 +2137,34 @@ def _real_swim_sample(index: int, values: tuple | None) -> ActivitySample:
 
 
 def _real_pool_swim_detail() -> ActivityDetail:
-    detail = _pool_swim_detail({"stroke_count": 112, "turn_count": 6, "pool_width": 0, "max_stroke_freq": 28, "avg_stroke_frequency": 0, "main_posture": 1})
+    detail = _pool_swim_detail(
+        {
+            "stroke_count": 112,
+            "turn_count": 6,
+            "pool_width": 0,
+            "max_stroke_freq": 28,
+            "avg_stroke_frequency": 0,
+            "main_posture": 1,
+        }
+    )
     detail.activity.start_time = 1793700499
     detail.activity.end_time = 1793700765
     detail.activity.duration_seconds = 265
     detail.activity.distance_meters = 150
     detail.activity.calories = 70
-    detail.samples = [_real_swim_sample(index, values) for index, values in enumerate(_REAL_SWIM_LENGTHS)]
+    detail.samples = [
+        _real_swim_sample(index, values) for index, values in enumerate(_REAL_SWIM_LENGTHS)
+    ]
     return detail
 
 
-def _fit_lengths(fit: FitFile) -> list:
+def _fit_lengths(fit: FitFile) -> list[Any]:
     from fit_tool.profile.messages.length_message import LengthMessage
 
     return [r.message for r in fit.records if isinstance(r.message, LengthMessage)]
 
 
-def test_fit_export_pool_swim_writes_active_lengths():
+def test_fit_export_pool_swim_writes_active_lengths() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
@@ -1688,13 +2174,27 @@ def test_fit_export_pool_swim_writes_active_lengths():
     assert len(lengths) == 7
     assert len(active_lengths) == 6
     assert [length.total_strokes for length in active_lengths] == [23, 16, 19, 17, 21, 16]
-    assert [length.total_timer_time for length in active_lengths] == [60.0, 34.0, 44.0, 39.0, 50.0, 37.0]
+    assert [length.total_timer_time for length in active_lengths] == [
+        60.0,
+        34.0,
+        44.0,
+        39.0,
+        50.0,
+        37.0,
+    ]
     assert [length.avg_swimming_cadence for length in active_lengths] == [23, 28, 25, 26, 25, 25]
     # The fixture's FDS SWOLF (type 13) equals length seconds + strokes.
-    assert [int(length.total_timer_time) + length.total_strokes for length in active_lengths] == [83, 50, 63, 56, 71, 53]
+    assert [int(length.total_timer_time) + length.total_strokes for length in active_lengths] == [
+        83,
+        50,
+        63,
+        56,
+        71,
+        53,
+    ]
 
 
-def test_fit_export_pool_swim_writes_lap_per_set_and_rest():
+def test_fit_export_pool_swim_writes_lap_per_set_and_rest() -> None:
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     laps = _fit_laps(fit)
     session = _fit_sessions(fit)[0]
@@ -1711,16 +2211,25 @@ def test_fit_export_pool_swim_writes_lap_per_set_and_rest():
     assert session.pool_length == pytest.approx(25.0)
 
 
-def test_fit_export_pool_swim_records_have_cumulative_distance():
+def test_fit_export_pool_swim_records_have_cumulative_distance() -> None:
     from fit_tool.profile.messages.record_message import RecordMessage
 
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     records = [r.message for r in fit.records if isinstance(r.message, RecordMessage)]
 
-    assert [record.distance for record in records] == [0.0, 0.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0]
+    assert [record.distance for record in records] == [
+        0.0,
+        0.0,
+        25.0,
+        50.0,
+        75.0,
+        100.0,
+        125.0,
+        150.0,
+    ]
 
 
-def test_fit_export_pool_swim_lap_cadence_is_consistent():
+def test_fit_export_pool_swim_lap_cadence_is_consistent() -> None:
     laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
     rated_laps = [lap for lap in laps if lap.avg_cadence is not None]
 
@@ -1728,29 +2237,37 @@ def test_fit_export_pool_swim_lap_cadence_is_consistent():
     assert all(lap.avg_cadence <= lap.max_cadence for lap in rated_laps)
 
 
-def test_fit_export_pool_swim_writes_swim_stroke():
+def test_fit_export_pool_swim_writes_swim_stroke() -> None:
     from fit_tool.profile.profile_type import LengthType, SwimStroke
 
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
-    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+    active_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value
+    ]
 
     # Mi Fitness style 1 is breaststroke.
     assert {length.swim_stroke for length in active_lengths} == {SwimStroke.BREASTSTROKE.value}
-    assert {lap.swim_stroke for lap in _fit_laps(fit) if lap.swim_stroke is not None} == {SwimStroke.BREASTSTROKE.value}
+    assert {lap.swim_stroke for lap in _fit_laps(fit) if lap.swim_stroke is not None} == {
+        SwimStroke.BREASTSTROKE.value
+    }
     assert _fit_sessions(fit)[0].swim_stroke == SwimStroke.BREASTSTROKE.value
 
 
-def test_fit_export_pool_swim_lap_with_mixed_strokes_is_mixed():
+def test_fit_export_pool_swim_lap_with_mixed_strokes_is_mixed() -> None:
     from fit_tool.profile.profile_type import SwimStroke
 
     detail = _real_pool_swim_detail()
     detail.samples[1].raw_sample["extras"]["11"] = 2
     laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
 
-    assert [lap.swim_stroke for lap in laps] == [None, SwimStroke.MIXED.value, SwimStroke.BREASTSTROKE.value]
+    assert [lap.swim_stroke for lap in laps] == [
+        None,
+        SwimStroke.MIXED.value,
+        SwimStroke.BREASTSTROKE.value,
+    ]
 
 
-def test_fit_export_pool_swim_summary_only_uses_main_posture():
+def test_fit_export_pool_swim_summary_only_uses_main_posture() -> None:
     from fit_tool.profile.profile_type import SwimStroke
 
     detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "main_posture": 2})
@@ -1760,7 +2277,7 @@ def test_fit_export_pool_swim_summary_only_uses_main_posture():
     assert _fit_sessions(fit)[0].swim_stroke == SwimStroke.FREESTYLE.value
 
 
-def test_fit_export_pool_swim_set_without_strokes_has_no_cycle_fields():
+def test_fit_export_pool_swim_set_without_strokes_has_no_cycle_fields() -> None:
     detail = _real_pool_swim_detail()
     for sample in detail.samples[5:]:
         sample.raw_sample["extras"]["16"] = 0
@@ -1771,7 +2288,8 @@ def test_fit_export_pool_swim_set_without_strokes_has_no_cycle_fields():
 
     assert laps[-1].total_cycles is None
     assert laps[-1].avg_stroke_distance is None
-    # 0-stroke lengths hold no stroke data, so the session averages only the set that reported strokes.
+    # 0-stroke lengths hold no stroke data, so the session averages only the set that
+    # reported strokes.
     assert session.total_cycles == 75
     assert session.avg_stroke_count == pytest.approx(75 / 4, abs=0.06)
     assert session.avg_stroke_distance == pytest.approx(100 / 75, abs=0.01)
@@ -1779,7 +2297,7 @@ def test_fit_export_pool_swim_set_without_strokes_has_no_cycle_fields():
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_prefers_avg_stroke_freq():
+def test_fit_export_pool_swim_prefers_avg_stroke_freq() -> None:
     detail = _pool_swim_detail(
         {"stroke_count": 1377, "turn_count": 60, "avg_stroke_freq": 40, "avg_stroke_frequency": 20}
     )
@@ -1788,7 +2306,7 @@ def test_fit_export_pool_swim_prefers_avg_stroke_freq():
     assert session.avg_cadence == 40
 
 
-def test_fit_export_pool_swim_session_counts_written_lengths():
+def test_fit_export_pool_swim_session_counts_written_lengths() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {"stroke_count": 999, "turn_count": 40, "sport_type": 9}
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -1802,7 +2320,7 @@ def test_fit_export_pool_swim_session_counts_written_lengths():
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_reported_rates_and_pool_length_win():
+def test_fit_export_pool_swim_reported_rates_and_pool_length_win() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {
         "stroke_count": 112,
@@ -1823,7 +2341,7 @@ def test_fit_export_pool_swim_reported_rates_and_pool_length_win():
     assert [lap.avg_cadence for lap in laps] == [None, 25, 25]
 
 
-def test_fit_export_pool_swim_caps_average_rate_at_maximum():
+def test_fit_export_pool_swim_caps_average_rate_at_maximum() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {
         "stroke_count": 112,
@@ -1839,7 +2357,7 @@ def test_fit_export_pool_swim_caps_average_rate_at_maximum():
     assert session.max_cadence == 30
 
 
-def test_fit_export_pool_swim_caps_derived_rate_at_reported_maximum():
+def test_fit_export_pool_swim_caps_derived_rate_at_reported_maximum() -> None:
     detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "max_stroke_freq": 20})
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
@@ -1847,8 +2365,10 @@ def test_fit_export_pool_swim_caps_derived_rate_at_reported_maximum():
     assert session.max_cadence == 20
 
 
-def test_fit_export_pool_swim_caps_report_only_average_rate():
-    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "avg_stroke_freq": 40, "max_stroke_freq": 30})
+def test_fit_export_pool_swim_caps_report_only_average_rate() -> None:
+    detail = _pool_swim_detail(
+        {"stroke_count": 1377, "turn_count": 60, "avg_stroke_freq": 40, "max_stroke_freq": 30}
+    )
     fit = _parse_fit(render_export(detail, "fit").payload)
 
     assert _fit_sessions(fit)[0].avg_cadence == 30
@@ -1856,9 +2376,14 @@ def test_fit_export_pool_swim_caps_report_only_average_rate():
     assert _fit_laps(fit)[0].avg_cadence == 30
 
 
-def test_fit_export_pool_swim_caps_average_at_measured_maximum():
+def test_fit_export_pool_swim_caps_average_at_measured_maximum() -> None:
     detail = _real_pool_swim_detail()
-    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "avg_stroke_freq": 50, "sport_type": 9}
+    detail.activity.raw_report = {
+        "stroke_count": 112,
+        "turn_count": 6,
+        "avg_stroke_freq": 50,
+        "sport_type": 9,
+    }
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
@@ -1866,16 +2391,21 @@ def test_fit_export_pool_swim_caps_average_at_measured_maximum():
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_ignores_implausible_report_pool_width():
+def test_fit_export_pool_swim_ignores_implausible_report_pool_width() -> None:
     detail = _real_pool_swim_detail()
-    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "pool_width": 5, "sport_type": 9}
+    detail.activity.raw_report = {
+        "stroke_count": 112,
+        "turn_count": 6,
+        "pool_width": 5,
+        "sport_type": 9,
+    }
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
     assert session.pool_length == pytest.approx(25.0)
 
 
-def test_fit_export_pool_swim_measured_pool_length_beats_report_estimate():
+def test_fit_export_pool_swim_measured_pool_length_beats_report_estimate() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {"stroke_count": 112, "turn_count": 7, "sport_type": 9}
 
@@ -1884,7 +2414,7 @@ def test_fit_export_pool_swim_measured_pool_length_beats_report_estimate():
     assert session.pool_length == pytest.approx(25.0)
 
 
-def test_fit_export_pool_swim_ignores_zero_stroke_rate():
+def test_fit_export_pool_swim_ignores_zero_stroke_rate() -> None:
     from fit_tool.profile.messages.record_message import RecordMessage
     from fit_tool.profile.profile_type import LengthType
 
@@ -1901,7 +2431,11 @@ def test_fit_export_pool_swim_ignores_zero_stroke_rate():
         for length in _fit_lengths(fit)
         if length.length_type == LengthType.ACTIVE.value and length.start_time >= 1793700677000
     ]
-    last_records = [record for record in (r.message for r in fit.records) if isinstance(record, RecordMessage) and record.timestamp > 1793700677000]
+    last_records = [
+        record
+        for record in (r.message for r in fit.records)
+        if isinstance(record, RecordMessage) and record.timestamp > 1793700677000
+    ]
 
     assert laps[2].avg_cadence is None
     assert laps[2].max_cadence is None
@@ -1911,7 +2445,7 @@ def test_fit_export_pool_swim_ignores_zero_stroke_rate():
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_zero_stroke_lengths_have_no_stroke_fields():
+def test_fit_export_pool_swim_zero_stroke_lengths_have_no_stroke_fields() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     detail = _real_pool_swim_detail()
@@ -1928,16 +2462,21 @@ def test_fit_export_pool_swim_zero_stroke_lengths_have_no_stroke_fields():
     assert [length.total_strokes for length in last_lengths] == [None, None]
 
 
-def test_fit_export_pool_swim_session_maximum_rate_covers_every_lap():
+def test_fit_export_pool_swim_session_maximum_rate_covers_every_lap() -> None:
     detail = _real_pool_swim_detail()
-    detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "max_stroke_freq": 25, "sport_type": 9}
+    detail.activity.raw_report = {
+        "stroke_count": 112,
+        "turn_count": 6,
+        "max_stroke_freq": 25,
+        "sport_type": 9,
+    }
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_ignores_sample_cadence_for_session_rate():
+def test_fit_export_pool_swim_ignores_sample_cadence_for_session_rate() -> None:
     detail = _pool_swim_detail({"turn_count": 60, "max_stroke_freq": 30})
     detail.samples[0].cadence = 100
 
@@ -1947,17 +2486,18 @@ def test_fit_export_pool_swim_ignores_sample_cadence_for_session_rate():
     assert session.max_cadence == 30
 
 
-def test_fit_export_pool_swim_length_without_pace_uses_previous_end():
+def test_fit_export_pool_swim_length_without_pace_uses_previous_end() -> None:
     detail = _real_pool_swim_detail()
     detail.samples[0].raw_sample.pop("pace")
 
     laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
 
-    # Without its pace, the first length starts at the session start, so there is no leading rest lap.
+    # Without its pace, the first length starts at the session start, so there is no leading
+    # rest lap.
     assert [lap.num_lengths for lap in laps] == [4, 2]
 
 
-def test_fit_export_pool_swim_omits_derived_rate_that_rounds_to_zero():
+def test_fit_export_pool_swim_omits_derived_rate_that_rounds_to_zero() -> None:
     detail = _pool_swim_detail({"stroke_count": 20, "turn_count": 60})
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -1965,7 +2505,7 @@ def test_fit_export_pool_swim_omits_derived_rate_that_rounds_to_zero():
     assert session.avg_cadence is None
 
 
-def test_fit_export_pool_swim_omits_reported_rate_that_rounds_to_zero():
+def test_fit_export_pool_swim_omits_reported_rate_that_rounds_to_zero() -> None:
     detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "max_stroke_freq": 0.4})
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -1975,7 +2515,9 @@ def test_fit_export_pool_swim_omits_reported_rate_that_rounds_to_zero():
 
 
 @pytest.mark.parametrize("rate_key", ["avg_stroke_freq", "avg_stroke_frequency"])
-def test_fit_export_pool_swim_omits_reported_average_rate_that_rounds_to_zero(rate_key):
+def test_fit_export_pool_swim_omits_reported_average_rate_that_rounds_to_zero(
+    rate_key: str,
+) -> None:
     detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, rate_key: 0.4})
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -1984,7 +2526,7 @@ def test_fit_export_pool_swim_omits_reported_average_rate_that_rounds_to_zero(ra
     assert session.avg_cadence == 30
 
 
-def test_fit_export_pool_swim_without_length_count_writes_strokes():
+def test_fit_export_pool_swim_without_length_count_writes_strokes() -> None:
     detail = _pool_swim_detail({"stroke_count": 600})
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -1994,7 +2536,7 @@ def test_fit_export_pool_swim_without_length_count_writes_strokes():
     assert session.pool_length is None
 
 
-def test_fit_export_pool_swim_falls_back_to_report_pool_length_when_lengths_differ():
+def test_fit_export_pool_swim_falls_back_to_report_pool_length_when_lengths_differ() -> None:
     detail = _real_pool_swim_detail()
     detail.samples[0].distance_meters = 20.0
 
@@ -2004,17 +2546,19 @@ def test_fit_export_pool_swim_falls_back_to_report_pool_length_when_lengths_diff
     assert session.pool_length == pytest.approx(25.0)
 
 
-def test_fit_export_pool_swim_skips_length_with_non_integer_end_time():
+def test_fit_export_pool_swim_skips_length_with_non_integer_end_time() -> None:
     detail = _real_pool_swim_detail()
     detail.samples[3].raw_sample["extras"]["1"] = "1793700677"
 
     fit = _parse_fit(render_export(detail, "fit").payload)
-    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+    active_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value
+    ]
 
     assert len(active_lengths) == 5
 
 
-def test_fit_export_pool_swim_ignores_boolean_stroke_count():
+def test_fit_export_pool_swim_ignores_boolean_stroke_count() -> None:
     detail = _pool_swim_detail({"stroke_count": True, "turn_count": 60})
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -2022,7 +2566,7 @@ def test_fit_export_pool_swim_ignores_boolean_stroke_count():
     assert session.total_cycles is None
 
 
-def test_fit_export_pool_swim_ignores_boolean_posture():
+def test_fit_export_pool_swim_ignores_boolean_posture() -> None:
     detail = _pool_swim_detail({"stroke_count": 10, "turn_count": 2, "main_posture": True})
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -2030,9 +2574,11 @@ def test_fit_export_pool_swim_ignores_boolean_posture():
     assert session.swim_stroke is None
 
 
-def test_fit_export_pool_swim_lengths_carry_speed_and_calories():
+def test_fit_export_pool_swim_lengths_carry_speed_and_calories() -> None:
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
-    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+    active_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value
+    ]
 
     assert [(length.avg_speed, length.total_calories) for length in active_lengths] == [
         (0.417, 16),
@@ -2044,15 +2590,21 @@ def test_fit_export_pool_swim_lengths_carry_speed_and_calories():
     ]
 
 
-def test_fit_export_pool_swim_laps_carry_speed_and_calories():
+def test_fit_export_pool_swim_laps_carry_speed_and_calories() -> None:
     laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
 
-    assert [(lap.avg_speed, lap.total_calories) for lap in laps] == [(None, None), (0.565, 46), (0.575, 22)]
+    assert [(lap.avg_speed, lap.total_calories) for lap in laps] == [
+        (None, None),
+        (0.565, 46),
+        (0.575, 22),
+    ]
 
 
-def test_fit_export_pool_swim_records_carry_speed_and_rate():
+def test_fit_export_pool_swim_records_carry_speed_and_rate() -> None:
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
-    records = [record.message for record in fit.records if isinstance(record.message, RecordMessage)]
+    records = [
+        record.message for record in fit.records if isinstance(record.message, RecordMessage)
+    ]
 
     assert [(record.speed, record.cadence) for record in records] == [
         (None, None),
@@ -2066,7 +2618,7 @@ def test_fit_export_pool_swim_records_carry_speed_and_rate():
     ]
 
 
-def test_fit_export_pool_swim_lengths_are_indexed_length_events():
+def test_fit_export_pool_swim_lengths_are_indexed_length_events() -> None:
     lengths = _fit_lengths(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
 
     assert [(length.message_index, length.event, length.event_type) for length in lengths] == [
@@ -2074,13 +2626,13 @@ def test_fit_export_pool_swim_lengths_are_indexed_length_events():
     ]
 
 
-def test_fit_export_pool_swim_laps_are_indexed():
+def test_fit_export_pool_swim_laps_are_indexed() -> None:
     laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
 
     assert [lap.message_index for lap in laps] == [0, 1, 2]
 
 
-def test_fit_export_pool_swim_session_points_at_first_lap_in_metric_pool():
+def test_fit_export_pool_swim_session_points_at_first_lap_in_metric_pool() -> None:
     session = _fit_sessions(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))[0]
 
     assert (session.first_lap_index, session.pool_length_unit) == (0, DisplayMeasure.METRIC.value)
@@ -2096,15 +2648,19 @@ def test_fit_export_pool_swim_session_points_at_first_lap_in_metric_pool():
         (4, SwimStroke.BUTTERFLY),
     ],
 )
-def test_fit_export_pool_swim_maps_mi_fitness_style_to_fit_stroke(main_posture, swim_stroke):
-    detail = _pool_swim_detail({"stroke_count": 1377, "turn_count": 60, "main_posture": main_posture})
+def test_fit_export_pool_swim_maps_mi_fitness_style_to_fit_stroke(
+    main_posture: int, swim_stroke: SwimStroke
+) -> None:
+    detail = _pool_swim_detail(
+        {"stroke_count": 1377, "turn_count": 60, "main_posture": main_posture}
+    )
 
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
 
     assert session.swim_stroke == swim_stroke.value
 
 
-def test_fit_export_pool_swim_cadence_fallback_counts_stroked_lengths_only():
+def test_fit_export_pool_swim_cadence_fallback_counts_stroked_lengths_only() -> None:
     detail = _real_pool_swim_detail()
     for sample in detail.samples:
         if isinstance(sample.raw_sample.get("extras"), dict):
@@ -2119,7 +2675,7 @@ def test_fit_export_pool_swim_cadence_fallback_counts_stroked_lengths_only():
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_uses_lengths_without_swim_report():
+def test_fit_export_pool_swim_uses_lengths_without_swim_report() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {}
     session = _fit_sessions(_parse_fit(render_export(detail, "fit").payload))[0]
@@ -2133,7 +2689,7 @@ def test_fit_export_pool_swim_uses_lengths_without_swim_report():
     assert session.max_cadence == 28
 
 
-def test_fit_export_pool_swim_average_speed_uses_lap_span():
+def test_fit_export_pool_swim_average_speed_uses_lap_span() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.duration_seconds = 200
 
@@ -2143,7 +2699,7 @@ def test_fit_export_pool_swim_average_speed_uses_lap_span():
     assert session.avg_speed == pytest.approx(150 / 265, abs=0.001)
 
 
-def test_fit_export_pool_swim_session_timestamp_keeps_the_activity_end():
+def test_fit_export_pool_swim_session_timestamp_keeps_the_activity_end() -> None:
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     laps = _fit_laps(fit)
     session = _fit_sessions(fit)[0]
@@ -2153,7 +2709,7 @@ def test_fit_export_pool_swim_session_timestamp_keeps_the_activity_end():
     assert laps[-1].timestamp == 1793700764000
 
 
-def test_fit_export_pool_swim_laps_tile_the_session():
+def test_fit_export_pool_swim_laps_tile_the_session() -> None:
     fit = _parse_fit(render_export(_real_pool_swim_detail(), "fit").payload)
     laps = _fit_laps(fit)
     session = _fit_sessions(fit)[0]
@@ -2161,15 +2717,15 @@ def test_fit_export_pool_swim_laps_tile_the_session():
     assert laps[0].start_time == session.start_time
     assert sum(lap.total_elapsed_time for lap in laps) == session.total_elapsed_time
     assert sum(lap.total_distance for lap in laps) == session.total_distance
-    for lap, next_lap in zip(laps, laps[1:]):
+    for lap, next_lap in itertools.pairwise(laps):
         assert next_lap.start_time == lap.start_time + round(lap.total_elapsed_time * 1000)
     assert all(lap.total_elapsed_time == lap.total_timer_time for lap in laps)
     assert all(length.total_elapsed_time == length.total_timer_time for length in _fit_lengths(fit))
 
 
-def test_fit_export_pool_swim_laps_cover_lengths_past_the_report_duration():
+def test_fit_export_pool_swim_laps_cover_lengths_past_the_report_duration() -> None:
     detail = _real_pool_swim_detail()
-    last_length_end = detail.activity.end_time + 10
+    last_length_end = (detail.activity.end_time or 0) + 10
     detail.samples[6].raw_sample["extras"]["1"] = last_length_end
 
     fit = _parse_fit(render_export(detail, "fit").payload)
@@ -2185,7 +2741,7 @@ def test_fit_export_pool_swim_laps_cover_lengths_past_the_report_duration():
     assert activity.local_timestamp == _fit_local_timestamp(last_length_end, 0)
 
 
-def test_fit_export_pool_swim_writes_trailing_rest_lap():
+def test_fit_export_pool_swim_writes_trailing_rest_lap() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     detail = _real_pool_swim_detail()
@@ -2194,7 +2750,9 @@ def test_fit_export_pool_swim_writes_trailing_rest_lap():
     fit = _parse_fit(render_export(detail, "fit").payload)
     laps = _fit_laps(fit)
     session = _fit_sessions(fit)[0]
-    idle_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value]
+    idle_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value
+    ]
 
     assert [lap.total_elapsed_time for lap in laps] == [1.0, 177.0, 87.0, 35.0]
     assert laps[-1].total_distance == 0.0
@@ -2203,14 +2761,16 @@ def test_fit_export_pool_swim_writes_trailing_rest_lap():
     assert sum(lap.total_elapsed_time for lap in laps) == session.total_elapsed_time == 300.0
 
 
-def test_fit_export_pool_swim_skips_length_without_swim_time():
+def test_fit_export_pool_swim_skips_length_without_swim_time() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     detail = _real_pool_swim_detail()
     detail.samples[3].raw_sample["extras"]["1"] = 1793700638
 
     fit = _parse_fit(render_export(detail, "fit").payload)
-    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+    active_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value
+    ]
 
     assert len(active_lengths) == 5
     assert all(length.total_timer_time > 0 for length in _fit_lengths(fit))
@@ -2220,19 +2780,21 @@ def test_fit_export_pool_swim_skips_length_without_swim_time():
     assert session.avg_speed == pytest.approx(125 / 265, abs=0.001)
 
 
-def test_fit_export_pool_swim_skips_length_without_end_time():
+def test_fit_export_pool_swim_skips_length_without_end_time() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     detail = _real_pool_swim_detail()
     detail.samples[3].raw_sample["extras"].pop("1")
 
     fit = _parse_fit(render_export(detail, "fit").payload)
-    active_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value]
+    active_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.ACTIVE.value
+    ]
 
     assert len(active_lengths) == 5
 
 
-def test_fit_export_pool_swim_ignores_implausible_written_pool_length():
+def test_fit_export_pool_swim_ignores_implausible_written_pool_length() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {}
     for sample in detail.samples:
@@ -2244,7 +2806,7 @@ def test_fit_export_pool_swim_ignores_implausible_written_pool_length():
     assert session.pool_length is None
 
 
-def test_fit_export_pool_swim_without_any_strokes_keeps_report_summary():
+def test_fit_export_pool_swim_without_any_strokes_keeps_report_summary() -> None:
     detail = _real_pool_swim_detail()
     for sample in detail.samples:
         if isinstance(sample.raw_sample.get("extras"), dict):
@@ -2259,7 +2821,7 @@ def test_fit_export_pool_swim_without_any_strokes_keeps_report_summary():
     assert session.avg_cadence == 25
 
 
-def test_fit_export_pool_swim_without_strokes_or_report_has_no_cadence():
+def test_fit_export_pool_swim_without_strokes_or_report_has_no_cadence() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.raw_report = {}
     for sample in detail.samples:
@@ -2274,7 +2836,7 @@ def test_fit_export_pool_swim_without_strokes_or_report_has_no_cadence():
     assert session.avg_stroke_count is None
 
 
-def test_fit_export_pool_swim_lap_stroke_distance_uses_stroked_lengths():
+def test_fit_export_pool_swim_lap_stroke_distance_uses_stroked_lengths() -> None:
     detail = _real_pool_swim_detail()
     detail.samples[1].raw_sample["extras"]["16"] = 0
 
@@ -2284,11 +2846,13 @@ def test_fit_export_pool_swim_lap_stroke_distance_uses_stroked_lengths():
     assert laps[1].avg_stroke_distance == pytest.approx(75 / 59, abs=0.01)
 
 
-def test_fit_export_pool_swim_lap_cadence_without_rates_uses_active_time():
+def test_fit_export_pool_swim_lap_cadence_without_rates_uses_active_time() -> None:
     detail = _real_pool_swim_detail()
     for sample in detail.samples[:4]:
         sample.raw_sample["extras"].pop("17")
-    detail.samples[1].raw_sample["pace"] = 100  # 25 s for 25 m, leaving 9 s of rest after the first length
+    detail.samples[1].raw_sample["pace"] = (
+        100  # 25 s for 25 m, leaving 9 s of rest after the first length
+    )
 
     laps = _fit_laps(_parse_fit(render_export(detail, "fit").payload))
 
@@ -2297,7 +2861,7 @@ def test_fit_export_pool_swim_lap_cadence_without_rates_uses_active_time():
     assert laps[1].max_cadence is None
 
 
-def test_fit_export_pool_swim_session_cadence_uses_active_time():
+def test_fit_export_pool_swim_session_cadence_uses_active_time() -> None:
     detail = _real_pool_swim_detail()
     detail.activity.duration_seconds = 400
     detail.activity.raw_report = {"stroke_count": 112, "turn_count": 6, "sport_type": 9}
@@ -2311,14 +2875,16 @@ def test_fit_export_pool_swim_session_cadence_uses_active_time():
     assert session.avg_cadence == 25
 
 
-def test_fit_export_pool_swim_strava_totals_come_from_laps():
+def test_fit_export_pool_swim_strava_totals_come_from_laps() -> None:
     laps = _fit_laps(_parse_fit(render_export(_real_pool_swim_detail(), "fit").payload))
 
     assert sum(lap.total_distance for lap in laps) == pytest.approx(150.0)
-    assert sum(lap.total_timer_time for lap in laps if lap.total_distance > 0) == pytest.approx(264.0)
+    assert sum(lap.total_timer_time for lap in laps if lap.total_distance > 0) == pytest.approx(
+        264.0
+    )
 
 
-def test_fit_export_pool_swim_writes_rest_lap_between_sets():
+def test_fit_export_pool_swim_writes_rest_lap_between_sets() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     detail = _real_pool_swim_detail()
@@ -2326,7 +2892,9 @@ def test_fit_export_pool_swim_writes_rest_lap_between_sets():
 
     fit = _parse_fit(render_export(detail, "fit").payload)
     laps = _fit_laps(fit)
-    idle_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value]
+    idle_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value
+    ]
 
     assert [lap.total_distance for lap in laps] == [0.0, 100.0, 0.0, 50.0]
     assert [lap.num_active_lengths for lap in laps] == [0, 4, 0, 2]
@@ -2334,15 +2902,19 @@ def test_fit_export_pool_swim_writes_rest_lap_between_sets():
     assert sum(lap.total_elapsed_time for lap in laps) == _fit_sessions(fit)[0].total_elapsed_time
 
 
-def test_fit_export_pool_swim_rest_inside_set_is_idle_length():
+def test_fit_export_pool_swim_rest_inside_set_is_idle_length() -> None:
     from fit_tool.profile.profile_type import LengthType
 
     detail = _real_pool_swim_detail()
-    detail.samples[1].raw_sample["pace"] = 100  # 25 s for 25 m, leaving 9 s of rest after the first length
+    detail.samples[1].raw_sample["pace"] = (
+        100  # 25 s for 25 m, leaving 9 s of rest after the first length
+    )
 
     fit = _parse_fit(render_export(detail, "fit").payload)
     laps = _fit_laps(fit)
-    idle_lengths = [length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value]
+    idle_lengths = [
+        length for length in _fit_lengths(fit) if length.length_type == LengthType.IDLE.value
+    ]
 
     assert [lap.num_lengths for lap in laps] == [1, 5, 2]
     assert [lap.num_active_lengths for lap in laps] == [0, 4, 2]

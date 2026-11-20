@@ -11,12 +11,12 @@ Mi Fitness Sync is an unofficial Python CLI (`mi-fitness-sync`) for pulling work
 - Exports one or many activities to GPX, TCX, or FIT, with optional GPS smoothing.
 - Uploads FIT files to Strava using OAuth2, with a duplicate check.
 
-Tech stack: Python 3.12, `requests`, `pycryptodome`, `fit-tool`, setuptools packaging, pytest with pytest-cov. The protocol knowledge comes from a decompiled Mi Fitness APK and is documented in `docs/`.
+Tech stack: Python 3.12, `requests`, `pycryptodome`, `fit-tool`, uv for packaging and dependency management with the hatchling build backend, ruff for formatting and linting, mypy in strict mode, pytest with pytest-cov, and GitHub Actions for CI and PyPI publishing. The protocol knowledge comes from a decompiled Mi Fitness APK and is documented in `docs/`.
 
 ## Prerequisites
 
-- Python 3.12 or newer (`requires-python = ">=3.12"` in `pyproject.toml`).
-- A local virtual environment at `.venv`, with the package installed in editable mode plus the test extras: `python -m pip install -e ".[test]"`. On Windows the interpreter is `.venv\Scripts\python.exe`.
+- Python 3.12 or newer (`requires-python = ">=3.12"` in `pyproject.toml`), plus [uv](https://docs.astral.sh/uv/).
+- The environment is created by `uv sync --all-groups`, which reads `uv.lock` and installs the package in editable mode together with the `dev` dependency group. On Windows the interpreter is `.venv\Scripts\python.exe`.
 - External services: a Xiaomi account (`account.xiaomi.com`), the Mi Fitness cloud (`hlth.io.mi.com` and its regional hosts), and a Strava API application for the Strava commands. Tests never contact any of them.
 - Optional: the decompiled Mi Fitness APK under `mifitness_android/` (gitignored, local only). It is the source of truth for every claim in `docs/`.
 
@@ -160,16 +160,18 @@ src/mi_fitness_sync/
 ├── auth/           # Xiaomi Passport login client, auth state model, and state file store
 ├── activity/       # Mi Fitness cloud API: signed and encrypted transport, region routing, list and detail normalization
 ├── fds/            # FDS binary file download, parsing, and on-disk cache
-├── export/         # GPX, TCX, and FIT rendering, GPS smoothing, bulk export
+├── export/         # GPX, TCX, and FIT rendering, GPS smoothing, coordinate rules, bulk export
 ├── strava/         # Strava OAuth2, token store, upload client, sport type mapping
 ├── __main__.py     # entry point for python -m mi_fitness_sync
 ├── config.py       # User-Agent sent by the Xiaomi Passport and Mi Fitness API clients
 ├── exceptions.py   # MiFitnessError hierarchy, the errors the CLI reports or resolves
-├── http_retry.py   # retryable status codes and backoff delays
-└── paths.py        # per-user data directories under ~/.mi_fitness_sync
+├── http_retry.py   # retry policy: retryable status codes and backoff delays
+├── paths.py        # per-user data directories under ~/.mi_fitness_sync
+└── py.typed        # PEP 561 marker that makes the package's type hints visible to consumers
 tests/              # mirrors the package layout, one folder per package
 docs/               # decompiled-app reference documents, governed by docs/AGENTS.md
 main.py             # runs the CLI from a checkout without installing
+.github/workflows/  # ci.yml runs lint, types, and tests; publish.yml uploads releases to PyPI
 ```
 
 This structure can be updated as the project evolves. If you add new files or modules, update this diagram and the corresponding sections to reflect the changes.
@@ -189,7 +191,7 @@ This structure can be updated as the project evolves. If you add new files or mo
 | **Orchestrator** (`activity/client.py`, `activity/fds.py`, `export/bulk.py`) | Coordinate clients, parsers, and stores, apply business rules such as filtering and merging | Know about HTTP or transport, such as sessions, requests, and transport errors, or print, prompt, or read CLI arguments |
 | **External client** (`auth/client.py`, `activity/transport.py`, `fds/downloader.py`, `strava/client.py`, `strava/auth.py`) | Talk to Xiaomi, Mi Fitness, or Strava over HTTP, map responses to models | Contain business logic, print, or prompt |
 | **Store** (`auth/store.py`, `strava/store.py`, `fds/cache.py`) | Read and write local state and cache files | Make business decisions, call external APIs |
-| **Parser and renderer** (`activity/crypto.py`, the `parse_*` functions in `fds/`, `export/render.py`, `export/smoothing.py`) | Decrypt, decode, transform, and render bytes and models | Have side effects, do I/O, maintain state |
+| **Parser and renderer** (`activity/crypto.py`, the `parse_*` functions in `fds/`, `export/render.py`, `export/smoothing.py`, `export/geo.py`) | Decrypt, decode, transform, and render bytes and models | Have side effects, do I/O, maintain state |
 
 ### Dependency Injection
 
@@ -389,15 +391,26 @@ A given exception should be logged by exactly **one** handler: the layer that **
 
 ### How to Run Tests
 
-Run from the repo root with the `.venv` environment active, so `python` is `.venv\Scripts\python.exe` on Windows. Test folders mirror the packages, so run the folder of each touched package, then the full suite before finishing.
+Run from the repo root through `uv run`, which reuses the `uv.lock`-pinned environment. Test folders mirror the packages, so run the folder of each touched package, then the full suite before finishing.
 
 ```bash
 # Touched package
-python -m pytest tests/auth -q
+uv run pytest tests/auth -q
 
 # Full suite
-python -m pytest -q
+uv run pytest -q
 ```
+
+Run the whole gate before finishing:
+
+```bash
+uv run ruff format --check
+uv run ruff check
+uv run mypy
+uv run pytest --cov --cov-report=term-missing --cov-fail-under=75
+```
+
+The 75% floor is applied by the command above and by CI, not by `[tool.coverage.report]`, so a per-package coverage run still reports without failing the gate.
 
 ### Test Naming
 
@@ -447,8 +460,8 @@ Rules that apply to all patterns:
 - Coverage must be **run and shown** at the end for ALL created tests.
 
 ```bash
-# Branch coverage is already enabled in pyproject.toml
-python -m pytest tests/auth --cov=mi_fitness_sync.auth --cov-report=term-missing
+# Branch coverage is configured in pyproject.toml; the 75% floor applies to the full-suite run
+uv run pytest tests/auth --cov=mi_fitness_sync.auth --cov-report=term-missing
 ```
 
 ### All Created Tests MUST Pass
@@ -500,6 +513,16 @@ python -m pytest tests/auth --cov=mi_fitness_sync.auth --cov-report=term-missing
 - Do NOT prolong bad patterns. Even if the surrounding code is bad, write good code.
 - Do NOT copy-paste from legacy code without reviewing quality.
 - Isolate new code from legacy where possible.
+
+## Toolchain
+
+- **uv owns the environment.** `pyproject.toml` declares dependencies and a `dev` dependency group, `uv.lock` pins them, and `uv sync --all-groups` creates `.venv`. Add, remove, or upgrade a dependency with `uv add`, `uv remove`, or `uv lock`, and commit the updated `uv.lock` in the same change. Do not reintroduce a `requirements.txt` or hand-edit `uv.lock`.
+- **hatchling builds the distribution.** The version is read from `src/mi_fitness_sync/__init__.py`, so bump `__version__` there and the package metadata, `config.USER_AGENT`, and the built artifacts follow. The sdist is an allowlist, so new top-level files ship only when added to `[tool.hatch.build.targets.sdist]`.
+- **ruff owns formatting and linting.** The configuration selects every rule set and documents each intentional exception in `[tool.ruff.lint].ignore`. Prefer fixing a finding over adding an ignore, and give every ignore a reason on the same line.
+- **mypy runs in strict mode over `src` and `tests`.** Every function, method, fixture, and test carries annotations, and the package ships `py.typed`. Fakes that stand in for `requests` objects are converted with a `cast` at the call site, which keeps the fake readable while satisfying the checker.
+- **CI mirrors those commands.** `.github/workflows/ci.yml` runs formatting, lint, types, and a build with `twine check` on Ubuntu, and the test suite with the 75% coverage floor on Ubuntu and Windows for Python 3.12 and 3.13. `.github/workflows/publish.yml` runs on a published GitHub release, repeats the tests and build, and uploads to PyPI through trusted publishing, so no API token is stored. A release tag must match `__version__`, and the workflow fails when they disagree. A manual `Publish` run builds and verifies only, and never writes to PyPI.
+- **Publishing needs one-time setup outside the repository.** PyPI needs a pending publisher for `mi-fitness-sync` (owner `kevinkwee`, repository `Mi-Fitness-Sync`, workflow `publish.yml`, environment `pypi`), and the GitHub repository needs an environment named `pypi`. `README.md` carries the same steps under "Releasing".
+- **Never ship local captures.** The sdist allowlist admits only the files it names, which keeps editor state and agent scratch files out of published artifacts. The `.gitignore` entries for `*.har` and `*.har.json` keep captured HTTP traffic out of git.
 
 ## Documentation
 

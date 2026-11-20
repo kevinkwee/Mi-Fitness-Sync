@@ -6,7 +6,12 @@ import json
 import os
 import struct
 import time
+from typing import Any
 from urllib.parse import urlparse
+
+from mi_fitness_sync.exceptions import XiaomiApiError
+
+RC4_KEY_BYTES = 32
 
 
 def b64decode(value: str) -> bytes:
@@ -27,9 +32,10 @@ def sha1_signature(parts: list[str]) -> str:
 
 
 class Rc4Cipher:
-    def __init__(self, key: bytes):
-        if len(key) != 32:
-            raise ValueError("RC4 key must be 32 bytes.")
+    def __init__(self, key: bytes) -> None:
+        if len(key) != RC4_KEY_BYTES:
+            msg = "RC4 key must be 32 bytes."
+            raise ValueError(msg)
         self._state = list(range(256))
         j = 0
         for index in range(256):
@@ -53,8 +59,7 @@ class Rc4Cipher:
 def build_signature(method: str, path: str, params: dict[str, str], signed_nonce_value: str) -> str:
     uri_path = urlparse(path).path
     parts = [method.upper(), uri_path]
-    for key in sorted(params):
-        parts.append(f"{key}={params[key]}")
+    parts.extend(f"{key}={params[key]}" for key in sorted(params))
     parts.append(signed_nonce_value)
     return sha1_signature(parts)
 
@@ -65,12 +70,13 @@ def generate_nonce(time_diff_ms: int) -> str:
     return b64encode(payload)
 
 
-def decrypt_response_payload(body: str, nonce: str, ssecurity: str) -> dict[str, object]:
+def decrypt_response_payload(body: str, nonce: str, ssecurity: str) -> dict[str, Any]:
     rc4_key = b64decode(signed_nonce(ssecurity, nonce))
     decrypted = Rc4Cipher(rc4_key).apply(b64decode(body)).decode("utf-8")
     payload = json.loads(decrypted)
     if not isinstance(payload, dict):
-        raise ValueError("Mi Fitness response payload was not a JSON object.")
+        msg = "Mi Fitness response payload was not a JSON object."
+        raise XiaomiApiError(msg)
     return payload
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -13,21 +14,37 @@ from mi_fitness_sync.activity.client import (
 from mi_fitness_sync.activity.models import Activity, ActivityPage, ActivitySample, FitnessDataPage
 from mi_fitness_sync.exceptions import MiFitnessError
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def test_collect_cookie_values_fills_locale_and_user_id(auth_state):
+    from mi_fitness_sync.auth.state import AuthState
+
+
+def _record_and_return_none(recorded: list[str]) -> Callable[[Activity, object], None]:
+    """Build a stand-in that records the activity ID and returns None."""
+
+    def record(selected_activity: Activity, fds: object) -> None:
+        recorded.append(selected_activity.activity_id)
+
+    return record
+
+
+def test_collect_cookie_values_fills_locale_and_user_id(auth_state: AuthState) -> None:
     client = MiFitnessActivitiesClient(auth_state)
 
     assert client._cookie_values["locale"] == "en_US"
     assert client._cookie_values["userId"] == auth_state.user_id
 
 
-def test_get_activity_list_endpoint_uses_country_override(auth_state):
+def test_get_activity_list_endpoint_uses_country_override(auth_state: AuthState) -> None:
     client = MiFitnessActivitiesClient(auth_state, country_code="ID")
 
-    assert client._get_activity_list_endpoint() == ACTIVITY_LIST_ENDPOINT.replace("://", "://sg.", 1)
+    assert client._get_activity_list_endpoint() == ACTIVITY_LIST_ENDPOINT.replace(
+        "://", "://sg.", 1
+    )
 
 
-def test_parse_activity_builds_expected_fields(auth_state):
+def test_parse_activity_builds_expected_fields(auth_state: AuthState) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     record = {
         "sid": "sid-1",
@@ -58,7 +75,9 @@ def test_parse_activity_builds_expected_fields(auth_state):
     assert activity.next_key == "next-token"
 
 
-def test_get_activity_by_id_distinguishes_same_sid_different_timestamps(auth_state, monkeypatch):
+def test_get_activity_by_id_distinguishes_same_sid_different_timestamps(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
 
     activity_a = Activity(
@@ -111,7 +130,9 @@ def test_get_activity_by_id_distinguishes_same_sid_different_timestamps(auth_sta
     assert result_b.title == "Strength Training B"
 
 
-def test_get_activity_detail_item_distinguishes_same_sid_different_timestamps(auth_state, monkeypatch):
+def test_get_activity_detail_item_distinguishes_same_sid_different_timestamps(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
 
     activity = Activity(
@@ -146,14 +167,18 @@ def test_get_activity_detail_item_distinguishes_same_sid_different_timestamps(au
         "value": '{"sport_records": []}',
     }
 
-    page = FitnessDataPage(items=[fitness_item_wrong, fitness_item_correct], has_more=False, next_key=None)
+    page = FitnessDataPage(
+        items=[fitness_item_wrong, fitness_item_correct], has_more=False, next_key=None
+    )
     monkeypatch.setattr(client, "_fetch_fitness_data_page", lambda **kwargs: page)
 
     result = client._get_activity_detail_item(activity)
     assert result["time"] == 1700000002
 
 
-def test_get_activity_detail_item_paginates_to_find_matching_timestamp(auth_state, monkeypatch):
+def test_get_activity_detail_item_paginates_to_find_matching_timestamp(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
 
     activity = Activity(
@@ -193,9 +218,9 @@ def test_get_activity_detail_item_paginates_to_find_matching_timestamp(auth_stat
 
     pages = {"__first__": page1, "page2-token": page2}
 
-    def fake_fetch(**kwargs):
+    def fake_fetch(**kwargs: object) -> FitnessDataPage:
         token = kwargs.get("next_key")
-        return pages[token] if token else pages["__first__"]
+        return pages[str(token)] if token else pages["__first__"]
 
     monkeypatch.setattr(client, "_fetch_fitness_data_page", fake_fetch)
 
@@ -203,7 +228,9 @@ def test_get_activity_detail_item_paginates_to_find_matching_timestamp(auth_stat
     assert result["time"] == 1700000002
 
 
-def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, monkeypatch):
+def test_get_activity_detail_normalizes_track_points_and_samples(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
@@ -215,7 +242,7 @@ def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, mon
         start_time=1717200000,
         end_time=1717200060,
         duration_seconds=60,
-        distance_meters=500.0,
+        distance_meters=500,
         calories=42,
         steps=800,
         sync_state="server",
@@ -276,7 +303,9 @@ def test_get_activity_detail_normalizes_track_points_and_samples(auth_state, mon
     assert detail.total_calories == 42
 
 
-def test_get_activity_detail_skips_optional_fds_payloads_when_disabled(auth_state, monkeypatch):
+def test_get_activity_detail_skips_optional_fds_payloads_when_disabled(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
@@ -309,17 +338,17 @@ def test_get_activity_detail_skips_optional_fds_payloads_when_disabled(auth_stat
     recovery_rate_calls: list[str] = []
 
     monkeypatch.setattr(client, "_try_get_fds_download_map", lambda selected_activity: {})
-    monkeypatch.setattr(client, "_try_download_fds_sport_samples", lambda selected_activity, fds: [])
-    monkeypatch.setattr(client, "_try_download_fds_gps_track_points", lambda selected_activity, fds: [])
     monkeypatch.setattr(
-        client,
-        "_try_download_fds_sport_report",
-        lambda selected_activity, fds: sport_report_calls.append(selected_activity.activity_id) or None,
+        client, "_try_download_fds_sport_samples", lambda selected_activity, fds: []
     )
     monkeypatch.setattr(
-        client,
-        "_try_download_fds_recovery_rate",
-        lambda selected_activity, fds: recovery_rate_calls.append(selected_activity.activity_id) or None,
+        client, "_try_download_fds_gps_track_points", lambda selected_activity, fds: []
+    )
+    monkeypatch.setattr(
+        client, "_try_download_fds_sport_report", _record_and_return_none(sport_report_calls)
+    )
+    monkeypatch.setattr(
+        client, "_try_download_fds_recovery_rate", _record_and_return_none(recovery_rate_calls)
     )
     monkeypatch.setattr(client, "_get_activity_detail_item", lambda selected_activity: fitness_item)
 
@@ -335,7 +364,9 @@ def test_get_activity_detail_skips_optional_fds_payloads_when_disabled(auth_stat
     assert not recovery_rate_calls
 
 
-def test_get_activity_detail_uses_fds_samples_as_primary(auth_state, monkeypatch):
+def test_get_activity_detail_uses_fds_samples_as_primary(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
@@ -402,7 +433,9 @@ def test_get_activity_detail_uses_fds_samples_as_primary(auth_state, monkeypatch
     assert detail.samples[0].raw_sample["source"] == "fds_sport_record"
 
 
-def test_get_activity_detail_fds_only_when_no_json(auth_state, monkeypatch):
+def test_get_activity_detail_fds_only_when_no_json(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
@@ -419,7 +452,13 @@ def test_get_activity_detail_fds_only_when_no_json(auth_state, monkeypatch):
         steps=None,
         sync_state="server",
         next_key=None,
-        raw_record={"sid": "sid-1", "key": "key-1", "time": 1717200000, "zone_name": "UTC", "zone_offset": 0},
+        raw_record={
+            "sid": "sid-1",
+            "key": "key-1",
+            "time": 1717200000,
+            "zone_name": "UTC",
+            "zone_offset": 0,
+        },
         raw_report={},
     )
 
@@ -452,7 +491,9 @@ def test_get_activity_detail_fds_only_when_no_json(auth_state, monkeypatch):
     assert len(detail.track_points) == 0
 
 
-def test_get_activity_detail_raises_when_no_data(auth_state, monkeypatch):
+def test_get_activity_detail_raises_when_no_data(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
@@ -508,7 +549,9 @@ def _make_activity(start_time: int) -> Activity:
     )
 
 
-def test_list_activities_filters_by_end_time(auth_state, monkeypatch):
+def test_list_activities_filters_by_end_time(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """--until should exclude activities whose start_time exceeds end_time."""
     client = MiFitnessActivitiesClient(auth_state)
 
@@ -527,7 +570,9 @@ def test_list_activities_filters_by_end_time(auth_state, monkeypatch):
     assert result[1].start_time == 2000
 
 
-def test_list_activities_filters_by_start_time(auth_state, monkeypatch):
+def test_list_activities_filters_by_start_time(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """--since should exclude activities whose start_time is before start_time."""
     client = MiFitnessActivitiesClient(auth_state)
 
@@ -546,7 +591,9 @@ def test_list_activities_filters_by_start_time(auth_state, monkeypatch):
     assert result[1].start_time == 3000
 
 
-def test_list_activities_filters_by_both_start_and_end_time(auth_state, monkeypatch):
+def test_list_activities_filters_by_both_start_and_end_time(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """--since + --until should keep only activities within the range."""
     client = MiFitnessActivitiesClient(auth_state)
 
@@ -566,7 +613,9 @@ def test_list_activities_filters_by_both_start_and_end_time(auth_state, monkeypa
     assert result[1].start_time == 3000
 
 
-def test_list_activities_no_filter_returns_all(auth_state, monkeypatch):
+def test_list_activities_no_filter_returns_all(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """No --since/--until should return all activities."""
     client = MiFitnessActivitiesClient(auth_state)
 
@@ -583,7 +632,9 @@ def test_list_activities_no_filter_returns_all(auth_state, monkeypatch):
     assert len(result) == 3
 
 
-def test_list_activities_filter_respects_limit(auth_state, monkeypatch):
+def test_list_activities_filter_respects_limit(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Limit should be enforced after filtering."""
     client = MiFitnessActivitiesClient(auth_state)
 
@@ -600,12 +651,14 @@ def test_list_activities_filter_respects_limit(auth_state, monkeypatch):
     assert len(result) == 2
 
 
-def test_list_activities_uses_list_page_size(auth_state, monkeypatch):
+def test_list_activities_uses_list_page_size(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     requested_limits: list[int] = []
 
-    def fake_fetch(**kwargs):
-        requested_limits.append(kwargs["limit"])
+    def fake_fetch(**kwargs: object) -> ActivityPage:
+        requested_limits.append(int(str(kwargs["limit"])))
         return ActivityPage(activities=[], has_more=False, next_key=None)
 
     monkeypatch.setattr(client, "_fetch_activity_page", fake_fetch)
@@ -616,12 +669,14 @@ def test_list_activities_uses_list_page_size(auth_state, monkeypatch):
     assert requested_limits == [LIST_ACTIVITIES_PAGE_SIZE]
 
 
-def test_iter_activities_uses_iterator_page_size(auth_state, monkeypatch):
+def test_iter_activities_uses_iterator_page_size(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     requested_limits: list[int] = []
 
-    def fake_fetch(**kwargs):
-        requested_limits.append(kwargs["limit"])
+    def fake_fetch(**kwargs: object) -> ActivityPage:
+        requested_limits.append(int(str(kwargs["limit"])))
         return ActivityPage(activities=[], has_more=False, next_key=None)
 
     monkeypatch.setattr(client, "_fetch_activity_page", fake_fetch)
@@ -632,7 +687,9 @@ def test_iter_activities_uses_iterator_page_size(auth_state, monkeypatch):
     assert requested_limits == [ITER_ACTIVITIES_PAGE_SIZE]
 
 
-def test_iter_activities_reduces_last_page_to_remaining_limit(auth_state, monkeypatch):
+def test_iter_activities_reduces_last_page_to_remaining_limit(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = MiFitnessActivitiesClient(auth_state)
     requested_limits: list[int] = []
 
@@ -652,8 +709,8 @@ def test_iter_activities_reduces_last_page_to_remaining_limit(auth_state, monkey
         next_key=None,
     )
 
-    def fake_fetch(**kwargs):
-        requested_limits.append(kwargs["limit"])
+    def fake_fetch(**kwargs: object) -> ActivityPage:
+        requested_limits.append(int(str(kwargs["limit"])))
         token = kwargs.get("next_key")
         if token == "page2":
             return page2
@@ -669,7 +726,9 @@ def test_iter_activities_reduces_last_page_to_remaining_limit(auth_state, monkey
     assert requested_limits == [ITER_ACTIVITIES_PAGE_SIZE, ITER_ACTIVITIES_PAGE_SIZE, 50]
 
 
-def test_list_activities_paginates_when_filtering_reduces_count(auth_state, monkeypatch):
+def test_list_activities_paginates_when_filtering_reduces_count(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Should fetch additional pages when filtering reduces the count below limit."""
     client = MiFitnessActivitiesClient(auth_state)
 
@@ -684,7 +743,7 @@ def test_list_activities_paginates_when_filtering_reduces_count(auth_state, monk
         next_key=None,
     )
 
-    def fake_fetch(**kwargs):
+    def fake_fetch(**kwargs: object) -> ActivityPage:
         if kwargs.get("next_key") == "page2":
             return page2
         return page1
@@ -699,7 +758,9 @@ def test_list_activities_paginates_when_filtering_reduces_count(auth_state, monk
     assert result[1].start_time == 3000
 
 
-def test_list_activities_includes_activity_with_none_start_time(auth_state, monkeypatch):
+def test_list_activities_includes_activity_with_none_start_time(
+    auth_state: AuthState, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Activities missing start_time should not be excluded by filters."""
     client = MiFitnessActivitiesClient(auth_state)
 

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from mi_fitness_sync.activity.transport import ActivityTransport
 
+if TYPE_CHECKING:
+    from mi_fitness_sync.auth.state import AuthState
 
-def test_request_json_retries_retryable_http_status(auth_state):
+
+def test_request_json_retries_retryable_http_status(auth_state: AuthState) -> None:
     session = MagicMock()
 
     retry_response = MagicMock()
@@ -25,8 +29,14 @@ def test_request_json_retries_retryable_http_status(auth_state):
 
     with (
         patch("mi_fitness_sync.activity.transport.generate_nonce", return_value="nonce"),
-        patch("mi_fitness_sync.activity.transport.encrypt_query_params", return_value={"data": "encrypted"}),
-        patch("mi_fitness_sync.activity.transport.decrypt_response_payload", return_value={"code": 0, "result": {"ok": True}}),
+        patch(
+            "mi_fitness_sync.activity.transport.encrypt_query_params",
+            return_value={"data": "encrypted"},
+        ),
+        patch(
+            "mi_fitness_sync.activity.transport.decrypt_response_payload",
+            return_value={"code": 0, "result": {"ok": True}},
+        ),
         patch("mi_fitness_sync.activity.transport.time.sleep") as sleep_mock,
     ):
         payload = transport.request_json(

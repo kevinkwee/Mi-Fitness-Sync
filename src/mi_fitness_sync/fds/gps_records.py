@@ -3,24 +3,30 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import requests
-
-from mi_fitness_sync.fds.cache import FdsCache
 from mi_fitness_sync.fds.common import (
+    FLOAT32_BYTES,
     SPORT_SERVER_DATA_ID_LEN,
+    UINT32_BYTES,
     OneDimenType,
+    parse_fds_header,
     parse_one_dimen_valid,
     read_uint,
-    parse_fds_header,
 )
 from mi_fitness_sync.fds.downloader import download_and_parse_fds_file
 
+if TYPE_CHECKING:
+    import requests
+
+    from mi_fitness_sync.fds.cache import FdsCache
 
 logger = logging.getLogger(__name__)
 
 _GPS_VALIDITY: dict[int, int] = {1: 1, 2: 1, 3: 1, 4: 1}
+
+# From this version on the body starts with a 32-bit record count.
+_GPS_COUNTED_RECORD_VERSION = 4
 
 GPS_TYPE_TIME = 0
 GPS_TYPE_LONGITUDE = 1
@@ -63,10 +69,12 @@ class GpsSample:
     hdop: float | None = None
 
 
-def _read_gps_field(buf: memoryview | bytes, offset: int, data_type: OneDimenType) -> tuple[int | float, int]:
+def _read_gps_field(
+    buf: memoryview | bytes, offset: int, data_type: OneDimenType
+) -> tuple[int | float, int]:
     if data_type.byte_count == 0:
         return 0, offset
-    if data_type.type_id in _GPS_FLOAT_TYPES and data_type.byte_count == 4:
+    if data_type.type_id in _GPS_FLOAT_TYPES and data_type.byte_count == FLOAT32_BYTES:
         return struct.unpack_from("<f", buf, offset)[0], offset + 4
     return read_uint(buf, offset, data_type.byte_count)
 
@@ -163,10 +171,10 @@ def parse_gps_record(decrypted: bytes) -> list[GpsSample]:
 
     buf = memoryview(header.body_data)
     offset = 0
-    if version >= 4:
-        if len(buf) < 4:
+    if version >= _GPS_COUNTED_RECORD_VERSION:
+        if len(buf) < UINT32_BYTES:
             return []
-        record_count, offset = read_uint(buf, offset, 4)
+        record_count, offset = read_uint(buf, offset, UINT32_BYTES)
         samples, _ = parse_gps_records(buf, offset, record_count, version, valid_map)
         return samples
 
@@ -190,7 +198,7 @@ def download_and_parse_gps_record(
         session,
         fds_entry,
         parse_gps_record,
-        lambda: [],
+        list,
         timeout=timeout,
         cache=cache,
         cache_key=cache_key,

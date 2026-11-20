@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from typing import Any
+
+
 class MiFitnessError(Exception):
     """Base error for CLI failures."""
 
@@ -5,7 +10,13 @@ class MiFitnessError(Exception):
 class XiaomiApiError(MiFitnessError):
     """Server-side or protocol error."""
 
-    def __init__(self, message: str, *, code: int | None = None, payload: dict | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.payload = payload or {}
@@ -23,8 +34,8 @@ class CaptchaRequiredError(MiFitnessError):
         captcha_url: str,
         *,
         captcha_type: str = "captcha",
-        payload: dict | None = None,
-    ):
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__("Captcha is required for this account.")
         self.captcha_url = captcha_url
         self.captcha_type = captcha_type
@@ -34,7 +45,7 @@ class CaptchaRequiredError(MiFitnessError):
 class NotificationRequiredError(MiFitnessError):
     """The account requires a browser or app notification confirmation."""
 
-    def __init__(self, notification_url: str):
+    def __init__(self, notification_url: str) -> None:
         super().__init__("Additional account verification is required.")
         self.notification_url = notification_url
 
@@ -46,9 +57,9 @@ class Step2RequiredError(MiFitnessError):
         self,
         message: str,
         *,
-        payload: dict | None = None,
+        payload: dict[str, Any] | None = None,
         step1_token: str | None = None,
-    ):
+    ) -> None:
         super().__init__(message)
         self.payload = payload or {}
         self.step1_token = step1_token

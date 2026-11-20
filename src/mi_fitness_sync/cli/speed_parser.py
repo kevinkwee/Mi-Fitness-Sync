@@ -15,6 +15,7 @@ from mi_fitness_sync.exceptions import MiFitnessError
 
 _PACE_RE = re.compile(r"^(\d+):(\d{1,2})(?:/km)?$")
 _KMH_RE = re.compile(r"^(\d+(?:\.\d+)?)(?:kmh)?$", re.IGNORECASE)
+_SECONDS_PER_MINUTE = 60
 
 
 def parse_speed_input(value: str) -> float:
@@ -29,16 +30,14 @@ def parse_speed_input(value: str) -> float:
     if m is not None:
         minutes = int(m.group(1))
         seconds = int(m.group(2))
-        if seconds >= 60:
-            raise MiFitnessError(
-                f"Invalid pace '{value}': seconds must be 0–59."
-            )
+        if seconds >= _SECONDS_PER_MINUTE:
+            msg = f"Invalid pace '{value}': seconds must be 0-59."
+            raise MiFitnessError(msg)
         total_seconds = minutes * 60 + seconds
         if total_seconds <= 0:
-            raise MiFitnessError(
-                f"Invalid pace '{value}': pace must be greater than zero."
-            )
-        # pace (s/km) → m/s = 1000 / total_seconds
+            msg = f"Invalid pace '{value}': pace must be greater than zero."
+            raise MiFitnessError(msg)
+        # pace in s/km converts to m/s as 1000 / total_seconds
         return 1000.0 / total_seconds
 
     # km/h format: plain number with optional 'kmh' suffix
@@ -46,12 +45,12 @@ def parse_speed_input(value: str) -> float:
     if m is not None:
         kmh = float(m.group(1))
         if kmh <= 0:
-            raise MiFitnessError(
-                f"Invalid speed '{value}': speed must be greater than zero."
-            )
+            msg = f"Invalid speed '{value}': speed must be greater than zero."
+            raise MiFitnessError(msg)
         return kmh / 3.6
 
-    raise MiFitnessError(
-        f"Cannot parse speed '{value}'. "
-        "Use km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30' or '7:30/km')."
+    msg = (
+        f"Cannot parse speed '{value}'. Use km/h (e.g. '180' or '180kmh') or pace "
+        "(e.g. '7:30' or '7:30/km')."
     )
+    raise MiFitnessError(msg)

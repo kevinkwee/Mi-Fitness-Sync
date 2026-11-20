@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
-from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.exceptions import MiFitnessError
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mi_fitness_sync.activity.models import Activity
 
 
 def sanitize_export_title(title: str) -> str:
@@ -32,7 +36,8 @@ def activity_local_datetime(
         if isinstance(raw_time, int):
             timestamp = raw_time
     if timestamp is None:
-        raise MiFitnessError(f"Activity {activity.activity_id} does not have a usable start time.")
+        msg = f"Activity {activity.activity_id} does not have a usable start time."
+        raise MiFitnessError(msg)
 
     resolved_offset = zone_offset_seconds
     if resolved_offset is None:
@@ -41,7 +46,7 @@ def activity_local_datetime(
             resolved_offset = raw_timezone
 
     tz = timezone(timedelta(seconds=resolved_offset)) if resolved_offset is not None else None
-    utc_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    utc_dt = datetime.fromtimestamp(timestamp, tz=UTC)
     if tz is not None:
         return utc_dt.astimezone(tz)
     return utc_dt.astimezone()
@@ -58,7 +63,9 @@ def default_export_path(
 ) -> Path:
     """Build the default output path for a rendered export."""
     safe_title = sanitize_export_title(activity.title)
-    date_str = activity_local_datetime(activity, zone_offset_seconds=zone_offset_seconds).strftime("%Y%m%d_%H%M%S")
+    date_str = activity_local_datetime(activity, zone_offset_seconds=zone_offset_seconds).strftime(
+        "%Y%m%d_%H%M%S"
+    )
     suffix = f".{file_format}.gz" if compress else f".{file_format}"
 
     if include_activity_id:

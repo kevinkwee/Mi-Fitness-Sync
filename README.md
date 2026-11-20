@@ -1,5 +1,15 @@
 # Mi Fitness Sync
 
+<p align="center">
+  <a href="https://pypi.org/project/mi-fitness-sync/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/mi-fitness-sync"></a>
+  <a href="https://pypi.org/project/mi-fitness-sync/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/mi-fitness-sync"></a>
+  <a href="https://github.com/kevinkwee/Mi-Fitness-Sync/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/kevinkwee/Mi-Fitness-Sync/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/kevinkwee/Mi-Fitness-Sync"></a>
+  <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
+  <a href="https://mypy.readthedocs.io/"><img alt="Checked with mypy" src="https://img.shields.io/badge/mypy-strict-2a6db2"></a>
+  <a href="https://ko-fi.com/kevinkwee27"><img alt="Ko-fi" src="https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5f5f?logo=ko-fi&logoColor=white"></a>
+</p>
+
 An unofficial Python CLI for accessing Mi Fitness workout data and manually syncing activities that failed to reach Strava.
 
 ## Why This Exists
@@ -22,12 +32,18 @@ This is mainly useful if you want to:
 
 ## Install
 
-Python 3.12+ is required.
+Python 3.12 or newer is required.
 
-Install in editable mode:
+Install from PyPI:
 
 ```bash
-python -m pip install -e .
+pip install mi-fitness-sync
+```
+
+Or install it as a standalone tool with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install mi-fitness-sync
 ```
 
 Then run with:
@@ -36,10 +52,10 @@ Then run with:
 mi-fitness-sync --help
 ```
 
-Or without installing:
+Or from a checkout without installing:
 
 ```bash
-python main.py --help
+uv run main.py --help
 ```
 
 ## Strava API Setup
@@ -47,7 +63,7 @@ python main.py --help
 Before using any Strava commands you need a Strava API application:
 
 1. Go to https://www.strava.com/settings/api and create an application
-2. Set the **Authorization Callback Domain** to `localhost` (just the domain — no protocol, no port, no path)
+2. Set the **Authorization Callback Domain** to `localhost` (just the domain, with no protocol, port, or path)
 
 The CLI uses `http://localhost:{port}/callback` as the redirect URI. Strava only matches on the domain portion, so the callback domain setting must be exactly `localhost`.
 
@@ -82,7 +98,7 @@ mi-fitness-sync strava-login
 mi-fitness-sync upload-to-strava sid:key:1717200000
 ```
 
-All credentials are entered via CLI arguments or interactive prompts — there are no environment variables.
+All credentials are entered via CLI arguments or interactive prompts. There are no environment variables.
 
 ## Commands
 
@@ -241,7 +257,7 @@ Export behavior:
 2. TCX and FIT prefer track points but fall back to timestamped sport samples without coordinates
 3. GPS smoothing is enabled by default for exports that include GPS coordinates; it only adjusts latitude/longitude and leaves timestamps, heart rate, cadence, and other fields unchanged
 4. `match` mode tries to bring the smoothed GPS distance closer to the Mi Fitness summary distance, while `full` applies the largest valid smoothing window after outlier cleanup
-5. FIT generation is best-effort — only fields present in the Mi Fitness source are included
+5. FIT generation is best-effort, so only fields present in the Mi Fitness source are included
 6. Pool swim FIT exports write one `length` message per pool length, with rest as idle lengths, and one `lap` per swim set plus one per rest period before, between, or after sets
 
 ### `export-activities`
@@ -374,7 +390,7 @@ Upload behavior:
 
 1. Fetches the activity detail from Mi Fitness
 2. Renders to FIT format with the same optional smoothing controls as `export-activity`, then saves the file locally
-3. Checks Strava for existing activities within ±5 minutes of the start time (unless `--skip-duplicate-check` is set)
+3. Checks Strava for existing activities within 5 minutes either side of the start time (unless `--skip-duplicate-check` is set)
 4. If potential duplicates are found, prompts for confirmation before uploading
 5. Uploads the FIT file to Strava and polls until processing completes
 6. Prints the Strava activity URL on success
@@ -398,6 +414,40 @@ Example:
 ```bash
 python -m mi_fitness_sync logout
 ```
+
+## Development
+
+The project is managed with [uv](https://docs.astral.sh/uv/) and checked with [ruff](https://docs.astral.sh/ruff/) and [mypy](https://mypy-lang.org/) in strict mode.
+
+```bash
+# Create the environment and install the development dependencies
+uv sync --all-groups
+
+# Run the test suite with coverage
+uv run pytest --cov --cov-report=term-missing
+
+# Format and lint
+uv run ruff format
+uv run ruff check
+
+# Type check the package
+uv run mypy
+```
+
+CI runs formatting, lint, and type checks on pushes to `main` and on every pull request, together with a build whose packaging metadata is validated. The test suite runs on Ubuntu and Windows for Python 3.12 and 3.13.
+
+## Releasing
+
+Releases publish to PyPI through GitHub Actions trusted publishing, so no API token is stored in the repository. One-time setup before the first release:
+
+1. On PyPI, add a pending publisher for the project `mi-fitness-sync` with owner `kevinkwee`, repository `Mi-Fitness-Sync`, workflow `publish.yml`, and environment `pypi`.
+2. In the GitHub repository settings, create an environment named `pypi` and, optionally, add a deployment protection rule such as a required reviewer.
+
+After that, bump `__version__` in `src/mi_fitness_sync/__init__.py`, publish a GitHub release whose tag matches that version (`v0.1.0` or `0.1.0`), and the `Publish` workflow runs the tests, builds the sdist and wheel, and uploads them. A tag that does not match the version fails the workflow before anything is uploaded. The PyPI badges and the `pip install mi-fitness-sync` command only resolve once the first release is published.
+
+## Support
+
+If this project saved you time, you can buy me a coffee on [Ko-fi](https://ko-fi.com/kevinkwee27). Support is optional and does not affect how the project is maintained.
 
 ## Local Auth Storage
 

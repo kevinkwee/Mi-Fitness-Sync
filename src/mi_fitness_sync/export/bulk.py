@@ -4,18 +4,21 @@ import json
 import logging
 import tempfile
 import threading
+from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING
 
-from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
-from mi_fitness_sync.activity.models import Activity
-from mi_fitness_sync.auth.state import AuthState
+from mi_fitness_sync.activity.client import ActivitiesClientOptions, MiFitnessActivitiesClient
 from mi_fitness_sync.export.files import default_export_path
 from mi_fitness_sync.export.render import render_export
 
+if TYPE_CHECKING:
+    from mi_fitness_sync.activity.models import Activity
+    from mi_fitness_sync.auth.state import AuthState
+    from mi_fitness_sync.export.smoothing import SmoothMode
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ class BulkExportOptions:
     overwrite: bool
     smooth: bool
     outlier_speed_mps: float | None
-    smooth_mode: str
+    smooth_mode: SmoothMode
     include_sport_report: bool
     include_recovery_rate: bool = False
 
@@ -64,7 +67,7 @@ class BulkExportSummary:
 class BulkExportManifest:
     """Append-only JSONL manifest used to resume large export jobs."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path) -> None:
         self._path = path
 
     def load_latest_records(self) -> dict[str, BulkExportRecord]:
@@ -100,7 +103,7 @@ class BulkExportManifest:
 class BulkExporter:
     """Export matching activities with bounded concurrency and resume support."""
 
-    def __init__(self, auth_state: AuthState, options: BulkExportOptions):
+    def __init__(self, auth_state: AuthState, options: BulkExportOptions) -> None:
         self._auth_state = auth_state
         self._options = options
         self._thread_local = threading.local()
@@ -177,10 +180,14 @@ class BulkExporter:
                 pending[future] = activity.activity_id
 
                 if len(pending) >= queue_limit:
-                    self._drain_next_completed(pending, manifest, previous_records, summary, progress_callback)
+                    self._drain_next_completed(
+                        pending, manifest, previous_records, summary, progress_callback
+                    )
 
             while pending:
-                self._drain_next_completed(pending, manifest, previous_records, summary, progress_callback)
+                self._drain_next_completed(
+                    pending, manifest, previous_records, summary, progress_callback
+                )
 
         return summary
 
@@ -244,7 +251,8 @@ class BulkExporter:
                 error=None,
                 recorded_at=_utc_now_iso(),
             )
-        except Exception as exc:  # noqa: BLE001 - bulk export should record and continue
+        except Exception as exc:
+            # One failed activity is recorded and the rest of the batch continues.
             logger.exception("Bulk export failed for %s", activity.activity_id)
             return BulkExportRecord(
                 activity_id=activity.activity_id,
@@ -260,14 +268,14 @@ class BulkExporter:
         if isinstance(client, MiFitnessActivitiesClient):
             return client
 
-        kwargs: dict[str, object] = {
+        kwargs: ActivitiesClientOptions = {
             "country_code": self._options.country_code,
             "no_cache": self._options.no_cache,
         }
         if self._options.cache_dir is not None:
             kwargs["cache_dir"] = self._options.cache_dir
 
-        client = MiFitnessActivitiesClient(self._auth_state, **kwargs)  # type: ignore[arg-type]
+        client = MiFitnessActivitiesClient(self._auth_state, **kwargs)
         self._thread_local.client = client
         return client
 
@@ -292,7 +300,11 @@ def _record_from_payload(payload: object) -> BulkExportRecord | None:
     error = payload.get("error")
     recorded_at = payload.get("recorded_at")
 
-    if not isinstance(activity_id, str) or not isinstance(status, str) or not isinstance(recorded_at, str):
+    if (
+        not isinstance(activity_id, str)
+        or not isinstance(status, str)
+        or not isinstance(recorded_at, str)
+    ):
         return None
     if output_path is not None and not isinstance(output_path, str):
         return None
@@ -312,7 +324,7 @@ def _record_from_payload(payload: object) -> BulkExportRecord | None:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _write_bytes_atomic(output_path: Path, payload: bytes) -> None:

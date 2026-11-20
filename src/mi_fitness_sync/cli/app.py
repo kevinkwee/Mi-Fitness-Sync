@@ -5,27 +5,26 @@ import getpass
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, replace
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import get_args
+from typing import TYPE_CHECKING, Any, get_args
 
-from mi_fitness_sync.activity.client import MiFitnessActivitiesClient
+from mi_fitness_sync.activity.client import ActivitiesClientOptions, MiFitnessActivitiesClient
 from mi_fitness_sync.activity.formatting import parse_cli_time
-from mi_fitness_sync.activity.models import Activity, ActivityDetail
 from mi_fitness_sync.activity.utils import render_activities_table
-from mi_fitness_sync.auth.client import DEFAULT_SERVICE_ID, LoginSession, MetaLoginData, MiFitnessAuthClient
+from mi_fitness_sync.auth.client import (
+    DEFAULT_SERVICE_ID,
+    LoginSession,
+    MetaLoginData,
+    MiFitnessAuthClient,
+)
 from mi_fitness_sync.auth.state import utc_now_iso
 from mi_fitness_sync.auth.store import delete_state, load_state, resolve_state_path, save_state
 from mi_fitness_sync.cli.speed_parser import parse_speed_input
-from mi_fitness_sync.export.bulk import BulkExportOptions, BulkExportRecord, BulkExporter
-from mi_fitness_sync.export.files import activity_local_datetime as export_activity_local_datetime
-from mi_fitness_sync.export.files import default_export_path, sanitize_export_title
-from mi_fitness_sync.export.render import SUPPORTED_EXPORT_FORMATS, render_export
 from mi_fitness_sync.exceptions import (
     AuthStateNotFoundError,
     CaptchaRequiredError,
@@ -36,23 +35,51 @@ from mi_fitness_sync.exceptions import (
     VerificationCodeRejectedError,
     XiaomiApiError,
 )
+from mi_fitness_sync.export.bulk import BulkExporter, BulkExportOptions, BulkExportRecord
+from mi_fitness_sync.export.files import default_export_path
+from mi_fitness_sync.export.render import (
+    SUPPORTED_EXPORT_FORMATS,
+    RenderExportOptions,
+    render_export,
+)
 from mi_fitness_sync.paths import get_captcha_dir, get_exports_dir
 
+if TYPE_CHECKING:
+    from mi_fitness_sync.activity.models import Activity, ActivityDetail
+    from mi_fitness_sync.auth.state import AuthState
 
 logger = logging.getLogger(__name__)
 
 LoginChallenge = CaptchaRequiredError | Step2RequiredError | NotificationRequiredError
-LOGIN_CHALLENGE_ERRORS: tuple[type[MiFitnessError], ...] = get_args(LoginChallenge)
+LOGIN_CHALLENGE_ERRORS: tuple[
+    type[CaptchaRequiredError | Step2RequiredError | NotificationRequiredError], ...
+] = get_args(LoginChallenge)
 MAX_LOGIN_CHALLENGES = 5
+DUPLICATE_WINDOW_SECONDS = 5 * 60
+MATCH_WINDOW_SECONDS = 6
 RESEND_COMMAND = "resend"
 CANCEL_COMMAND = "cancel"
+COUNTRY_CODE_HELP = (
+    "Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness "
+    "region automatically"
+)
+OUTLIER_SPEED_HELP = (
+    "Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace "
+    "(e.g. '7:30'). Default: 180 km/h"
+)
+SMOOTH_MODE_HELP = (
+    "Smoothing strategy: 'match' converges on summary distance (default), 'full' applies "
+    "maximum smoothing"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Mi Fitness Sync CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    login_parser = subparsers.add_parser("login", help="Authenticate with Mi Fitness via Xiaomi Passport")
+    login_parser = subparsers.add_parser(
+        "login", help="Authenticate with Mi Fitness via Xiaomi Passport"
+    )
     login_parser.add_argument("--email", help="Mi / Xiaomi account email")
     login_parser.add_argument("--password", help="Mi / Xiaomi account password")
     login_parser.add_argument("--state-path", help="Override the persisted auth state path")
@@ -65,58 +92,93 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--state-path", help="Override the persisted auth state path")
     status_parser.add_argument("--json", action="store_true", help="Print full JSON auth state")
 
-    activities_parser = subparsers.add_parser("list-activities", help="List workout activities from Mi Fitness")
+    activities_parser = subparsers.add_parser(
+        "list-activities", help="List workout activities from Mi Fitness"
+    )
     activities_parser.add_argument("--state-path", help="Override the persisted auth state path")
-    activities_parser.add_argument("--since", help="Inclusive start time as unix seconds or ISO-8601")
+    activities_parser.add_argument(
+        "--since", help="Inclusive start time as unix seconds or ISO-8601"
+    )
     activities_parser.add_argument("--until", help="Inclusive end time as unix seconds or ISO-8601")
-    activities_parser.add_argument("--limit", type=int, default=20, help="Maximum activities to return (default: 20)")
+    activities_parser.add_argument(
+        "--limit", type=int, default=20, help="Maximum activities to return (default: 20)"
+    )
     activities_parser.add_argument("--category", help="Optional Mi Fitness category filter")
     activities_parser.add_argument(
         "--country-code",
-        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+        help=COUNTRY_CODE_HELP,
     )
     activities_parser.add_argument("--json", action="store_true", help="Print activities as JSON")
-    activities_parser.add_argument("--strava", action="store_true", help="Show whether each activity is already uploaded to Strava")
-    activities_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+    activities_parser.add_argument(
+        "--strava",
+        action="store_true",
+        help="Show whether each activity is already uploaded to Strava",
+    )
+    activities_parser.add_argument(
+        "--strava-token-path", help="Override the Strava token file path"
+    )
     activities_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
-    detail_parser = subparsers.add_parser("activity-detail", help="Fetch normalized detail for a listed Mi Fitness activity")
-    detail_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
+    detail_parser = subparsers.add_parser(
+        "activity-detail", help="Fetch normalized detail for a listed Mi Fitness activity"
+    )
+    detail_parser.add_argument(
+        "activity_id", help="Activity ID from list-activities, in sid:key:time format"
+    )
     detail_parser.add_argument("--state-path", help="Override the persisted auth state path")
     detail_parser.add_argument(
         "--country-code",
-        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+        help=COUNTRY_CODE_HELP,
     )
-    detail_parser.add_argument("--json", action="store_true", help="Print the normalized activity detail as JSON")
-    detail_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    detail_parser.add_argument(
+        "--json", action="store_true", help="Print the normalized activity detail as JSON"
+    )
+    detail_parser.add_argument(
+        "--no-cache", action="store_true", help="Disable local FDS binary cache"
+    )
     detail_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
     detail_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
-    export_parser = subparsers.add_parser("export-activity", help="Export one Mi Fitness activity to GPX, TCX, or FIT")
-    export_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
+    export_parser = subparsers.add_parser(
+        "export-activity", help="Export one Mi Fitness activity to GPX, TCX, or FIT"
+    )
+    export_parser.add_argument(
+        "activity_id", help="Activity ID from list-activities, in sid:key:time format"
+    )
     export_parser.add_argument("--state-path", help="Override the persisted auth state path")
     export_parser.add_argument(
         "--country-code",
-        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+        help=COUNTRY_CODE_HELP,
     )
-    export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
+    export_parser.add_argument(
+        "--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format"
+    )
     export_parser.add_argument(
         "--output",
-        help="Destination file path (default: ~/.mi_fitness_sync/exports/<sanitized_title>_<local_start_time>.<format>)",
+        help=(
+            "Destination file path (default: "
+            "~/.mi_fitness_sync/exports/<sanitized_title>_<local_start_time>.<format>)"
+        ),
     )
-    export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress the exported payload before writing it")
-    export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    export_parser.add_argument(
+        "--gzip", action="store_true", help="Gzip-compress the exported payload before writing it"
+    )
+    export_parser.add_argument(
+        "--no-cache", action="store_true", help="Disable local FDS binary cache"
+    )
     export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
-    export_parser.add_argument("--no-smooth", action="store_true", help="Disable GPS smoothing entirely")
+    export_parser.add_argument(
+        "--no-smooth", action="store_true", help="Disable GPS smoothing entirely"
+    )
     export_parser.add_argument(
         "--outlier-speed",
-        help="Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30'). Default: 180 km/h",
+        help=OUTLIER_SPEED_HELP,
     )
     export_parser.add_argument(
         "--smooth-mode",
         choices=("match", "full"),
         default="match",
-        help="Smoothing strategy: 'match' converges on summary distance (default), 'full' applies maximum smoothing",
+        help=SMOOTH_MODE_HELP,
     )
     export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
@@ -125,15 +187,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export many Mi Fitness activities to GPX, TCX, or FIT",
     )
     bulk_export_parser.add_argument("--state-path", help="Override the persisted auth state path")
-    bulk_export_parser.add_argument("--since", help="Inclusive start time as unix seconds or ISO-8601")
-    bulk_export_parser.add_argument("--until", help="Inclusive end time as unix seconds or ISO-8601")
-    bulk_export_parser.add_argument("--limit", type=int, help="Maximum activities to export (default: all matching activities)")
+    bulk_export_parser.add_argument(
+        "--since", help="Inclusive start time as unix seconds or ISO-8601"
+    )
+    bulk_export_parser.add_argument(
+        "--until", help="Inclusive end time as unix seconds or ISO-8601"
+    )
+    bulk_export_parser.add_argument(
+        "--limit", type=int, help="Maximum activities to export (default: all matching activities)"
+    )
     bulk_export_parser.add_argument("--category", help="Optional Mi Fitness category filter")
     bulk_export_parser.add_argument(
         "--country-code",
-        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+        help=COUNTRY_CODE_HELP,
     )
-    bulk_export_parser.add_argument("--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format")
+    bulk_export_parser.add_argument(
+        "--format", required=True, choices=SUPPORTED_EXPORT_FORMATS, help="Export format"
+    )
     bulk_export_parser.add_argument(
         "--output-dir",
         help="Destination directory (default: ~/.mi_fitness_sync/exports/bulk)",
@@ -142,65 +212,100 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-file",
         help="Resume/manifest JSONL path (default: <output-dir>/bulk_export_<format>.jsonl)",
     )
-    bulk_export_parser.add_argument("--workers", type=int, default=2, help="Concurrent export workers (default: 2)")
-    bulk_export_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files instead of skipping them")
-    bulk_export_parser.add_argument("--gzip", action="store_true", help="Gzip-compress each exported payload before writing it")
-    bulk_export_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    bulk_export_parser.add_argument(
+        "--workers", type=int, default=2, help="Concurrent export workers (default: 2)"
+    )
+    bulk_export_parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing files instead of skipping them"
+    )
+    bulk_export_parser.add_argument(
+        "--gzip", action="store_true", help="Gzip-compress each exported payload before writing it"
+    )
+    bulk_export_parser.add_argument(
+        "--no-cache", action="store_true", help="Disable local FDS binary cache"
+    )
     bulk_export_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
-    bulk_export_parser.add_argument("--no-smooth", action="store_true", help="Disable GPS smoothing entirely")
+    bulk_export_parser.add_argument(
+        "--no-smooth", action="store_true", help="Disable GPS smoothing entirely"
+    )
     bulk_export_parser.add_argument(
         "--outlier-speed",
-        help="Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30'). Default: 180 km/h",
+        help=OUTLIER_SPEED_HELP,
     )
     bulk_export_parser.add_argument(
         "--smooth-mode",
         choices=("match", "full"),
         default="match",
-        help="Smoothing strategy: 'match' converges on summary distance (default), 'full' applies maximum smoothing",
+        help=SMOOTH_MODE_HELP,
     )
     bulk_export_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
-    strava_login_parser = subparsers.add_parser("strava-login", help="Authenticate with Strava via OAuth2")
+    strava_login_parser = subparsers.add_parser(
+        "strava-login", help="Authenticate with Strava via OAuth2"
+    )
     strava_login_parser.add_argument("--client-id", help="Strava API client ID")
     strava_login_parser.add_argument("--client-secret", help="Strava API client secret")
-    strava_login_parser.add_argument("--port", type=int, default=5478, help="Local port for OAuth callback (default: 5478)")
-    strava_login_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+    strava_login_parser.add_argument(
+        "--port", type=int, default=5478, help="Local port for OAuth callback (default: 5478)"
+    )
+    strava_login_parser.add_argument(
+        "--strava-token-path", help="Override the Strava token file path"
+    )
 
     strava_status_parser = subparsers.add_parser("strava-status", help="Show Strava auth status")
-    strava_status_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+    strava_status_parser.add_argument(
+        "--strava-token-path", help="Override the Strava token file path"
+    )
 
-    strava_logout_parser = subparsers.add_parser("strava-logout", help="Revoke Strava access and delete local tokens")
-    strava_logout_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
+    strava_logout_parser = subparsers.add_parser(
+        "strava-logout", help="Revoke Strava access and delete local tokens"
+    )
+    strava_logout_parser.add_argument(
+        "--strava-token-path", help="Override the Strava token file path"
+    )
 
-    upload_parser = subparsers.add_parser("upload-to-strava", help="Upload a Mi Fitness activity to Strava as FIT")
-    upload_parser.add_argument("activity_id", help="Activity ID from list-activities, in sid:key:time format")
-    upload_parser.add_argument("--state-path", help="Override the persisted Mi Fitness auth state path")
+    upload_parser = subparsers.add_parser(
+        "upload-to-strava", help="Upload a Mi Fitness activity to Strava as FIT"
+    )
+    upload_parser.add_argument(
+        "activity_id", help="Activity ID from list-activities, in sid:key:time format"
+    )
+    upload_parser.add_argument(
+        "--state-path", help="Override the persisted Mi Fitness auth state path"
+    )
     upload_parser.add_argument("--strava-token-path", help="Override the Strava token file path")
     upload_parser.add_argument(
         "--country-code",
-        help="Optional two-letter country override such as ID, GB, or US; mapped to the Mi Fitness region automatically",
+        help=COUNTRY_CODE_HELP,
     )
     upload_parser.add_argument(
         "--output",
-        help="Destination file path for the local FIT copy (default: ~/.mi_fitness_sync/exports/<title>_<time>.fit)",
+        help=(
+            "Destination file path for the local FIT copy "
+            "(default: ~/.mi_fitness_sync/exports/<title>_<time>.fit)"
+        ),
     )
-    upload_parser.add_argument("--no-cache", action="store_true", help="Disable local FDS binary cache")
+    upload_parser.add_argument(
+        "--no-cache", action="store_true", help="Disable local FDS binary cache"
+    )
     upload_parser.add_argument("--cache-dir", help="Override the local FDS cache directory")
     upload_parser.add_argument(
         "--skip-duplicate-check",
         action="store_true",
         help="Skip checking for existing Strava activities with a similar start time",
     )
-    upload_parser.add_argument("--no-smooth", action="store_true", help="Disable GPS smoothing entirely")
+    upload_parser.add_argument(
+        "--no-smooth", action="store_true", help="Disable GPS smoothing entirely"
+    )
     upload_parser.add_argument(
         "--outlier-speed",
-        help="Max plausible speed for outlier detection: km/h (e.g. '180' or '180kmh') or pace (e.g. '7:30'). Default: 180 km/h",
+        help=OUTLIER_SPEED_HELP,
     )
     upload_parser.add_argument(
         "--smooth-mode",
         choices=("match", "full"),
         default="match",
-        help="Smoothing strategy: 'match' converges on summary distance (default), 'full' applies maximum smoothing",
+        help=SMOOTH_MODE_HELP,
     )
     upload_parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
@@ -241,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         print(format_error(exc), file=sys.stderr)
         return 1
 
+    # argparse.error exits; the explicit return satisfies ruff RET503.
     parser.error(f"Unsupported command: {args.command}")
     return 2
 
@@ -253,16 +359,21 @@ def handle_login(args: argparse.Namespace) -> int:
     if not password:
         password = getpass.getpass("Mi account password: ")
     if not email or not password:
-        raise MiFitnessError(
+        msg = (
             "Email and password are required.\n"
             "Pass --email and --password or enter them when prompted."
         )
+        raise MiFitnessError(msg)
 
     existing_state = load_state(args.state_path)
-    device_id = existing_state.device_id if existing_state else MiFitnessAuthClient.generate_device_id()
+    device_id = (
+        existing_state.device_id if existing_state else MiFitnessAuthClient.generate_device_id()
+    )
 
     client = MiFitnessAuthClient(service_id=DEFAULT_SERVICE_ID)
-    session = _login_with_interactive_challenges(client, email=email, password=password, device_id=device_id)
+    session = _login_with_interactive_challenges(
+        client, email=email, password=password, device_id=device_id
+    )
 
     state = session.to_auth_state()
     if existing_state:
@@ -286,7 +397,10 @@ def _login_with_interactive_challenges(
     password: str,
     device_id: str,
 ) -> LoginSession:
-    """Log in with the password, resolving each challenge Xiaomi raises, including one raised while answering another."""
+    """Log in with the password, resolving each challenge Xiaomi raises.
+
+    Answering one challenge can raise another, so the loop keeps resolving them.
+    """
     try:
         return client.login_with_password(email=email, password=password, device_id=device_id)
     except LOGIN_CHALLENGE_ERRORS as exc:
@@ -294,12 +408,16 @@ def _login_with_interactive_challenges(
 
     for _ in range(MAX_LOGIN_CHALLENGES):
         try:
-            return _resolve_login_challenge(client, challenge, email=email, password=password, device_id=device_id)
+            return _resolve_login_challenge(
+                client, challenge, email=email, password=password, device_id=device_id
+            )
         except LOGIN_CHALLENGE_ERRORS as exc:
             challenge = exc
-    raise MiFitnessError(
-        f"Xiaomi asked for more than {MAX_LOGIN_CHALLENGES} verification steps in a row. Try logging in again later."
+    msg = (
+        f"Xiaomi asked for more than {MAX_LOGIN_CHALLENGES} verification steps in a row. "
+        "Try logging in again later."
     )
+    raise MiFitnessError(msg)
 
 
 def _resolve_login_challenge(
@@ -311,7 +429,9 @@ def _resolve_login_challenge(
     device_id: str,
 ) -> LoginSession:
     if isinstance(challenge, CaptchaRequiredError):
-        return _handle_captcha_challenge(client, challenge, email=email, password=password, device_id=device_id)
+        return _handle_captcha_challenge(
+            client, challenge, email=email, password=password, device_id=device_id
+        )
     if isinstance(challenge, Step2RequiredError):
         return _handle_step2_verification(client, challenge, email=email, device_id=device_id)
     return _handle_notification_verification(client, challenge, email=email, device_id=device_id)
@@ -335,8 +455,9 @@ def _handle_step2_verification(
     step1_token = exc.step1_token
     if not step1_token:
         print(
-            "Warning: Step-2 verification is required but the server did not provide a step1Token.\n"
-            "Attempting step-2 without it — the session cookies may carry the auth state.",
+            "Warning: Step-2 verification is required but the server did not provide a "
+            "step1Token.\n"
+            "Attempting step-2 without it, since the session cookies may carry the auth state.",
             file=sys.stderr,
         )
 
@@ -344,16 +465,16 @@ def _handle_step2_verification(
     qs = payload.get("qs", "")
     callback = payload.get("callback", "")
     if not all((sign, qs, callback)):
-        raise MiFitnessError(
-            "Step-2 verification is required but meta login data is incomplete."
-        ) from exc
+        msg = "Step-2 verification is required but meta login data is incomplete."
+        raise MiFitnessError(msg) from exc
 
     meta = MetaLoginData(sign=sign, qs=qs, callback=callback)
 
     print("Step-2 verification required. Check your email or SMS for a verification code.")
     code = input("Verification code: ").strip()
     if not code:
-        raise MiFitnessError("Verification code is required.")
+        msg = "Verification code is required."
+        raise MiFitnessError(msg)
 
     return client.login_with_step2(
         email=email,
@@ -375,10 +496,13 @@ def _handle_notification_verification(
     print("Identity verification required. Check your email for a verification code.")
 
     while True:
-        answer = input(f"Verification code ('{RESEND_COMMAND}' for a new code, '{CANCEL_COMMAND}' to stop): ").strip()
+        answer = input(
+            f"Verification code ('{RESEND_COMMAND}' for a new code, '{CANCEL_COMMAND}' to stop): "
+        ).strip()
         command = answer.lower()
         if command == CANCEL_COMMAND:
-            raise MiFitnessError("Login cancelled.")
+            msg = "Login cancelled."
+            raise MiFitnessError(msg)
         if command == RESEND_COMMAND:
             _resend_notification_email_code(client, exc)
             continue
@@ -387,22 +511,29 @@ def _handle_notification_verification(
             continue
 
         try:
-            return client.login_with_notification_code(email=email, code=answer, context=context, device_id=device_id)
+            return client.login_with_notification_code(
+                email=email, code=answer, context=context, device_id=device_id
+            )
         except VerificationCodeRejectedError as err:
             print(f"{format_error(err)} Enter the code again.", file=sys.stderr)
 
 
-def _request_notification_email_code(client: MiFitnessAuthClient, exc: NotificationRequiredError) -> str:
+def _request_notification_email_code(
+    client: MiFitnessAuthClient, exc: NotificationRequiredError
+) -> str:
     try:
         return client.send_notification_email_code(exc.notification_url)
     except XiaomiApiError as err:
-        raise MiFitnessError(
-            "Xiaomi requires identity verification.\n"
-            f"{format_error(err)}\nVerification URL: {exc.notification_url}"
-        ) from None
+        msg = (
+            f"Xiaomi requires identity verification.\n{format_error(err)}\n"
+            f"Verification URL: {exc.notification_url}"
+        )
+        raise MiFitnessError(msg) from None
 
 
-def _resend_notification_email_code(client: MiFitnessAuthClient, exc: NotificationRequiredError) -> None:
+def _resend_notification_email_code(
+    client: MiFitnessAuthClient, exc: NotificationRequiredError
+) -> None:
     try:
         client.send_notification_email_code(exc.notification_url)
     except XiaomiApiError as err:
@@ -431,9 +562,8 @@ def _handle_captcha_challenge(
         )
 
     if not captcha_url:
-        raise MiFitnessError(
-            "Server requires a captcha but did not provide a captcha URL."
-        ) from exc
+        msg = "Server requires a captcha but did not provide a captcha URL."
+        raise MiFitnessError(msg) from exc
 
     print("Captcha required. Fetching captcha image...")
     image_bytes, ick = client.fetch_captcha_image(captcha_url)
@@ -450,7 +580,8 @@ def _handle_captcha_challenge(
     try:
         captcha_code = input("Captcha code: ").strip()
         if not captcha_code:
-            raise MiFitnessError("Captcha code is required.")
+            msg = "Captcha code is required."
+            raise MiFitnessError(msg)
 
         try:
             return client.login_with_password(
@@ -462,7 +593,8 @@ def _handle_captcha_challenge(
                 meta=meta,
             )
         except CaptchaRequiredError:
-            raise MiFitnessError("Captcha code was incorrect or expired. Please try logging in again.")
+            msg = "Captcha code was incorrect or expired. Please try logging in again."
+            raise MiFitnessError(msg) from None
     finally:
         _cleanup_captcha_artifacts(captcha_path)
 
@@ -507,12 +639,12 @@ def _open_captcha_image(captcha_path: Path) -> bool:
     """Try to open the captcha with the platform default app."""
     try:
         if sys.platform == "win32":
-            os.startfile(str(captcha_path))
+            os.startfile(str(captcha_path))  # noqa: S606 - opens a local file with the OS handler
             return True
 
         if sys.platform == "darwin":
-            subprocess.run(
-                ["open", str(captcha_path)],
+            subprocess.run(  # noqa: S603 - fixed argument list, no shell
+                ["open", str(captcha_path)],  # noqa: S607 - resolved from PATH by design
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -520,8 +652,8 @@ def _open_captcha_image(captcha_path: Path) -> bool:
             return True
 
         if sys.platform.startswith("linux"):
-            subprocess.run(
-                ["xdg-open", str(captcha_path)],
+            subprocess.run(  # noqa: S603 - fixed argument list, no shell
+                ["xdg-open", str(captcha_path)],  # noqa: S607 - resolved from PATH by design
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -550,7 +682,8 @@ def _cleanup_captcha_artifacts(captcha_path: Path) -> None:
 def handle_auth_status(args: argparse.Namespace) -> int:
     state = load_state(args.state_path)
     if state is None:
-        raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
+        msg = "No persisted Mi Fitness auth state was found."
+        raise AuthStateNotFoundError(msg)
 
     if args.json:
         print(json.dumps(asdict(state), indent=2, sort_keys=True))
@@ -571,12 +704,14 @@ def handle_auth_status(args: argparse.Namespace) -> int:
 
 def handle_list_activities(args: argparse.Namespace) -> int:
     if args.limit <= 0:
-        raise MiFitnessError("--limit must be greater than zero.")
+        msg = "--limit must be greater than zero."
+        raise MiFitnessError(msg)
 
     end_time = parse_cli_time(args.until) if args.until else None
     start_time = parse_cli_time(args.since) if args.since else None
     if start_time is not None and end_time is not None and start_time > end_time:
-        raise MiFitnessError("--since must be earlier than or equal to --until.")
+        msg = "--since must be earlier than or equal to --until."
+        raise MiFitnessError(msg)
 
     client = _activities_client(args.state_path, args.country_code)
     activities = client.list_activities(
@@ -606,8 +741,10 @@ def handle_list_activities(args: argparse.Namespace) -> int:
 
 def handle_activity_detail(args: argparse.Namespace) -> int:
     client = _activities_client(
-        args.state_path, args.country_code,
-        no_cache=args.no_cache, cache_dir=args.cache_dir,
+        args.state_path,
+        args.country_code,
+        no_cache=args.no_cache,
+        cache_dir=args.cache_dir,
     )
     detail = client.get_activity_detail(args.activity_id)
 
@@ -630,8 +767,10 @@ def handle_activity_detail(args: argparse.Namespace) -> int:
 
 def handle_export_activity(args: argparse.Namespace) -> int:
     client = _activities_client(
-        args.state_path, args.country_code,
-        no_cache=args.no_cache, cache_dir=args.cache_dir,
+        args.state_path,
+        args.country_code,
+        no_cache=args.no_cache,
+        cache_dir=args.cache_dir,
     )
     detail = _get_export_detail(client, args.activity_id, args.format)
 
@@ -660,26 +799,33 @@ def handle_export_activity(args: argparse.Namespace) -> int:
 
 def handle_export_activities(args: argparse.Namespace) -> int:
     if args.limit is not None and args.limit <= 0:
-        raise MiFitnessError("--limit must be greater than zero.")
+        msg = "--limit must be greater than zero."
+        raise MiFitnessError(msg)
     if args.workers <= 0:
-        raise MiFitnessError("--workers must be greater than zero.")
+        msg = "--workers must be greater than zero."
+        raise MiFitnessError(msg)
 
     end_time = parse_cli_time(args.until) if args.until else None
     start_time = parse_cli_time(args.since) if args.since else None
     if start_time is not None and end_time is not None and start_time > end_time:
-        raise MiFitnessError("--since must be earlier than or equal to --until.")
+        msg = "--since must be earlier than or equal to --until."
+        raise MiFitnessError(msg)
 
     auth_state = _load_required_state(args.state_path)
-    client_kwargs: dict[str, object] = {
+    client_kwargs: ActivitiesClientOptions = {
         "country_code": args.country_code,
         "no_cache": args.no_cache,
     }
     if args.cache_dir is not None:
         client_kwargs["cache_dir"] = args.cache_dir
-    list_client = MiFitnessActivitiesClient(auth_state, **client_kwargs)  # type: ignore[arg-type]
+    list_client = MiFitnessActivitiesClient(auth_state, **client_kwargs)
 
     output_dir = Path(args.output_dir) if args.output_dir else get_exports_dir() / "bulk"
-    manifest_path = Path(args.resume_file) if args.resume_file else output_dir / f"bulk_export_{args.format}.jsonl"
+    manifest_path = (
+        Path(args.resume_file)
+        if args.resume_file
+        else output_dir / f"bulk_export_{args.format}.jsonl"
+    )
     outlier_speed_mps = parse_speed_input(args.outlier_speed) if args.outlier_speed else None
     options = BulkExportOptions(
         output_dir=output_dir,
@@ -733,10 +879,11 @@ def handle_strava_login(args: argparse.Namespace) -> int:
     if not client_secret:
         client_secret = input("Strava client secret: ").strip()
     if not client_id or not client_secret:
-        raise MiFitnessError(
+        msg = (
             "Strava client_id and client_secret are required.\n"
             "Pass --client-id and --client-secret or enter them when prompted."
         )
+        raise MiFitnessError(msg)
 
     token_data = run_oauth_flow(client_id, client_secret, port=args.port)
 
@@ -764,12 +911,13 @@ def handle_strava_status(args: argparse.Namespace) -> int:
 
     state = load_tokens(args.strava_token_path)
     if state is None:
-        raise MiFitnessError("No Strava token state found. Run 'strava-login' first.")
+        msg = "No Strava token state found. Run 'strava-login' first."
+        raise MiFitnessError(msg)
 
     print("Strava auth state found.")
     print(f"Token path: {resolve_token_path(args.strava_token_path)}")
     print(f"Athlete ID: {state.athlete_id}")
-    print(f"Token expires at: {datetime.fromtimestamp(state.expires_at, tz=timezone.utc).isoformat()}")
+    print(f"Token expires at: {datetime.fromtimestamp(state.expires_at, tz=UTC).isoformat()}")
     print(f"Created at: {state.created_at}")
     print(f"Updated at: {state.updated_at}")
     return 0
@@ -781,14 +929,17 @@ def handle_strava_logout(args: argparse.Namespace) -> int:
 
     state = load_tokens(args.strava_token_path)
     if state is None:
-        print("No Strava tokens found — nothing to do.")
+        print("No Strava tokens found. Nothing to do.")
         return 0
 
     try:
         revoke_access_token(state.access_token)
         print("Strava access token revoked.")
-    except Exception as exc:
-        print(f"Warning: Failed to revoke Strava token ({exc}). Deleting local tokens anyway.", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - local tokens are deleted even when revocation fails
+        print(
+            f"Warning: Failed to revoke Strava token ({exc}). Deleting local tokens anyway.",
+            file=sys.stderr,
+        )
 
     path = resolve_token_path(args.strava_token_path)
     delete_tokens(args.strava_token_path)
@@ -803,11 +954,14 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
 
     token_state = load_tokens(args.strava_token_path)
     if token_state is None:
-        raise MiFitnessError("No Strava token state found. Run 'strava-login' first.")
+        msg = "No Strava token state found. Run 'strava-login' first."
+        raise MiFitnessError(msg)
 
     client = _activities_client(
-        args.state_path, args.country_code,
-        no_cache=args.no_cache, cache_dir=args.cache_dir,
+        args.state_path,
+        args.country_code,
+        no_cache=args.no_cache,
+        cache_dir=args.cache_dir,
     )
     detail = _get_export_detail(client, args.activity_id, "fit")
 
@@ -834,11 +988,10 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
     sport = strava_sport_type(detail.activity.sport_type)
     strava = StravaClient(token_state, token_path=args.strava_token_path)
 
-    # Duplicate check: look for Strava activities within ±5 minutes of start time
+    # Duplicate check: look for Strava activities within 5 minutes either side of the start.
     if not args.skip_duplicate_check:
-        _DUPLICATE_WINDOW_SECONDS = 5 * 60
-        after_ts = detail.start_time - _DUPLICATE_WINDOW_SECONDS
-        before_ts = detail.start_time + _DUPLICATE_WINDOW_SECONDS
+        after_ts = detail.start_time - DUPLICATE_WINDOW_SECONDS
+        before_ts = detail.start_time + DUPLICATE_WINDOW_SECONDS
         existing = strava.list_activities(after=after_ts, before=before_ts)
         if existing:
             print("\nPotential duplicate(s) found on Strava:")
@@ -855,7 +1008,7 @@ def handle_upload_to_strava(args: argparse.Namespace) -> int:
     result = strava.upload_activity(export.payload, sport_type=sport, external_id=args.activity_id)
 
     activity_id = result.get("activity_id")
-    print(f"Uploaded to Strava successfully.")
+    print("Uploaded to Strava successfully.")
     if activity_id:
         print(f"Strava activity: https://www.strava.com/activities/{activity_id}")
     return 0
@@ -865,7 +1018,7 @@ def _fetch_strava_status(
     activities: list[Activity],
     strava_token_path: str | None,
 ) -> dict[str, bool] | None:
-    """Query Strava and return a map of activity_id → matched boolean.
+    """Query Strava and return, per activity ID, whether it matched.
 
     Returns ``None`` (and prints a warning) when Strava auth is unavailable.
     """
@@ -874,38 +1027,38 @@ def _fetch_strava_status(
 
     token_state = load_tokens(strava_token_path)
     if token_state is None:
-        print("Warning: No Strava token state found — skipping Strava column.", file=sys.stderr)
+        print("Warning: No Strava token state found, skipping Strava column.", file=sys.stderr)
         return None
 
     start_times = [a.start_time for a in activities if a.start_time is not None]
     if not start_times:
         return {a.activity_id: False for a in activities}
 
-    _MATCH_WINDOW_SECONDS = 6
-
-    after_ts = min(start_times) - _MATCH_WINDOW_SECONDS
-    before_ts = max(start_times) + _MATCH_WINDOW_SECONDS
+    after_ts = min(start_times) - MATCH_WINDOW_SECONDS
+    before_ts = max(start_times) + MATCH_WINDOW_SECONDS
 
     try:
         strava = StravaClient(token_state, token_path=strava_token_path)
         per_page = 200
-        strava_activities: list[dict] = []
+        strava_activities: list[dict[str, Any]] = []
         page = 1
         while True:
-            batch = strava.list_activities(after=after_ts, before=before_ts, per_page=per_page, page=page)
+            batch = strava.list_activities(
+                after=after_ts, before=before_ts, per_page=per_page, page=page
+            )
             strava_activities.extend(batch)
             if len(batch) < per_page:
                 break
             page += 1
-    except (StravaError, Exception) as exc:
-        print(f"Warning: Failed to query Strava — skipping Strava column. ({exc})", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - the Strava column is optional, so any failure is reported
+        print(f"Warning: Failed to query Strava, skipping Strava column. ({exc})", file=sys.stderr)
         return None
 
     strava_starts: list[int] = []
     for sa in strava_activities:
         start_str = sa.get("start_date")
         if start_str:
-            dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(start_str)
             strava_starts.append(int(dt.timestamp()))
 
     status: dict[str, bool] = {}
@@ -913,14 +1066,14 @@ def _fetch_strava_status(
         if activity.start_time is None:
             status[activity.activity_id] = False
             continue
-        matched = any(abs(activity.start_time - ss) <= _MATCH_WINDOW_SECONDS for ss in strava_starts)
+        matched = any(abs(activity.start_time - ss) <= MATCH_WINDOW_SECONDS for ss in strava_starts)
         status[activity.activity_id] = matched
     return status
 
 
-def _smoothing_kwargs(args: argparse.Namespace) -> dict[str, object]:
+def _smoothing_kwargs(args: argparse.Namespace) -> RenderExportOptions:
     """Build keyword arguments for ``render_export`` from CLI smoothing flags."""
-    kwargs: dict[str, object] = {}
+    kwargs: RenderExportOptions = {}
     if args.no_smooth:
         kwargs["smooth"] = False
     if args.outlier_speed:
@@ -956,10 +1109,11 @@ def _print_bulk_export_progress(record: BulkExportRecord) -> None:
     print(f"[failed] {record.activity_id}: {record.error or 'Unknown error'}", file=sys.stderr)
 
 
-def _load_required_state(state_path: str | None):
+def _load_required_state(state_path: str | None) -> AuthState:
     state = load_state(state_path)
     if state is None:
-        raise AuthStateNotFoundError("No persisted Mi Fitness auth state was found.")
+        msg = "No persisted Mi Fitness auth state was found."
+        raise AuthStateNotFoundError(msg)
     return state
 
 
@@ -971,19 +1125,24 @@ def _activities_client(
     cache_dir: str | None = None,
 ) -> MiFitnessActivitiesClient:
     state = _load_required_state(state_path)
-    kwargs: dict[str, object] = {"country_code": country_code, "no_cache": no_cache}
+    kwargs: ActivitiesClientOptions = {"country_code": country_code, "no_cache": no_cache}
     if cache_dir is not None:
         kwargs["cache_dir"] = cache_dir
-    return MiFitnessActivitiesClient(state, **kwargs)  # type: ignore[arg-type]
+    return MiFitnessActivitiesClient(state, **kwargs)
 
 
 def format_error(exc: MiFitnessError) -> str:
     if isinstance(exc, CaptchaRequiredError):
         return f"Login requires a captcha challenge. URL: {exc.captcha_url}"
     if isinstance(exc, NotificationRequiredError):
-        return f"Login requires additional verification in a browser or app. URL: {exc.notification_url}"
+        return (
+            "Login requires additional verification in a browser or app. "
+            f"URL: {exc.notification_url}"
+        )
     if isinstance(exc, Step2RequiredError):
-        return "Login requires a Xiaomi Passport step-2 verification flow that could not be completed."
+        return (
+            "Login requires a Xiaomi Passport step-2 verification flow that could not be completed."
+        )
     if isinstance(exc, StravaError):
         return str(exc)
     if isinstance(exc, XiaomiApiError):

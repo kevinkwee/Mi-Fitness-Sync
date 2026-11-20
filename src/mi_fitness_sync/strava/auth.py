@@ -4,7 +4,9 @@ import logging
 import secrets
 import threading
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
@@ -14,24 +16,38 @@ from mi_fitness_sync.exceptions import StravaAuthError
 logger = logging.getLogger(__name__)
 
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
-STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"  # noqa: S105 - a URL, not a credential
 STRAVA_DEAUTHORIZE_URL = "https://www.strava.com/oauth/deauthorize"
 REQUIRED_SCOPE = "activity:write,activity:read_all,read_all"
 
 
+def _parse_token_response(response: requests.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        msg = "Strava token endpoint returned a body that was not JSON."
+        raise StravaAuthError(msg) from None
+    if not isinstance(payload, dict):
+        msg = "Strava token endpoint returned JSON that was not an object."
+        raise StravaAuthError(msg)
+    return payload
+
+
 def build_authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
-    params = urlencode({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "approval_prompt": "auto",
-        "scope": REQUIRED_SCOPE,
-        "state": state,
-    })
+    params = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "approval_prompt": "auto",
+            "scope": REQUIRED_SCOPE,
+            "state": state,
+        }
+    )
     return f"{STRAVA_AUTH_URL}?{params}"
 
 
-def exchange_token(client_id: str, client_secret: str, code: str) -> dict:
+def exchange_token(client_id: str, client_secret: str, code: str) -> dict[str, Any]:
     response = requests.post(
         STRAVA_TOKEN_URL,
         data={
@@ -42,12 +58,13 @@ def exchange_token(client_id: str, client_secret: str, code: str) -> dict:
         },
         timeout=30,
     )
-    if response.status_code != 200:
-        raise StravaAuthError(f"Token exchange failed (HTTP {response.status_code}).")
-    return response.json()
+    if response.status_code != HTTPStatus.OK:
+        msg = f"Token exchange failed (HTTP {response.status_code})."
+        raise StravaAuthError(msg)
+    return _parse_token_response(response)
 
 
-def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> dict:
+def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> dict[str, Any]:
     response = requests.post(
         STRAVA_TOKEN_URL,
         data={
@@ -58,9 +75,10 @@ def refresh_access_token(client_id: str, client_secret: str, refresh_token: str)
         },
         timeout=30,
     )
-    if response.status_code != 200:
-        raise StravaAuthError(f"Token refresh failed (HTTP {response.status_code}).")
-    return response.json()
+    if response.status_code != HTTPStatus.OK:
+        msg = f"Token refresh failed (HTTP {response.status_code})."
+        raise StravaAuthError(msg)
+    return _parse_token_response(response)
 
 
 def revoke_access_token(access_token: str) -> None:
@@ -70,14 +88,15 @@ def revoke_access_token(access_token: str) -> None:
         data={"access_token": access_token},
         timeout=30,
     )
-    if response.status_code != 200:
-        raise StravaAuthError(f"Token revocation failed (HTTP {response.status_code}).")
+    if response.status_code != HTTPStatus.OK:
+        msg = f"Token revocation failed (HTTP {response.status_code})."
+        raise StravaAuthError(msg)
 
 
 class _OAuthResult:
     __slots__ = ("code", "error", "expected_state", "received")
 
-    def __init__(self, expected_state: str):
+    def __init__(self, expected_state: str) -> None:
         self.code: str | None = None
         self.error: str | None = None
         self.expected_state = expected_state
@@ -103,7 +122,7 @@ def _make_callback_handler(result: _OAuthResult) -> type:
             state = params.get("state", [None])[0]
 
             if state != result.expected_state:
-                result.error = "State mismatch — possible CSRF attack."
+                result.error = "State mismatch. Possible CSRF attack."
                 self._respond(400, "Authorization failed: state mismatch.")
                 result.received.set()
                 return
@@ -121,7 +140,7 @@ def _make_callback_handler(result: _OAuthResult) -> type:
         def _respond(self, status: int, message: str) -> None:
             body = (
                 f"<html><body><h2>{message}</h2>"
-                f"<p>Return to your terminal to continue.</p></body></html>"
+                "<p>Return to your terminal to continue.</p></body></html>"
             ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -129,13 +148,13 @@ def _make_callback_handler(result: _OAuthResult) -> type:
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - the base class names it format
             logger.debug(format, *args)
 
     return Handler
 
 
-def run_oauth_flow(client_id: str, client_secret: str, *, port: int = 5478) -> dict:
+def run_oauth_flow(client_id: str, client_secret: str, *, port: int = 5478) -> dict[str, Any]:
     """Drive the full OAuth2 authorization-code flow.
 
     Opens a browser for Strava authorization, starts a local HTTP callback
@@ -152,15 +171,14 @@ def run_oauth_flow(client_id: str, client_secret: str, *, port: int = 5478) -> d
     try:
         server = HTTPServer(("localhost", port), handler_cls)
     except OSError as exc:
-        raise StravaAuthError(
-            f"Could not start OAuth callback server on port {port}: {exc}"
-        ) from exc
+        msg = f"Could not start OAuth callback server on port {port}: {exc}"
+        raise StravaAuthError(msg) from exc
 
     server_thread = threading.Thread(target=server.handle_request, daemon=True)
     server_thread.start()
 
-    print(f"Opening browser for Strava authorization...")
-    print(f"If the browser does not open, visit this URL manually:")
+    print("Opening browser for Strava authorization...")
+    print("If the browser does not open, visit this URL manually:")
     print(auth_url)
     webbrowser.open(auth_url)
 
@@ -170,12 +188,15 @@ def run_oauth_flow(client_id: str, client_secret: str, *, port: int = 5478) -> d
         server.server_close()
 
     if not result.received.is_set():
-        raise StravaAuthError("OAuth callback timed out after 120 seconds.")
+        msg = "OAuth callback timed out after 120 seconds."
+        raise StravaAuthError(msg)
 
     if result.error:
-        raise StravaAuthError(f"OAuth authorization failed: {result.error}")
+        msg = f"OAuth authorization failed: {result.error}"
+        raise StravaAuthError(msg)
 
     if not result.code:
-        raise StravaAuthError("No authorization code received.")
+        msg = "No authorization code received."
+        raise StravaAuthError(msg)
 
     return exchange_token(client_id, client_secret, result.code)

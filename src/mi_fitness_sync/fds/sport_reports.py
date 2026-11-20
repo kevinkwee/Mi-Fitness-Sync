@@ -3,14 +3,23 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import requests
-
-from mi_fitness_sync.fds.cache import FdsCache
-from mi_fitness_sync.fds.common import SPORT_SERVER_DATA_ID_LEN, parse_fds_header
+from mi_fitness_sync.fds.common import (
+    FLOAT32_BYTES,
+    SPORT_SERVER_DATA_ID_LEN,
+    UINT8_BYTES,
+    UINT16_BYTES,
+    UINT32_BYTES,
+    UINT64_BYTES,
+    parse_fds_header,
+)
 from mi_fitness_sync.fds.downloader import download_and_parse_fds_file
 
+if TYPE_CHECKING:
+    import requests
+
+    from mi_fitness_sync.fds.cache import FdsCache
 
 logger = logging.getLogger(__name__)
 
@@ -93,21 +102,398 @@ class SportReport:
     raw_values: dict[int, int | float] = field(default_factory=dict)
 
 
-_REPORT_FIELD_ATTR: dict[int, str] = {REPORT_START_TIME: "start_time", REPORT_END_TIME: "end_time", REPORT_DURATION: "duration", REPORT_VALID_DURATION: "valid_duration", REPORT_DISTANCE: "distance", REPORT_CALORIES: "calories", REPORT_TOTAL_CAL: "total_calories", REPORT_MAX_PACE: "max_pace", REPORT_MIN_PACE: "min_pace", REPORT_AVG_PACE: "avg_pace", REPORT_AVG_SPEED: "avg_speed", REPORT_MAX_SPEED: "max_speed", REPORT_STEPS: "steps", REPORT_AVG_CADENCE: "avg_cadence", REPORT_MAX_CADENCE: "max_cadence", REPORT_AVG_HR: "avg_hr", REPORT_MAX_HR: "max_hr", REPORT_MIN_HR: "min_hr", REPORT_RISE_HEIGHT: "rise_height", REPORT_FALL_HEIGHT: "fall_height", REPORT_TRAIN_EFFECT: "train_effect", REPORT_ANAEROBIC_TE: "anaerobic_train_effect", REPORT_VO2MAX: "vo2max", REPORT_RECOVERY_TIME: "recovery_time", REPORT_HR_EXTREME_DUR: "hr_extreme_duration", REPORT_HR_ANAEROBIC_DUR: "hr_anaerobic_duration", REPORT_HR_AEROBIC_DUR: "hr_aerobic_duration", REPORT_HR_FAT_BURNING_DUR: "hr_fat_burning_duration", REPORT_HR_WARMUP_DUR: "hr_warmup_duration"}
+_REPORT_FIELD_ATTR: dict[int, str] = {
+    REPORT_START_TIME: "start_time",
+    REPORT_END_TIME: "end_time",
+    REPORT_DURATION: "duration",
+    REPORT_VALID_DURATION: "valid_duration",
+    REPORT_DISTANCE: "distance",
+    REPORT_CALORIES: "calories",
+    REPORT_TOTAL_CAL: "total_calories",
+    REPORT_MAX_PACE: "max_pace",
+    REPORT_MIN_PACE: "min_pace",
+    REPORT_AVG_PACE: "avg_pace",
+    REPORT_AVG_SPEED: "avg_speed",
+    REPORT_MAX_SPEED: "max_speed",
+    REPORT_STEPS: "steps",
+    REPORT_AVG_CADENCE: "avg_cadence",
+    REPORT_MAX_CADENCE: "max_cadence",
+    REPORT_AVG_HR: "avg_hr",
+    REPORT_MAX_HR: "max_hr",
+    REPORT_MIN_HR: "min_hr",
+    REPORT_RISE_HEIGHT: "rise_height",
+    REPORT_FALL_HEIGHT: "fall_height",
+    REPORT_TRAIN_EFFECT: "train_effect",
+    REPORT_ANAEROBIC_TE: "anaerobic_train_effect",
+    REPORT_VO2MAX: "vo2max",
+    REPORT_RECOVERY_TIME: "recovery_time",
+    REPORT_HR_EXTREME_DUR: "hr_extreme_duration",
+    REPORT_HR_ANAEROBIC_DUR: "hr_anaerobic_duration",
+    REPORT_HR_AEROBIC_DUR: "hr_aerobic_duration",
+    REPORT_HR_FAT_BURNING_DUR: "hr_fat_burning_duration",
+    REPORT_HR_WARMUP_DUR: "hr_warmup_duration",
+}
 
 _REPORT_COURSE_ID_DEP = (90, frozenset({251, 252, 253, 255}))
-FREE_TRAINING_REPORT_FIELDS = [ReportFieldDef(1, 4, 1), ReportFieldDef(2, 4, 1), ReportFieldDef(3, 4, 1), ReportFieldDef(6, 2, 1), ReportFieldDef(16, 1, 1), ReportFieldDef(17, 1, 1), ReportFieldDef(18, 1, 1), ReportFieldDef(101, 1, 6), ReportFieldDef(102, 1, 6), ReportFieldDef(103, 1, 6), ReportFieldDef(104, 1, 6), ReportFieldDef(105, 1, 6), ReportFieldDef(106, 1, 6), ReportFieldDef(25, 4, 1, True), ReportFieldDef(107, 1, 7), ReportFieldDef(28, 1, 1), ReportFieldDef(29, 2, 1), ReportFieldDef(30, 4, 1), ReportFieldDef(31, 4, 1), ReportFieldDef(32, 4, 1), ReportFieldDef(33, 4, 1), ReportFieldDef(34, 4, 1), ReportFieldDef(158, 1, 11), ReportFieldDef(159, 1, 11), ReportFieldDef(160, 1, 11), ReportFieldDef(161, 1, 11), ReportFieldDef(162, 1, 11), ReportFieldDef(7, 2, 2), ReportFieldDef(4, 4, 3), ReportFieldDef(26, 4, 3, True), ReportFieldDef(108, 1, 7), ReportFieldDef(163, 4, 11, True), ReportFieldDef(164, 1, 11), ReportFieldDef(65, 2, 4), ReportFieldDef(90, 1, 5), ReportFieldDef(-1, 8, 5, depends_on=_REPORT_COURSE_ID_DEP), ReportFieldDef(91, 1, 5), ReportFieldDef(92, 4, 5), ReportFieldDef(93, 2, 5), ReportFieldDef(110, 2, 7), ReportFieldDef(111, 1, 7), ReportFieldDef(117, 1, 8), ReportFieldDef(118, 2, 8), ReportFieldDef(119, 2, 8), ReportFieldDef(120, 2, 8), ReportFieldDef(121, 2, 8), ReportFieldDef(122, 4, 8, True), ReportFieldDef(123, 2, 8), ReportFieldDef(124, 1, 8), ReportFieldDef(149, 2, 9), ReportFieldDef(150, 2, 9), ReportFieldDef(151, 2, 9), ReportFieldDef(152, 1, 10), ReportFieldDef(165, 2, 11), ReportFieldDef(206, 8, 12), ReportFieldDef(207, 4, 12), ReportFieldDef(220, 4, 13), ReportFieldDef(221, 4, 13), ReportFieldDef(222, 2, 13), ReportFieldDef(223, 2, 14), ReportFieldDef(224, 2, 14), ReportFieldDef(225, 2, 14)]
-OUTDOOR_SPORT_REPORT_FIELDS = [ReportFieldDef(1, 4, 1), ReportFieldDef(2, 4, 1), ReportFieldDef(3, 4, 1), ReportFieldDef(5, 4, 1), ReportFieldDef(6, 2, 1), ReportFieldDef(8, 4, 1), ReportFieldDef(9, 4, 1), ReportFieldDef(12, 4, 1, True), ReportFieldDef(13, 4, 1), ReportFieldDef(14, 2, 1), ReportFieldDef(16, 1, 1), ReportFieldDef(17, 1, 1), ReportFieldDef(18, 1, 1), ReportFieldDef(19, 4, 1, True), ReportFieldDef(20, 4, 1, True), ReportFieldDef(21, 4, 1, True), ReportFieldDef(22, 4, 1, True), ReportFieldDef(23, 4, 1, True), ReportFieldDef(25, 4, 1, True), ReportFieldDef(27, 1, 1), ReportFieldDef(28, 1, 1), ReportFieldDef(29, 2, 1), ReportFieldDef(30, 4, 1), ReportFieldDef(31, 4, 1), ReportFieldDef(32, 4, 1), ReportFieldDef(33, 4, 1), ReportFieldDef(34, 4, 1), ReportFieldDef(7, 2, 2), ReportFieldDef(4, 4, 3), ReportFieldDef(26, 4, 3, True), ReportFieldDef(90, 1, 4), ReportFieldDef(-1, 8, 4, depends_on=_REPORT_COURSE_ID_DEP), ReportFieldDef(91, 1, 4), ReportFieldDef(92, 4, 4), ReportFieldDef(93, 2, 4), ReportFieldDef(94, 4, 4), ReportFieldDef(95, 4, 4), ReportFieldDef(96, 2, 4)]
-_INDOOR_RUN_REPORT_FIELDS = [ReportFieldDef(1, 4, 1), ReportFieldDef(2, 4, 1), ReportFieldDef(3, 4, 1), ReportFieldDef(5, 4, 1), ReportFieldDef(6, 2, 1), ReportFieldDef(10, 4, 10), ReportFieldDef(8, 4, 1), ReportFieldDef(9, 4, 1), ReportFieldDef(13, 4, 1), ReportFieldDef(148, 2, 10), ReportFieldDef(15, 2, 10), ReportFieldDef(14, 2, 1), ReportFieldDef(16, 1, 1), ReportFieldDef(17, 1, 1), ReportFieldDef(18, 1, 1), ReportFieldDef(25, 4, 1, True), ReportFieldDef(107, 1, 7), ReportFieldDef(27, 1, 1), ReportFieldDef(109, 1, 7), ReportFieldDef(28, 1, 1), ReportFieldDef(29, 2, 1), ReportFieldDef(30, 4, 1), ReportFieldDef(31, 4, 1), ReportFieldDef(32, 4, 1), ReportFieldDef(33, 4, 1), ReportFieldDef(34, 4, 1), ReportFieldDef(158, 1, 12), ReportFieldDef(159, 1, 12), ReportFieldDef(160, 1, 12), ReportFieldDef(161, 1, 12), ReportFieldDef(162, 1, 12), ReportFieldDef(166, 4, 12), ReportFieldDef(167, 4, 12), ReportFieldDef(168, 4, 12), ReportFieldDef(169, 4, 12), ReportFieldDef(170, 4, 12), ReportFieldDef(7, 2, 2), ReportFieldDef(4, 4, 3), ReportFieldDef(26, 4, 3, True), ReportFieldDef(108, 1, 7), ReportFieldDef(163, 4, 12, True), ReportFieldDef(164, 1, 12), ReportFieldDef(65, 2, 6), ReportFieldDef(90, 1, 4), ReportFieldDef(-1, 8, 4, depends_on=_REPORT_COURSE_ID_DEP), ReportFieldDef(91, 1, 4), ReportFieldDef(92, 4, 4), ReportFieldDef(93, 2, 4), ReportFieldDef(94, 4, 4), ReportFieldDef(95, 4, 4), ReportFieldDef(99, 4, 6, True), ReportFieldDef(96, 2, 4), ReportFieldDef(100, 4, 5), ReportFieldDef(110, 2, 7), ReportFieldDef(111, 1, 7), ReportFieldDef(112, 4, 7, True), ReportFieldDef(113, 1, 7), ReportFieldDef(114, 1, 8), ReportFieldDef(153, 2, 11), ReportFieldDef(154, 2, 11), ReportFieldDef(156, 2, 11), ReportFieldDef(155, 2, 11), ReportFieldDef(117, 1, 9), ReportFieldDef(125, 4, 9), ReportFieldDef(126, 4, 9), ReportFieldDef(127, 4, 9), ReportFieldDef(128, 1, 9), ReportFieldDef(137, 1, 10), ReportFieldDef(138, 1, 10), ReportFieldDef(139, 1, 10), ReportFieldDef(140, 1, 10), ReportFieldDef(141, 1, 10), ReportFieldDef(142, 2, 10), ReportFieldDef(143, 2, 10), ReportFieldDef(144, 2, 10), ReportFieldDef(145, 2, 10), ReportFieldDef(146, 1, 10), ReportFieldDef(147, 1, 10), ReportFieldDef(199, 2, 13), ReportFieldDef(200, 2, 13), ReportFieldDef(201, 2, 13), ReportFieldDef(202, 2, 13), ReportFieldDef(203, 2, 13), ReportFieldDef(204, 2, 13), ReportFieldDef(205, 2, 13), ReportFieldDef(152, 1, 11), ReportFieldDef(165, 2, 12), ReportFieldDef(173, 2, 12), ReportFieldDef(174, 2, 12), ReportFieldDef(175, 4, 12), ReportFieldDef(176, 4, 12), ReportFieldDef(206, 8, 13), ReportFieldDef(207, 4, 13)]
-_OUTDOOR_BIKING_REPORT_FIELDS = [ReportFieldDef(1, 4, 1), ReportFieldDef(2, 4, 1), ReportFieldDef(3, 4, 1), ReportFieldDef(5, 4, 1), ReportFieldDef(6, 2, 1), ReportFieldDef(8, 4, 1), ReportFieldDef(9, 4, 1), ReportFieldDef(12, 4, 1, True), ReportFieldDef(16, 1, 1), ReportFieldDef(17, 1, 1), ReportFieldDef(18, 1, 1), ReportFieldDef(19, 4, 1, True), ReportFieldDef(20, 4, 1, True), ReportFieldDef(21, 4, 1, True), ReportFieldDef(22, 4, 1, True), ReportFieldDef(23, 4, 1, True), ReportFieldDef(25, 4, 1, True), ReportFieldDef(27, 1, 1), ReportFieldDef(28, 1, 1), ReportFieldDef(29, 2, 1), ReportFieldDef(30, 4, 1), ReportFieldDef(31, 4, 1), ReportFieldDef(32, 4, 1), ReportFieldDef(33, 4, 1), ReportFieldDef(34, 4, 1), ReportFieldDef(7, 2, 2), ReportFieldDef(4, 4, 3), ReportFieldDef(26, 4, 3, True), ReportFieldDef(90, 1, 4), ReportFieldDef(-1, 8, 4, depends_on=_REPORT_COURSE_ID_DEP), ReportFieldDef(91, 1, 4), ReportFieldDef(92, 4, 4), ReportFieldDef(93, 2, 4), ReportFieldDef(94, 4, 4), ReportFieldDef(95, 4, 4)]
-_SWIMMING_REPORT_FIELDS = [ReportFieldDef(1, 4, 1), ReportFieldDef(2, 4, 1), ReportFieldDef(3, 4, 1), ReportFieldDef(5, 4, 1), ReportFieldDef(6, 2, 1), ReportFieldDef(10, 4, 7), ReportFieldDef(8, 4, 1), ReportFieldDef(9, 4, 1), ReportFieldDef(28, 1, 1), ReportFieldDef(29, 2, 1), ReportFieldDef(35, 2, 1), ReportFieldDef(36, 1, 1), ReportFieldDef(157, 1, 7), ReportFieldDef(38, 1, 1), ReportFieldDef(39, 2, 1), ReportFieldDef(40, 2, 1), ReportFieldDef(41, 2, 1), ReportFieldDef(42, 1, 1), ReportFieldDef(7, 2, 2), ReportFieldDef(4, 4, 3), ReportFieldDef(92, 4, 4), ReportFieldDef(93, 2, 4), ReportFieldDef(94, 4, 4), ReportFieldDef(95, 4, 4), ReportFieldDef(97, 2, 4), ReportFieldDef(25, 4, 5, True), ReportFieldDef(107, 1, 5), ReportFieldDef(26, 4, 5, True), ReportFieldDef(108, 1, 5), ReportFieldDef(110, 2, 5), ReportFieldDef(111, 1, 5), ReportFieldDef(117, 1, 6), ReportFieldDef(152, 1, 7), ReportFieldDef(208, 2, 8), ReportFieldDef(209, 1, 8), ReportFieldDef(210, 1, 8), ReportFieldDef(211, 1, 8), ReportFieldDef(212, 1, 8), ReportFieldDef(213, 2, 8), ReportFieldDef(214, 2, 8), ReportFieldDef(215, 1, 8), ReportFieldDef(216, 1, 8), ReportFieldDef(217, 2, 8), ReportFieldDef(218, 2, 8), ReportFieldDef(219, 1, 8), ReportFieldDef(198, 1, 8), ReportFieldDef(16, 1, 8), ReportFieldDef(17, 1, 8), ReportFieldDef(18, 1, 8), ReportFieldDef(91, 1, 8), ReportFieldDef(30, 4, 8), ReportFieldDef(31, 4, 8), ReportFieldDef(32, 4, 8), ReportFieldDef(33, 4, 8), ReportFieldDef(34, 4, 8), ReportFieldDef(158, 1, 8), ReportFieldDef(159, 1, 8), ReportFieldDef(160, 1, 8), ReportFieldDef(161, 1, 8), ReportFieldDef(162, 1, 8)]
-_HIKING_REPORT_FIELDS = [ReportFieldDef(1, 4, 1), ReportFieldDef(2, 4, 1), ReportFieldDef(3, 4, 1), ReportFieldDef(5, 4, 1), ReportFieldDef(6, 2, 1), ReportFieldDef(8, 4, 1), ReportFieldDef(9, 4, 1), ReportFieldDef(12, 4, 1, True), ReportFieldDef(13, 4, 1), ReportFieldDef(14, 2, 1), ReportFieldDef(16, 1, 1), ReportFieldDef(17, 1, 1), ReportFieldDef(18, 1, 1), ReportFieldDef(19, 4, 1, True), ReportFieldDef(20, 4, 1, True), ReportFieldDef(21, 4, 1, True), ReportFieldDef(22, 4, 1, True), ReportFieldDef(23, 4, 1, True), ReportFieldDef(25, 4, 1, True), ReportFieldDef(27, 1, 1), ReportFieldDef(28, 1, 1), ReportFieldDef(29, 2, 1), ReportFieldDef(30, 4, 1), ReportFieldDef(31, 4, 1), ReportFieldDef(32, 4, 1), ReportFieldDef(33, 4, 1), ReportFieldDef(34, 4, 1), ReportFieldDef(7, 2, 1), ReportFieldDef(4, 4, 2), ReportFieldDef(26, 4, 2, True), ReportFieldDef(90, 1, 3), ReportFieldDef(-1, 8, 3, depends_on=_REPORT_COURSE_ID_DEP), ReportFieldDef(91, 1, 3), ReportFieldDef(92, 4, 3), ReportFieldDef(93, 2, 3), ReportFieldDef(94, 4, 3), ReportFieldDef(95, 4, 3), ReportFieldDef(96, 2, 3)]
+FREE_TRAINING_REPORT_FIELDS = [
+    ReportFieldDef(1, 4, 1),
+    ReportFieldDef(2, 4, 1),
+    ReportFieldDef(3, 4, 1),
+    ReportFieldDef(6, 2, 1),
+    ReportFieldDef(16, 1, 1),
+    ReportFieldDef(17, 1, 1),
+    ReportFieldDef(18, 1, 1),
+    ReportFieldDef(101, 1, 6),
+    ReportFieldDef(102, 1, 6),
+    ReportFieldDef(103, 1, 6),
+    ReportFieldDef(104, 1, 6),
+    ReportFieldDef(105, 1, 6),
+    ReportFieldDef(106, 1, 6),
+    ReportFieldDef(25, 4, 1, is_float=True),
+    ReportFieldDef(107, 1, 7),
+    ReportFieldDef(28, 1, 1),
+    ReportFieldDef(29, 2, 1),
+    ReportFieldDef(30, 4, 1),
+    ReportFieldDef(31, 4, 1),
+    ReportFieldDef(32, 4, 1),
+    ReportFieldDef(33, 4, 1),
+    ReportFieldDef(34, 4, 1),
+    ReportFieldDef(158, 1, 11),
+    ReportFieldDef(159, 1, 11),
+    ReportFieldDef(160, 1, 11),
+    ReportFieldDef(161, 1, 11),
+    ReportFieldDef(162, 1, 11),
+    ReportFieldDef(7, 2, 2),
+    ReportFieldDef(4, 4, 3),
+    ReportFieldDef(26, 4, 3, is_float=True),
+    ReportFieldDef(108, 1, 7),
+    ReportFieldDef(163, 4, 11, is_float=True),
+    ReportFieldDef(164, 1, 11),
+    ReportFieldDef(65, 2, 4),
+    ReportFieldDef(90, 1, 5),
+    ReportFieldDef(-1, 8, 5, depends_on=_REPORT_COURSE_ID_DEP),
+    ReportFieldDef(91, 1, 5),
+    ReportFieldDef(92, 4, 5),
+    ReportFieldDef(93, 2, 5),
+    ReportFieldDef(110, 2, 7),
+    ReportFieldDef(111, 1, 7),
+    ReportFieldDef(117, 1, 8),
+    ReportFieldDef(118, 2, 8),
+    ReportFieldDef(119, 2, 8),
+    ReportFieldDef(120, 2, 8),
+    ReportFieldDef(121, 2, 8),
+    ReportFieldDef(122, 4, 8, is_float=True),
+    ReportFieldDef(123, 2, 8),
+    ReportFieldDef(124, 1, 8),
+    ReportFieldDef(149, 2, 9),
+    ReportFieldDef(150, 2, 9),
+    ReportFieldDef(151, 2, 9),
+    ReportFieldDef(152, 1, 10),
+    ReportFieldDef(165, 2, 11),
+    ReportFieldDef(206, 8, 12),
+    ReportFieldDef(207, 4, 12),
+    ReportFieldDef(220, 4, 13),
+    ReportFieldDef(221, 4, 13),
+    ReportFieldDef(222, 2, 13),
+    ReportFieldDef(223, 2, 14),
+    ReportFieldDef(224, 2, 14),
+    ReportFieldDef(225, 2, 14),
+]
+OUTDOOR_SPORT_REPORT_FIELDS = [
+    ReportFieldDef(1, 4, 1),
+    ReportFieldDef(2, 4, 1),
+    ReportFieldDef(3, 4, 1),
+    ReportFieldDef(5, 4, 1),
+    ReportFieldDef(6, 2, 1),
+    ReportFieldDef(8, 4, 1),
+    ReportFieldDef(9, 4, 1),
+    ReportFieldDef(12, 4, 1, is_float=True),
+    ReportFieldDef(13, 4, 1),
+    ReportFieldDef(14, 2, 1),
+    ReportFieldDef(16, 1, 1),
+    ReportFieldDef(17, 1, 1),
+    ReportFieldDef(18, 1, 1),
+    ReportFieldDef(19, 4, 1, is_float=True),
+    ReportFieldDef(20, 4, 1, is_float=True),
+    ReportFieldDef(21, 4, 1, is_float=True),
+    ReportFieldDef(22, 4, 1, is_float=True),
+    ReportFieldDef(23, 4, 1, is_float=True),
+    ReportFieldDef(25, 4, 1, is_float=True),
+    ReportFieldDef(27, 1, 1),
+    ReportFieldDef(28, 1, 1),
+    ReportFieldDef(29, 2, 1),
+    ReportFieldDef(30, 4, 1),
+    ReportFieldDef(31, 4, 1),
+    ReportFieldDef(32, 4, 1),
+    ReportFieldDef(33, 4, 1),
+    ReportFieldDef(34, 4, 1),
+    ReportFieldDef(7, 2, 2),
+    ReportFieldDef(4, 4, 3),
+    ReportFieldDef(26, 4, 3, is_float=True),
+    ReportFieldDef(90, 1, 4),
+    ReportFieldDef(-1, 8, 4, depends_on=_REPORT_COURSE_ID_DEP),
+    ReportFieldDef(91, 1, 4),
+    ReportFieldDef(92, 4, 4),
+    ReportFieldDef(93, 2, 4),
+    ReportFieldDef(94, 4, 4),
+    ReportFieldDef(95, 4, 4),
+    ReportFieldDef(96, 2, 4),
+]
+_INDOOR_RUN_REPORT_FIELDS = [
+    ReportFieldDef(1, 4, 1),
+    ReportFieldDef(2, 4, 1),
+    ReportFieldDef(3, 4, 1),
+    ReportFieldDef(5, 4, 1),
+    ReportFieldDef(6, 2, 1),
+    ReportFieldDef(10, 4, 10),
+    ReportFieldDef(8, 4, 1),
+    ReportFieldDef(9, 4, 1),
+    ReportFieldDef(13, 4, 1),
+    ReportFieldDef(148, 2, 10),
+    ReportFieldDef(15, 2, 10),
+    ReportFieldDef(14, 2, 1),
+    ReportFieldDef(16, 1, 1),
+    ReportFieldDef(17, 1, 1),
+    ReportFieldDef(18, 1, 1),
+    ReportFieldDef(25, 4, 1, is_float=True),
+    ReportFieldDef(107, 1, 7),
+    ReportFieldDef(27, 1, 1),
+    ReportFieldDef(109, 1, 7),
+    ReportFieldDef(28, 1, 1),
+    ReportFieldDef(29, 2, 1),
+    ReportFieldDef(30, 4, 1),
+    ReportFieldDef(31, 4, 1),
+    ReportFieldDef(32, 4, 1),
+    ReportFieldDef(33, 4, 1),
+    ReportFieldDef(34, 4, 1),
+    ReportFieldDef(158, 1, 12),
+    ReportFieldDef(159, 1, 12),
+    ReportFieldDef(160, 1, 12),
+    ReportFieldDef(161, 1, 12),
+    ReportFieldDef(162, 1, 12),
+    ReportFieldDef(166, 4, 12),
+    ReportFieldDef(167, 4, 12),
+    ReportFieldDef(168, 4, 12),
+    ReportFieldDef(169, 4, 12),
+    ReportFieldDef(170, 4, 12),
+    ReportFieldDef(7, 2, 2),
+    ReportFieldDef(4, 4, 3),
+    ReportFieldDef(26, 4, 3, is_float=True),
+    ReportFieldDef(108, 1, 7),
+    ReportFieldDef(163, 4, 12, is_float=True),
+    ReportFieldDef(164, 1, 12),
+    ReportFieldDef(65, 2, 6),
+    ReportFieldDef(90, 1, 4),
+    ReportFieldDef(-1, 8, 4, depends_on=_REPORT_COURSE_ID_DEP),
+    ReportFieldDef(91, 1, 4),
+    ReportFieldDef(92, 4, 4),
+    ReportFieldDef(93, 2, 4),
+    ReportFieldDef(94, 4, 4),
+    ReportFieldDef(95, 4, 4),
+    ReportFieldDef(99, 4, 6, is_float=True),
+    ReportFieldDef(96, 2, 4),
+    ReportFieldDef(100, 4, 5),
+    ReportFieldDef(110, 2, 7),
+    ReportFieldDef(111, 1, 7),
+    ReportFieldDef(112, 4, 7, is_float=True),
+    ReportFieldDef(113, 1, 7),
+    ReportFieldDef(114, 1, 8),
+    ReportFieldDef(153, 2, 11),
+    ReportFieldDef(154, 2, 11),
+    ReportFieldDef(156, 2, 11),
+    ReportFieldDef(155, 2, 11),
+    ReportFieldDef(117, 1, 9),
+    ReportFieldDef(125, 4, 9),
+    ReportFieldDef(126, 4, 9),
+    ReportFieldDef(127, 4, 9),
+    ReportFieldDef(128, 1, 9),
+    ReportFieldDef(137, 1, 10),
+    ReportFieldDef(138, 1, 10),
+    ReportFieldDef(139, 1, 10),
+    ReportFieldDef(140, 1, 10),
+    ReportFieldDef(141, 1, 10),
+    ReportFieldDef(142, 2, 10),
+    ReportFieldDef(143, 2, 10),
+    ReportFieldDef(144, 2, 10),
+    ReportFieldDef(145, 2, 10),
+    ReportFieldDef(146, 1, 10),
+    ReportFieldDef(147, 1, 10),
+    ReportFieldDef(199, 2, 13),
+    ReportFieldDef(200, 2, 13),
+    ReportFieldDef(201, 2, 13),
+    ReportFieldDef(202, 2, 13),
+    ReportFieldDef(203, 2, 13),
+    ReportFieldDef(204, 2, 13),
+    ReportFieldDef(205, 2, 13),
+    ReportFieldDef(152, 1, 11),
+    ReportFieldDef(165, 2, 12),
+    ReportFieldDef(173, 2, 12),
+    ReportFieldDef(174, 2, 12),
+    ReportFieldDef(175, 4, 12),
+    ReportFieldDef(176, 4, 12),
+    ReportFieldDef(206, 8, 13),
+    ReportFieldDef(207, 4, 13),
+]
+_OUTDOOR_BIKING_REPORT_FIELDS = [
+    ReportFieldDef(1, 4, 1),
+    ReportFieldDef(2, 4, 1),
+    ReportFieldDef(3, 4, 1),
+    ReportFieldDef(5, 4, 1),
+    ReportFieldDef(6, 2, 1),
+    ReportFieldDef(8, 4, 1),
+    ReportFieldDef(9, 4, 1),
+    ReportFieldDef(12, 4, 1, is_float=True),
+    ReportFieldDef(16, 1, 1),
+    ReportFieldDef(17, 1, 1),
+    ReportFieldDef(18, 1, 1),
+    ReportFieldDef(19, 4, 1, is_float=True),
+    ReportFieldDef(20, 4, 1, is_float=True),
+    ReportFieldDef(21, 4, 1, is_float=True),
+    ReportFieldDef(22, 4, 1, is_float=True),
+    ReportFieldDef(23, 4, 1, is_float=True),
+    ReportFieldDef(25, 4, 1, is_float=True),
+    ReportFieldDef(27, 1, 1),
+    ReportFieldDef(28, 1, 1),
+    ReportFieldDef(29, 2, 1),
+    ReportFieldDef(30, 4, 1),
+    ReportFieldDef(31, 4, 1),
+    ReportFieldDef(32, 4, 1),
+    ReportFieldDef(33, 4, 1),
+    ReportFieldDef(34, 4, 1),
+    ReportFieldDef(7, 2, 2),
+    ReportFieldDef(4, 4, 3),
+    ReportFieldDef(26, 4, 3, is_float=True),
+    ReportFieldDef(90, 1, 4),
+    ReportFieldDef(-1, 8, 4, depends_on=_REPORT_COURSE_ID_DEP),
+    ReportFieldDef(91, 1, 4),
+    ReportFieldDef(92, 4, 4),
+    ReportFieldDef(93, 2, 4),
+    ReportFieldDef(94, 4, 4),
+    ReportFieldDef(95, 4, 4),
+]
+_SWIMMING_REPORT_FIELDS = [
+    ReportFieldDef(1, 4, 1),
+    ReportFieldDef(2, 4, 1),
+    ReportFieldDef(3, 4, 1),
+    ReportFieldDef(5, 4, 1),
+    ReportFieldDef(6, 2, 1),
+    ReportFieldDef(10, 4, 7),
+    ReportFieldDef(8, 4, 1),
+    ReportFieldDef(9, 4, 1),
+    ReportFieldDef(28, 1, 1),
+    ReportFieldDef(29, 2, 1),
+    ReportFieldDef(35, 2, 1),
+    ReportFieldDef(36, 1, 1),
+    ReportFieldDef(157, 1, 7),
+    ReportFieldDef(38, 1, 1),
+    ReportFieldDef(39, 2, 1),
+    ReportFieldDef(40, 2, 1),
+    ReportFieldDef(41, 2, 1),
+    ReportFieldDef(42, 1, 1),
+    ReportFieldDef(7, 2, 2),
+    ReportFieldDef(4, 4, 3),
+    ReportFieldDef(92, 4, 4),
+    ReportFieldDef(93, 2, 4),
+    ReportFieldDef(94, 4, 4),
+    ReportFieldDef(95, 4, 4),
+    ReportFieldDef(97, 2, 4),
+    ReportFieldDef(25, 4, 5, is_float=True),
+    ReportFieldDef(107, 1, 5),
+    ReportFieldDef(26, 4, 5, is_float=True),
+    ReportFieldDef(108, 1, 5),
+    ReportFieldDef(110, 2, 5),
+    ReportFieldDef(111, 1, 5),
+    ReportFieldDef(117, 1, 6),
+    ReportFieldDef(152, 1, 7),
+    ReportFieldDef(208, 2, 8),
+    ReportFieldDef(209, 1, 8),
+    ReportFieldDef(210, 1, 8),
+    ReportFieldDef(211, 1, 8),
+    ReportFieldDef(212, 1, 8),
+    ReportFieldDef(213, 2, 8),
+    ReportFieldDef(214, 2, 8),
+    ReportFieldDef(215, 1, 8),
+    ReportFieldDef(216, 1, 8),
+    ReportFieldDef(217, 2, 8),
+    ReportFieldDef(218, 2, 8),
+    ReportFieldDef(219, 1, 8),
+    ReportFieldDef(198, 1, 8),
+    ReportFieldDef(16, 1, 8),
+    ReportFieldDef(17, 1, 8),
+    ReportFieldDef(18, 1, 8),
+    ReportFieldDef(91, 1, 8),
+    ReportFieldDef(30, 4, 8),
+    ReportFieldDef(31, 4, 8),
+    ReportFieldDef(32, 4, 8),
+    ReportFieldDef(33, 4, 8),
+    ReportFieldDef(34, 4, 8),
+    ReportFieldDef(158, 1, 8),
+    ReportFieldDef(159, 1, 8),
+    ReportFieldDef(160, 1, 8),
+    ReportFieldDef(161, 1, 8),
+    ReportFieldDef(162, 1, 8),
+]
+_HIKING_REPORT_FIELDS = [
+    ReportFieldDef(1, 4, 1),
+    ReportFieldDef(2, 4, 1),
+    ReportFieldDef(3, 4, 1),
+    ReportFieldDef(5, 4, 1),
+    ReportFieldDef(6, 2, 1),
+    ReportFieldDef(8, 4, 1),
+    ReportFieldDef(9, 4, 1),
+    ReportFieldDef(12, 4, 1, is_float=True),
+    ReportFieldDef(13, 4, 1),
+    ReportFieldDef(14, 2, 1),
+    ReportFieldDef(16, 1, 1),
+    ReportFieldDef(17, 1, 1),
+    ReportFieldDef(18, 1, 1),
+    ReportFieldDef(19, 4, 1, is_float=True),
+    ReportFieldDef(20, 4, 1, is_float=True),
+    ReportFieldDef(21, 4, 1, is_float=True),
+    ReportFieldDef(22, 4, 1, is_float=True),
+    ReportFieldDef(23, 4, 1, is_float=True),
+    ReportFieldDef(25, 4, 1, is_float=True),
+    ReportFieldDef(27, 1, 1),
+    ReportFieldDef(28, 1, 1),
+    ReportFieldDef(29, 2, 1),
+    ReportFieldDef(30, 4, 1),
+    ReportFieldDef(31, 4, 1),
+    ReportFieldDef(32, 4, 1),
+    ReportFieldDef(33, 4, 1),
+    ReportFieldDef(34, 4, 1),
+    ReportFieldDef(7, 2, 1),
+    ReportFieldDef(4, 4, 2),
+    ReportFieldDef(26, 4, 2, is_float=True),
+    ReportFieldDef(90, 1, 3),
+    ReportFieldDef(-1, 8, 3, depends_on=_REPORT_COURSE_ID_DEP),
+    ReportFieldDef(91, 1, 3),
+    ReportFieldDef(92, 4, 3),
+    ReportFieldDef(93, 2, 3),
+    ReportFieldDef(94, 4, 3),
+    ReportFieldDef(95, 4, 3),
+    ReportFieldDef(96, 2, 3),
+]
 
-_SPORT_REPORT_FIELDS: dict[int, list[ReportFieldDef]] = {1: OUTDOOR_SPORT_REPORT_FIELDS, 2: OUTDOOR_SPORT_REPORT_FIELDS, 3: _INDOOR_RUN_REPORT_FIELDS, 4: OUTDOOR_SPORT_REPORT_FIELDS, 5: OUTDOOR_SPORT_REPORT_FIELDS, 6: _OUTDOOR_BIKING_REPORT_FIELDS, 8: FREE_TRAINING_REPORT_FIELDS, 9: _SWIMMING_REPORT_FIELDS, 10: _SWIMMING_REPORT_FIELDS, 12: FREE_TRAINING_REPORT_FIELDS, 15: _HIKING_REPORT_FIELDS, 16: FREE_TRAINING_REPORT_FIELDS}
+_SPORT_REPORT_FIELDS: dict[int, list[ReportFieldDef]] = {
+    1: OUTDOOR_SPORT_REPORT_FIELDS,
+    2: OUTDOOR_SPORT_REPORT_FIELDS,
+    3: _INDOOR_RUN_REPORT_FIELDS,
+    4: OUTDOOR_SPORT_REPORT_FIELDS,
+    5: OUTDOOR_SPORT_REPORT_FIELDS,
+    6: _OUTDOOR_BIKING_REPORT_FIELDS,
+    8: FREE_TRAINING_REPORT_FIELDS,
+    9: _SWIMMING_REPORT_FIELDS,
+    10: _SWIMMING_REPORT_FIELDS,
+    12: FREE_TRAINING_REPORT_FIELDS,
+    15: _HIKING_REPORT_FIELDS,
+    16: FREE_TRAINING_REPORT_FIELDS,
+}
 
 
 def compute_report_validity_len(fields: list[ReportFieldDef], version: int) -> int:
-    return (sum(1 for field in fields if field.type_id >= 0 and field.support_version <= version) + 7) // 8
+    return (
+        sum(1 for field in fields if field.type_id >= 0 and field.support_version <= version) + 7
+    ) // 8
 
 
 def get_report_data_valid_len(sport_type: int, version: int) -> int | None:
@@ -117,21 +503,26 @@ def get_report_data_valid_len(sport_type: int, version: int) -> int | None:
     return compute_report_validity_len(fields, version)
 
 
-def _read_report_value(data: memoryview | bytes, offset: int, byte_count: int, is_float: bool) -> tuple[int | float, int]:
-    if is_float and byte_count == 4:
+def _read_report_value(
+    data: memoryview | bytes, offset: int, byte_count: int, *, is_float: bool
+) -> tuple[int | float, int]:
+    if is_float and byte_count == FLOAT32_BYTES:
         return struct.unpack_from("<f", data, offset)[0], offset + 4
-    if byte_count == 1:
+    if byte_count == UINT8_BYTES:
         return data[offset], offset + 1
-    if byte_count == 2:
+    if byte_count == UINT16_BYTES:
         return struct.unpack_from("<H", data, offset)[0], offset + 2
-    if byte_count == 4:
+    if byte_count == UINT32_BYTES:
         return struct.unpack_from("<I", data, offset)[0], offset + 4
-    if byte_count == 8:
+    if byte_count == UINT64_BYTES:
         return struct.unpack_from("<Q", data, offset)[0], offset + 8
-    raise ValueError(f"Unsupported report field byte_count={byte_count}")
+    msg = f"Unsupported report field byte_count={byte_count}"
+    raise ValueError(msg)
 
 
-def parse_report_validity(fields: list[ReportFieldDef], version: int, data_valid: bytes) -> dict[int, bool]:
+def parse_report_validity(
+    fields: list[ReportFieldDef], version: int, data_valid: bytes
+) -> dict[int, bool]:
     valid_map: dict[int, bool] = {}
     bit_index = 0
     for field_def in fields:
@@ -146,13 +537,16 @@ def parse_report_validity(fields: list[ReportFieldDef], version: int, data_valid
         byte_idx = bit_index // 8
         bit_idx = bit_index % 8
         if byte_idx >= len(data_valid):
-            raise ValueError(f"Report dataValid too short: need byte {byte_idx}, have {len(data_valid)}")
+            msg = f"Report dataValid too short: need byte {byte_idx}, have {len(data_valid)}"
+            raise ValueError(msg)
         valid_map[field_def.type_id] = bool(data_valid[byte_idx] & (1 << (7 - bit_idx)))
         bit_index += 1
     return valid_map
 
 
-def _parse_report_fields(body: bytes, version: int, data_valid: bytes, fields: list[ReportFieldDef]) -> dict[int, int | float]:
+def _parse_report_fields(
+    body: bytes, version: int, data_valid: bytes, fields: list[ReportFieldDef]
+) -> dict[int, int | float]:
     valid_map = parse_report_validity(fields, version, data_valid)
     result: dict[int, int | float] = {}
     parsed: dict[int, int | float] = {}
@@ -168,7 +562,9 @@ def _parse_report_fields(body: bytes, version: int, data_valid: bytes, fields: l
                 continue
         if offset + field_def.byte_count > len(buf):
             break
-        value, offset = _read_report_value(buf, offset, field_def.byte_count, field_def.is_float)
+        value, offset = _read_report_value(
+            buf, offset, field_def.byte_count, is_float=field_def.is_float
+        )
         parsed[field_def.type_id] = value
         if field_def.type_id >= 0 and valid_map.get(field_def.type_id, False):
             result[field_def.type_id] = value
@@ -208,4 +604,16 @@ def download_and_parse_sport_report(
     cache: FdsCache | None = None,
     cache_key: str | None = None,
 ) -> SportReport | None:
-    return download_and_parse_fds_file(session, fds_entry, lambda decrypted: parse_sport_report(decrypted, sport_type), lambda: None, timeout=timeout, cache=cache, cache_key=cache_key, entry_label="sport report", download_label="FDS sport report", decrypt_label="FDS sport report", parse_label="FDS sport report binary")
+    return download_and_parse_fds_file(
+        session,
+        fds_entry,
+        lambda decrypted: parse_sport_report(decrypted, sport_type),
+        lambda: None,
+        timeout=timeout,
+        cache=cache,
+        cache_key=cache_key,
+        entry_label="sport report",
+        download_label="FDS sport report",
+        decrypt_label="FDS sport report",
+        parse_label="FDS sport report binary",
+    )

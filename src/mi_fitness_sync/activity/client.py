@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import requests
 
 from mi_fitness_sync.activity import transport as activity_transport
-from mi_fitness_sync.activity.crypto import build_signature, decrypt_response_payload, encrypt_query_params, generate_nonce
+from mi_fitness_sync.activity.crypto import (
+    build_signature,
+    decrypt_response_payload,
+    encrypt_query_params,
+    generate_nonce,
+)
 from mi_fitness_sync.activity.fds import ActivityFdsService
 from mi_fitness_sync.activity.formatting import format_title
-from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivityPage, FitnessDataPage
+from mi_fitness_sync.activity.models import (
+    Activity,
+    ActivityDetail,
+    ActivityPage,
+    ActivitySample,
+    FitnessDataPage,
+    TrackPoint,
+)
 from mi_fitness_sync.activity.transport import (
     ActivityTransport,
     collect_cookie_values,
@@ -25,10 +36,16 @@ from mi_fitness_sync.activity.utils import (
     merge_samples_into_track_points,
     parse_activity_id,
 )
-from mi_fitness_sync.auth.state import AuthState
 from mi_fitness_sync.exceptions import MiFitnessError
 from mi_fitness_sync.fds.cache import DEFAULT_CACHE_DIR, FdsCache
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from mi_fitness_sync.auth.state import AuthState
+    from mi_fitness_sync.fds.recovery_rate import RecoveryRateData
+    from mi_fitness_sync.fds.sport_reports import SportReport
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +57,15 @@ DETAIL_DATA_KEY = "huami_sport_record"
 ACTIVITY_ID_SEARCH_WINDOW_SECONDS = 86400
 
 
+class ActivitiesClientOptions(TypedDict, total=False):
+    """Keyword options accepted by :class:`MiFitnessActivitiesClient`."""
+
+    timeout: int
+    country_code: str | None
+    cache_dir: Path | str
+    no_cache: bool
+
+
 class MiFitnessActivitiesClient:
     def __init__(
         self,
@@ -49,7 +75,7 @@ class MiFitnessActivitiesClient:
         country_code: str | None = None,
         cache_dir: Path | str = DEFAULT_CACHE_DIR,
         no_cache: bool = False,
-    ):
+    ) -> None:
         self._auth_state = auth_state
         self._timeout = timeout
         self._session = requests.Session()
@@ -135,9 +161,17 @@ class MiFitnessActivitiesClient:
                 next_key=next_key,
             )
             for activity in page.activities:
-                if start_time is not None and activity.start_time is not None and activity.start_time < start_time:
+                if (
+                    start_time is not None
+                    and activity.start_time is not None
+                    and activity.start_time < start_time
+                ):
                     continue
-                if end_time is not None and activity.start_time is not None and activity.start_time > end_time:
+                if (
+                    end_time is not None
+                    and activity.start_time is not None
+                    and activity.start_time > end_time
+                ):
                     continue
                 yield activity
                 yielded += 1
@@ -171,7 +205,10 @@ class MiFitnessActivitiesClient:
             if not page.has_more or not page.next_key:
                 break
             next_key = page.next_key
-        raise MiFitnessError(f"Could not find activity {activity_id} in Mi Fitness for the surrounding time window.")
+        msg = (
+            f"Could not find activity {activity_id} in Mi Fitness for the surrounding time window."
+        )
+        raise MiFitnessError(msg)
 
     def get_activity_detail(
         self,
@@ -180,7 +217,11 @@ class MiFitnessActivitiesClient:
         include_sport_report: bool = True,
         include_recovery_rate: bool = True,
     ) -> ActivityDetail:
-        activity = activity_or_id if isinstance(activity_or_id, Activity) else self.get_activity_by_id(activity_or_id)
+        activity = (
+            activity_or_id
+            if isinstance(activity_or_id, Activity)
+            else self.get_activity_by_id(activity_or_id)
+        )
         fds_downloads = self._try_get_fds_download_map(activity)
         logger.debug(
             "get_activity_detail: FDS download map has %d entries for %s",
@@ -189,8 +230,16 @@ class MiFitnessActivitiesClient:
         )
         fds_samples = self._try_download_fds_sport_samples(activity, fds_downloads)
         fds_track_points = self._try_download_fds_gps_track_points(activity, fds_downloads)
-        fds_sport_report = self._try_download_fds_sport_report(activity, fds_downloads) if include_sport_report else None
-        fds_recovery_rate = self._try_download_fds_recovery_rate(activity, fds_downloads) if include_recovery_rate else None
+        fds_sport_report = (
+            self._try_download_fds_sport_report(activity, fds_downloads)
+            if include_sport_report
+            else None
+        )
+        fds_recovery_rate = (
+            self._try_download_fds_recovery_rate(activity, fds_downloads)
+            if include_recovery_rate
+            else None
+        )
 
         if fds_track_points and fds_samples:
             merge_fds_samples_into_track_points(fds_track_points, fds_samples)
@@ -224,11 +273,13 @@ class MiFitnessActivitiesClient:
                 raw_detail={"source": "fds_sport_record", "fds_downloads": fds_downloads},
             )
 
-        raise MiFitnessError(
+        msg = (
             f"Could not find a detail payload for activity {activity.activity_id} in Mi Fitness. "
-            "The workout summary exists, but neither the JSON detail nor FDS binary data was available. "
+            "The workout summary exists, but neither the JSON detail nor FDS binary data "
+            "was available. "
             "Run with --verbose for diagnostics."
         )
+        raise MiFitnessError(msg)
 
     def _fetch_activity_page(
         self,
@@ -257,7 +308,9 @@ class MiFitnessActivitiesClient:
         )
         result = payload.get("result") or {}
         raw_records = result.get("sport_records") or []
-        activities = [self._parse_activity(record, result.get("next_key")) for record in raw_records]
+        activities = [
+            self._parse_activity(record, result.get("next_key")) for record in raw_records
+        ]
         return ActivityPage(
             activities=activities,
             has_more=bool(result.get("has_more")),
@@ -310,7 +363,9 @@ class MiFitnessActivitiesClient:
             signature_path=signature_path,
         )
 
-    def _build_signature(self, method: str, path: str, params: dict[str, str], signed_nonce: str) -> str:
+    def _build_signature(
+        self, method: str, path: str, params: dict[str, str], signed_nonce: str
+    ) -> str:
         return build_signature(method, path, params, signed_nonce)
 
     def _generate_nonce(self, time_diff_ms: int) -> str:
@@ -331,14 +386,20 @@ class MiFitnessActivitiesClient:
         if start_time is None and isinstance(record.get("time"), int):
             start_time = record.get("time")
         end_time = report.get("end_time") if isinstance(report.get("end_time"), int) else None
-        duration_seconds = report.get("duration") if isinstance(report.get("duration"), int) else None
-        distance_meters = report.get("distance") if isinstance(report.get("distance"), int) else None
+        duration_seconds = (
+            report.get("duration") if isinstance(report.get("duration"), int) else None
+        )
+        distance_meters = (
+            report.get("distance") if isinstance(report.get("distance"), int) else None
+        )
         calories = report.get("calories") if isinstance(report.get("calories"), int) else None
         steps = report.get("steps") if isinstance(report.get("steps"), int) else None
         sid = str(record.get("sid") or "")
         key = str(record.get("key") or "")
         time_value = record.get("time") if isinstance(record.get("time"), int) else start_time or 0
-        sync_state = "deleted" if record.get("deleted") is True else "server" if sid and key else None
+        sync_state = (
+            "deleted" if record.get("deleted") is True else "server" if sid and key else None
+        )
         category = record.get("category") if isinstance(record.get("category"), str) else None
         return Activity(
             activity_id=f"{sid}:{key}:{time_value}",
@@ -362,7 +423,11 @@ class MiFitnessActivitiesClient:
     def _get_activity_detail_item(self, activity: Activity) -> dict[str, Any]:
         start_time = activity.start_time
         if start_time is None:
-            raise MiFitnessError(f"Activity {activity.activity_id} does not have a start_time, so detail retrieval cannot be bounded.")
+            msg = (
+                f"Activity {activity.activity_id} does not have a start_time, so detail retrieval "
+                "cannot be bounded."
+            )
+            raise MiFitnessError(msg)
         end_time = activity.end_time
         if end_time is None:
             end_time = start_time + (activity.duration_seconds or ACTIVITY_ID_SEARCH_WINDOW_SECONDS)
@@ -395,20 +460,28 @@ class MiFitnessActivitiesClient:
     ) -> ActivityDetail:
         raw_value = fitness_item.get("value")
         if not isinstance(raw_value, str) or not raw_value.strip():
-            raise MiFitnessError(f"Mi Fitness detail payload for {activity.activity_id} did not include a usable value blob.")
+            msg = (
+                f"Mi Fitness detail payload for {activity.activity_id} did not include a "
+                "usable value blob."
+            )
+            raise MiFitnessError(msg)
         try:
             raw_detail = json.loads(raw_value)
         except json.JSONDecodeError as exc:
-            raise MiFitnessError(f"Mi Fitness detail payload for {activity.activity_id} was not valid JSON: {exc}.") from exc
+            msg = f"Mi Fitness detail payload for {activity.activity_id} was not valid JSON: {exc}."
+            raise MiFitnessError(msg) from exc
         if isinstance(raw_detail, dict) and fds_downloads:
             raw_detail = {**raw_detail, "fds_downloads": fds_downloads}
 
         track_points = extract_track_points(raw_detail)
         samples = extract_activity_samples(raw_detail)
         merge_samples_into_track_points(track_points, samples)
-        detail_time = fitness_item.get("time") if isinstance(fitness_item.get("time"), int) else activity.start_time or 0
-        zone_offset_seconds = fitness_item.get("zone_offset") if isinstance(fitness_item.get("zone_offset"), int) else None
-        zone_name = fitness_item.get("zone_name") if isinstance(fitness_item.get("zone_name"), str) else None
+        raw_time = fitness_item.get("time")
+        detail_time = raw_time if isinstance(raw_time, int) else activity.start_time or 0
+        raw_zone_offset = fitness_item.get("zone_offset")
+        zone_offset_seconds = raw_zone_offset if isinstance(raw_zone_offset, int) else None
+        raw_zone_name = fitness_item.get("zone_name")
+        zone_name = raw_zone_name if isinstance(raw_zone_name, str) else None
         return ActivityDetail(
             activity=activity,
             detail_sid=str(fitness_item.get("sid") or activity.sid),
@@ -427,16 +500,24 @@ class MiFitnessActivitiesClient:
     def _try_get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
         return self._fds_service.try_get_download_map(activity)
 
-    def _try_download_fds_sport_samples(self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]):
+    def _try_download_fds_sport_samples(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]
+    ) -> list[ActivitySample]:
         return self._fds_service.try_download_sport_samples(activity, fds_downloads)
 
-    def _try_download_fds_sport_report(self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]):
+    def _try_download_fds_sport_report(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]
+    ) -> SportReport | None:
         return self._fds_service.try_download_sport_report(activity, fds_downloads)
 
-    def _try_download_fds_gps_track_points(self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]):
+    def _try_download_fds_gps_track_points(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]
+    ) -> list[TrackPoint]:
         return self._fds_service.try_download_gps_track_points(activity, fds_downloads)
 
-    def _try_download_fds_recovery_rate(self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]):
+    def _try_download_fds_recovery_rate(
+        self, activity: Activity, fds_downloads: dict[str, dict[str, Any]]
+    ) -> RecoveryRateData | None:
         return self._fds_service.try_download_recovery_rate(activity, fds_downloads)
 
     def _get_fds_download_map(self, activity: Activity) -> dict[str, dict[str, Any]]:
@@ -466,4 +547,8 @@ class MiFitnessActivitiesClient:
         result = payload.get("result") or {}
         raw_items = result.get("data_list") or []
         items = [item for item in raw_items if isinstance(item, dict)]
-        return FitnessDataPage(items=items, has_more=bool(result.get("has_more")), next_key=result.get("next_key") or None)
+        return FitnessDataPage(
+            items=items,
+            has_more=bool(result.get("has_more")),
+            next_key=result.get("next_key") or None,
+        )

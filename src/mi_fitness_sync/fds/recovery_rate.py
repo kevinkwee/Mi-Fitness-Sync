@@ -3,18 +3,22 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import requests
-
-from mi_fitness_sync.fds.cache import FdsCache
 from mi_fitness_sync.fds.common import SPORT_SERVER_DATA_ID_LEN, parse_fds_header
 from mi_fitness_sync.fds.downloader import download_and_parse_fds_file
 
+if TYPE_CHECKING:
+    import requests
+
+    from mi_fitness_sync.fds.cache import FdsCache
 
 logger = logging.getLogger(__name__)
 
 _RECOVERY_RATE_RECORD_VALIDITY: dict[int, int] = {1: 1}
+
+# rate count (2 bytes), recover timestamp (4 bytes), heart rate, and recover rate.
+_RECOVERY_RATE_BODY_HEADER_BYTES = 8
 
 
 def get_recovery_rate_data_valid_len(version: int) -> int | None:
@@ -49,7 +53,7 @@ def parse_recovery_rate_record(decrypted: bytes) -> RecoveryRateData | None:
 
     header = parse_fds_header(decrypted, data_valid_len)
     body = header.body_data
-    if len(body) < 8:
+    if len(body) < _RECOVERY_RATE_BODY_HEADER_BYTES:
         logger.warning("Recovery rate body too short: %d bytes", len(body))
         return None
 
@@ -58,7 +62,7 @@ def parse_recovery_rate_record(decrypted: bytes) -> RecoveryRateData | None:
     heart_rate = body[6]
     recover_rate = body[7] / 10.0
 
-    offset = 8
+    offset = _RECOVERY_RATE_BODY_HEADER_BYTES
     samples: list[RecoveryRateSample] = []
     for _ in range(rate_count):
         if offset >= len(body):

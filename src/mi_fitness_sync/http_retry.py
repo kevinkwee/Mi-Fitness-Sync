@@ -1,9 +1,10 @@
+"""Retry policy shared by the Mi Fitness and Strava clients."""
+
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-
 
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 DEFAULT_MAX_ATTEMPTS = 4
@@ -39,9 +40,9 @@ def parse_retry_after_seconds(value: str | None) -> float | None:
         return None
 
     if retry_at.tzinfo is None:
-        retry_at = retry_at.replace(tzinfo=timezone.utc)
+        retry_at = retry_at.replace(tzinfo=UTC)
 
-    return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
+    return max((retry_at - datetime.now(UTC)).total_seconds(), 0.0)
 
 
 def retry_delay_seconds(
@@ -56,6 +57,6 @@ def retry_delay_seconds(
     if parsed_retry_after is not None:
         return min(parsed_retry_after, max_delay_seconds)
 
-    exponential_delay = min(base_delay_seconds * (2 ** attempt_index), max_delay_seconds)
-    jitter = random.uniform(0.0, max(exponential_delay * 0.25, 0.1))
+    exponential_delay = min(base_delay_seconds * (2.0**attempt_index), max_delay_seconds)
+    jitter: float = random.uniform(0.0, max(exponential_delay * 0.25, 0.1))  # noqa: S311 - timing jitter, not a secret
     return min(exponential_delay + jitter, max_delay_seconds)

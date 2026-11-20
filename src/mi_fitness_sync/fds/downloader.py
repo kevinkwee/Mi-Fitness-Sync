@@ -2,29 +2,38 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any
 
 import requests
 
-from mi_fitness_sync.fds.cache import FdsCache
 from mi_fitness_sync.fds.common import decrypt_fds_data
-from mi_fitness_sync.http_retry import DEFAULT_MAX_ATTEMPTS, is_retryable_status_code, retry_delay_seconds
+from mi_fitness_sync.http_retry import (
+    DEFAULT_MAX_ATTEMPTS,
+    is_retryable_status_code,
+    retry_delay_seconds,
+)
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mi_fitness_sync.fds.cache import FdsCache
 
 logger = logging.getLogger(__name__)
-
-ParserOutput = TypeVar("ParserOutput")
 
 
 def _get_fds_response_body(response: requests.Response) -> str:
     try:
-        return response.json()
-    except Exception:
+        body: object = response.json()
+    except ValueError:
         logger.debug("Response is not JSON, using raw text for FDS body", exc_info=True)
         return response.text
+    if isinstance(body, str):
+        return body
+    msg = "FDS response body was JSON but not a string payload."
+    raise ValueError(msg)
 
 
-def download_and_parse_fds_file(
+def download_and_parse_fds_file[ParserOutput](
     session: requests.Session,
     fds_entry: dict[str, Any],
     parse_decrypted: Callable[[bytes], ParserOutput],
@@ -50,7 +59,7 @@ def download_and_parse_fds_file(
     url = fds_entry.get("url")
     object_key = fds_entry.get("obj_key")
     if not isinstance(url, str) or not isinstance(object_key, str):
-        logger.debug("FDS %s entry missing url or obj_key — raw entry: %s", entry_label, fds_entry)
+        logger.debug("FDS %s entry missing url or obj_key, raw entry: %s", entry_label, fds_entry)
         return fallback()
 
     response: requests.Response | None = None

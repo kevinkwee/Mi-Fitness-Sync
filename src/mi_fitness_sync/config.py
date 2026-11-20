@@ -1,3 +1,7 @@
+"""Constants shared by the Xiaomi Passport and Mi Fitness API clients."""
+
 from __future__ import annotations
 
-USER_AGENT = "MiFitnessSync/0.1"
+from mi_fitness_sync import __version__
+
+USER_AGENT = f"MiFitnessSync/{__version__}"

@@ -1,27 +1,47 @@
 from __future__ import annotations
 
 import gzip
+import itertools
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass, replace as _dc_replace
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, TypedDict
 from xml.etree import ElementTree as ET
 
 from mi_fitness_sync.activity.models import ActivityDetail, TrackPoint
 from mi_fitness_sync.exceptions import MiFitnessError
-from mi_fitness_sync.export.smoothing import smooth_track
-from mi_fitness_sync.fds.sport_reports import SportReport
+from mi_fitness_sync.export.geo import gps_position
+from mi_fitness_sync.export.smoothing import SmoothMode, SmoothTrackOptions, smooth_track
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from fit_tool.fit_file_builder import FitFileBuilder
+    from fit_tool.profile.messages.lap_message import LapMessage
+    from fit_tool.profile.messages.session_message import SessionMessage
+    from fit_tool.profile.profile_type import Sport, SubSport, SwimStroke
+
+    from mi_fitness_sync.fds.sport_reports import SportReport
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXPORT_FORMATS = ("fit", "gpx", "tcx")
+GPX_NS = "http://www.topografix.com/GPX/1/1"
 GPX_TRACKPOINT_NS = "http://www.garmin.com/xmlschemas/TrackPointExtension/v1"
 TCX_NS = "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
 TCX_ACTIVITY_NS = "http://www.garmin.com/xmlschemas/ActivityExtension/v2"
 XML_SCHEMA_INSTANCE_NS = "http://www.w3.org/2001/XMLSchema-instance"
 
 _CYCLING_SPORT_TYPES = frozenset({6, 7, 206, 324})
+
+
+class RenderExportOptions(TypedDict, total=False):
+    """Keyword options accepted by the exporters."""
+
+    smooth: bool
+    outlier_speed_mps: float | None
+    smooth_mode: SmoothMode
 
 
 @dataclass(slots=True)
@@ -38,19 +58,21 @@ def render_export(
     compress: bool = False,
     smooth: bool = True,
     outlier_speed_mps: float | None = None,
-    smooth_mode: str = "match",
+    smooth_mode: SmoothMode = "match",
 ) -> ExportResult:
     normalized_format = file_format.strip().lower()
     if normalized_format not in SUPPORTED_EXPORT_FORMATS:
-        raise MiFitnessError(
-            f"Unsupported export format: {file_format}. Expected one of: {', '.join(SUPPORTED_EXPORT_FORMATS)}."
-        )
+        supported = ", ".join(SUPPORTED_EXPORT_FORMATS)
+        msg = f"Unsupported export format: {file_format}. Expected one of: {supported}."
+        raise MiFitnessError(msg)
 
     if smooth:
-        kwargs: dict[str, object] = {"match_target": smooth_mode == "match"}
+        smooth_options: SmoothTrackOptions = {"match_target": smooth_mode == "match"}
         if outlier_speed_mps is not None:
-            kwargs["max_speed_mps"] = outlier_speed_mps
-        smoothed_points = smooth_track(detail.track_points, detail.total_distance_meters, **kwargs)  # type: ignore[arg-type]
+            smooth_options["max_speed_mps"] = outlier_speed_mps
+        smoothed_points = smooth_track(
+            detail.track_points, detail.total_distance_meters, **smooth_options
+        )
         if smoothed_points is not detail.track_points:
             detail = _dc_replace(detail, track_points=smoothed_points)
 
@@ -68,65 +90,78 @@ def render_export(
 
 
 def render_gpx(detail: ActivityDetail) -> bytes:
-    valid_points = [p for p in detail.track_points if _is_valid_coordinate(p.latitude, p.longitude)]
+    valid_points = [(p, pos) for p in detail.track_points if (pos := gps_position(p)) is not None]
     if not valid_points:
-        raise MiFitnessError("This activity detail payload does not contain GPS track points, so GPX export is not available.")
+        msg = (
+            "This activity detail payload does not contain GPS track points, so GPX export "
+            "is not available."
+        )
+        raise MiFitnessError(msg)
 
-    _GPX = "http://www.topografix.com/GPX/1/1"
-    ET.register_namespace("", _GPX)
+    ET.register_namespace("", GPX_NS)
     ET.register_namespace("gpxtpx", GPX_TRACKPOINT_NS)
 
-    has_elevation = any(p.altitude_meters is not None for p in valid_points)
+    has_elevation = any(point.altitude_meters is not None for point, _ in valid_points)
     creator = "Strava with barometer" if has_elevation else "Strava"
 
     root = ET.Element(
-        f"{{{_GPX}}}gpx",
+        f"{{{GPX_NS}}}gpx",
         {
             "version": "1.1",
             "creator": creator,
-            "{%s}schemaLocation" % XML_SCHEMA_INSTANCE_NS: (
-                f"{_GPX} {_GPX}/gpx.xsd "
-                f"{GPX_TRACKPOINT_NS} http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd"
+            f"{{{XML_SCHEMA_INSTANCE_NS}}}schemaLocation": (
+                f"{GPX_NS} {GPX_NS}/gpx.xsd {GPX_TRACKPOINT_NS} http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd"
             ),
         },
     )
 
     # gpxType sequence: metadata, wpt*, rte*, trk*, extensions
-    metadata = ET.SubElement(root, f"{{{_GPX}}}metadata")
-    # metadataType sequence: name, desc, author, copyright, link*, time, keywords, bounds, extensions
-    ET.SubElement(metadata, f"{{{_GPX}}}name").text = detail.activity.title
-    ET.SubElement(metadata, f"{{{_GPX}}}time").text = _isoformat_utc(detail.start_time)
+    metadata = ET.SubElement(root, f"{{{GPX_NS}}}metadata")
+    # metadataType sequence: name, desc, author, copyright, link*, time, keywords, bounds,
+    # extensions
+    ET.SubElement(metadata, f"{{{GPX_NS}}}name").text = detail.activity.title
+    ET.SubElement(metadata, f"{{{GPX_NS}}}time").text = _isoformat_utc(detail.start_time)
 
-    track = ET.SubElement(root, f"{{{_GPX}}}trk")
+    track = ET.SubElement(root, f"{{{GPX_NS}}}trk")
     # trkType sequence: name, cmt, desc, src, link*, number, type, extensions, trkseg*
-    ET.SubElement(track, f"{{{_GPX}}}name").text = detail.activity.title
-    ET.SubElement(track, f"{{{_GPX}}}type").text = _tcx_sport(detail.activity.sport_type)
-    segment = ET.SubElement(track, f"{{{_GPX}}}trkseg")
+    ET.SubElement(track, f"{{{GPX_NS}}}name").text = detail.activity.title
+    ET.SubElement(track, f"{{{GPX_NS}}}type").text = _tcx_sport(detail.activity.sport_type)
+    segment = ET.SubElement(track, f"{{{GPX_NS}}}trkseg")
 
-    for point in valid_points:
+    for point, position in valid_points:
         track_point = ET.SubElement(
             segment,
-            f"{{{_GPX}}}trkpt",
-            {"lat": _format_coordinate(point.latitude), "lon": _format_coordinate(point.longitude)},
+            f"{{{GPX_NS}}}trkpt",
+            {"lat": _format_coordinate(position[0]), "lon": _format_coordinate(position[1])},
         )
         # wptType sequence: ele, time, ..., extensions
         if point.altitude_meters is not None:
-            ET.SubElement(track_point, f"{{{_GPX}}}ele").text = _format_decimal(point.altitude_meters)
-        ET.SubElement(track_point, f"{{{_GPX}}}time").text = _isoformat_utc(point.timestamp)
+            ET.SubElement(track_point, f"{{{GPX_NS}}}ele").text = _format_decimal(
+                point.altitude_meters
+            )
+        ET.SubElement(track_point, f"{{{GPX_NS}}}time").text = _isoformat_utc(point.timestamp)
 
         clamped_hr = _clamp_heart_rate(point.heart_rate) if point.heart_rate is not None else None
-        cadence_rpm = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type) if point.cadence is not None else None
+        cadence_rpm = (
+            _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type)
+            if point.cadence is not None
+            else None
+        )
         clamped_cad = _clamp_cadence(cadence_rpm) if cadence_rpm is not None else None
         has_hr = clamped_hr is not None
         has_cad = cadence_rpm is not None
         if has_hr or has_cad:
-            extensions = ET.SubElement(track_point, f"{{{_GPX}}}extensions")
+            extensions = ET.SubElement(track_point, f"{{{GPX_NS}}}extensions")
             # TrackPointExtension_t sequence (v1): atemp, wtemp, depth, hr, cad, Extensions
-            track_extension = ET.SubElement(extensions, f"{{{GPX_TRACKPOINT_NS}}}TrackPointExtension")
+            track_extension = ET.SubElement(
+                extensions, f"{{{GPX_TRACKPOINT_NS}}}TrackPointExtension"
+            )
             if has_hr:
                 ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}hr").text = str(clamped_hr)
             if has_cad:
-                ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}cad").text = str(clamped_cad)
+                ET.SubElement(track_extension, f"{{{GPX_TRACKPOINT_NS}}}cad").text = str(
+                    clamped_cad
+                )
 
     return _xml_bytes(root)
 
@@ -134,7 +169,11 @@ def render_gpx(detail: ActivityDetail) -> bytes:
 def render_tcx(detail: ActivityDetail) -> bytes:
     export_points = _export_points(detail)
     if not export_points:
-        raise MiFitnessError("This activity detail payload does not contain timestamped samples, so TCX export is not available.")
+        msg = (
+            "This activity detail payload does not contain timestamped samples, so TCX "
+            "export is not available."
+        )
+        raise MiFitnessError(msg)
 
     ET.register_namespace("", TCX_NS)
     ET.register_namespace("aext", TCX_ACTIVITY_NS)
@@ -158,10 +197,18 @@ def render_tcx(detail: ActivityDetail) -> bytes:
     # TotalTimeSeconds, DistanceMeters, MaximumSpeed, Calories,
     # AverageHeartRateBpm, MaximumHeartRateBpm, Intensity, Cadence,
     # TriggerMethod, Track, Notes, Extensions
-    lap = ET.SubElement(activity, f"{{{TCX_NS}}}Lap", {"StartTime": _isoformat_utc(detail.start_time)})
-    ET.SubElement(lap, f"{{{TCX_NS}}}TotalTimeSeconds").text = _format_decimal(float(detail.total_duration_seconds))
-    ET.SubElement(lap, f"{{{TCX_NS}}}DistanceMeters").text = _format_decimal(detail.total_distance_meters)
-    ET.SubElement(lap, f"{{{TCX_NS}}}Calories").text = str(_clamp_calories(detail.total_calories or 0))
+    lap = ET.SubElement(
+        activity, f"{{{TCX_NS}}}Lap", {"StartTime": _isoformat_utc(detail.start_time)}
+    )
+    ET.SubElement(lap, f"{{{TCX_NS}}}TotalTimeSeconds").text = _format_decimal(
+        float(detail.total_duration_seconds)
+    )
+    ET.SubElement(lap, f"{{{TCX_NS}}}DistanceMeters").text = _format_decimal(
+        detail.total_distance_meters
+    )
+    ET.SubElement(lap, f"{{{TCX_NS}}}Calories").text = str(
+        _clamp_calories(detail.total_calories or 0)
+    )
 
     average_heart_rate = _average_heart_rate(export_points)
     if average_heart_rate is not None:
@@ -188,23 +235,34 @@ def render_tcx(detail: ActivityDetail) -> bytes:
         track_point = ET.SubElement(track, f"{{{TCX_NS}}}Trackpoint")
         ET.SubElement(track_point, f"{{{TCX_NS}}}Time").text = _isoformat_utc(point.timestamp)
 
-        if _is_valid_coordinate(point.latitude, point.longitude):
-            position = ET.SubElement(track_point, f"{{{TCX_NS}}}Position")
-            ET.SubElement(position, f"{{{TCX_NS}}}LatitudeDegrees").text = _format_coordinate(point.latitude)
-            ET.SubElement(position, f"{{{TCX_NS}}}LongitudeDegrees").text = _format_coordinate(point.longitude)
+        position = gps_position(point)
+        if position is not None:
+            position_element = ET.SubElement(track_point, f"{{{TCX_NS}}}Position")
+            latitude = ET.SubElement(position_element, f"{{{TCX_NS}}}LatitudeDegrees")
+            latitude.text = _format_coordinate(position[0])
+            longitude = ET.SubElement(position_element, f"{{{TCX_NS}}}LongitudeDegrees")
+            longitude.text = _format_coordinate(position[1])
 
         if point.altitude_meters is not None:
-            ET.SubElement(track_point, f"{{{TCX_NS}}}AltitudeMeters").text = _format_decimal(point.altitude_meters)
+            ET.SubElement(track_point, f"{{{TCX_NS}}}AltitudeMeters").text = _format_decimal(
+                point.altitude_meters
+            )
 
         if point.distance_meters is not None:
-            ET.SubElement(track_point, f"{{{TCX_NS}}}DistanceMeters").text = _format_decimal(point.distance_meters)
+            ET.SubElement(track_point, f"{{{TCX_NS}}}DistanceMeters").text = _format_decimal(
+                point.distance_meters
+            )
 
         clamped_hr = _clamp_heart_rate(point.heart_rate) if point.heart_rate is not None else None
         if clamped_hr is not None:
             heart_rate = ET.SubElement(track_point, f"{{{TCX_NS}}}HeartRateBpm")
             ET.SubElement(heart_rate, f"{{{TCX_NS}}}Value").text = str(clamped_hr)
 
-        cadence_rpm = _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type) if point.cadence is not None else None
+        cadence_rpm = (
+            _cadence_spm_to_rpm(point.cadence, detail.activity.sport_type)
+            if point.cadence is not None
+            else None
+        )
         clamped_cad = _clamp_cadence(cadence_rpm) if cadence_rpm is not None else None
         has_speed = point.speed_mps is not None
         has_run_cad = is_running and clamped_cad is not None
@@ -216,14 +274,16 @@ def render_tcx(detail: ActivityDetail) -> bytes:
         if has_speed or has_run_cad:
             extensions = ET.SubElement(track_point, f"{{{TCX_NS}}}Extensions")
             tpx = ET.SubElement(extensions, f"{{{TCX_ACTIVITY_NS}}}TPX")
-            if has_speed:
-                ET.SubElement(tpx, f"{{{TCX_ACTIVITY_NS}}}Speed").text = _format_decimal(point.speed_mps)
+            if point.speed_mps is not None:
+                ET.SubElement(tpx, f"{{{TCX_ACTIVITY_NS}}}Speed").text = _format_decimal(
+                    point.speed_mps
+                )
             if has_run_cad:
                 ET.SubElement(tpx, f"{{{TCX_ACTIVITY_NS}}}RunCadence").text = str(clamped_cad)
 
     # Activity_t XSD sequence: Id, Lap+, Notes?, Training?, Creator?, Extensions?
     has_elevation = any(p.altitude_meters is not None for p in export_points)
-    _tcx_creator(activity, has_elevation)
+    _tcx_creator(activity, has_elevation=has_elevation)
 
     return _xml_bytes(root)
 
@@ -231,7 +291,11 @@ def render_tcx(detail: ActivityDetail) -> bytes:
 def render_fit(detail: ActivityDetail) -> bytes:
     export_points = _export_points(detail)
     if not export_points:
-        raise MiFitnessError("This activity detail payload does not contain timestamped samples, so FIT export is not available.")
+        msg = (
+            "This activity detail payload does not contain timestamped samples, so FIT "
+            "export is not available."
+        )
+        raise MiFitnessError(msg)
 
     from fit_tool.fit_file_builder import FitFileBuilder
     from fit_tool.profile.messages.activity_message import ActivityMessage
@@ -241,16 +305,26 @@ def render_fit(detail: ActivityDetail) -> bytes:
     from fit_tool.profile.messages.record_message import RecordMessage
     from fit_tool.profile.messages.session_message import SessionMessage
     from fit_tool.profile.profile_type import Activity as FitActivity
-    from fit_tool.profile.profile_type import Event, EventType, FileType, Manufacturer, SubSport
+    from fit_tool.profile.profile_type import (
+        Event,
+        EventType,
+        FileType,
+        Manufacturer,
+        SubSport,
+    )
 
     builder = FitFileBuilder(auto_define=True)
     raw_report = detail.activity.raw_report
-    proto_type = raw_report.get("proto_type") if isinstance(raw_report.get("proto_type"), int) else None
+    proto_type = (
+        raw_report.get("proto_type") if isinstance(raw_report.get("proto_type"), int) else None
+    )
     fit_sport, fit_sub_sport = _fit_sport_mapping(detail.activity.sport_type, proto_type)
     swim_laps = _swim_laps(detail) if fit_sub_sport == SubSport.LAP_SWIMMING else []
     activity_end = max(detail.end_time, swim_laps[-1].end_time) if swim_laps else detail.end_time
     session_seconds = (
-        float(swim_laps[-1].end_time - detail.start_time) if swim_laps else float(detail.total_duration_seconds)
+        float(swim_laps[-1].end_time - detail.start_time)
+        if swim_laps
+        else float(detail.total_duration_seconds)
     )
     start_timestamp_ms = _unix_millis(detail.start_time)
     end_timestamp_ms = _unix_millis(activity_end)
@@ -275,13 +349,17 @@ def render_fit(detail: ActivityDetail) -> bytes:
     ascent = _total_ascent(report, export_points)
     descent = _total_descent(report, export_points)
     reported_pool_width = _plausible_pool_length(raw_report.get("pool_width"))
-    swim_summary = _swim_summary(raw_report, detail.total_distance_meters, fit_sport, reported_pool_width)
+    swim_summary = _swim_summary(
+        raw_report, detail.total_distance_meters, fit_sport, reported_pool_width
+    )
     if swim_laps:
         swim_summary = _with_written_lengths(swim_summary, swim_laps, reported_pool_width)
     else:
         swim_summary = _with_derived_cadence(swim_summary, float(detail.total_duration_seconds))
     swim_summary = _with_capped_average(swim_summary)
-    session_distance = sum(lap.distance_meters for lap in swim_laps) if swim_laps else detail.total_distance_meters
+    session_distance = (
+        sum(lap.distance_meters for lap in swim_laps) if swim_laps else detail.total_distance_meters
+    )
     num_laps = len(swim_laps) or 1
 
     if swim_laps:
@@ -314,7 +392,11 @@ def render_fit(detail: ActivityDetail) -> bytes:
         lap.total_calories = detail.total_calories or 0
         lap.sport = fit_sport
         lap.sub_sport = fit_sub_sport
-        if export_points and export_points[0].latitude is not None and export_points[0].longitude is not None:
+        if (
+            export_points
+            and export_points[0].latitude is not None
+            and export_points[0].longitude is not None
+        ):
             lap.start_position_lat = export_points[0].latitude
             lap.start_position_long = export_points[0].longitude
         if detail.track_points:
@@ -343,7 +425,11 @@ def render_fit(detail: ActivityDetail) -> bytes:
     session.sport = fit_sport
     session.sub_sport = fit_sub_sport
     session.num_laps = num_laps
-    if export_points and export_points[0].latitude is not None and export_points[0].longitude is not None:
+    if (
+        export_points
+        and export_points[0].latitude is not None
+        and export_points[0].longitude is not None
+    ):
         session.start_position_lat = export_points[0].latitude
         session.start_position_long = export_points[0].longitude
     if detail.track_points:
@@ -405,7 +491,8 @@ def render_fit(detail: ActivityDetail) -> bytes:
         activity.local_timestamp = _fit_local_timestamp(activity_end, detail.zone_offset_seconds)
     builder.add(activity)
 
-    return builder.build().to_bytes()
+    payload: bytes = builder.build().to_bytes()
+    return payload
 
 
 def _export_points(detail: ActivityDetail) -> list[TrackPoint]:
@@ -441,7 +528,9 @@ def _maximum_heart_rate(points: list[TrackPoint]) -> int | None:
     return max(values)
 
 
-def _avg_speed(report: SportReport | None, total_distance: float, total_time: float) -> float | None:
+def _avg_speed(
+    report: SportReport | None, total_distance: float, total_time: float
+) -> float | None:
     if report is not None and report.avg_speed is not None:
         return report.avg_speed / 3.6
     if total_distance > 0 and total_time > 0:
@@ -458,7 +547,9 @@ def _max_speed(report: SportReport | None, points: list[TrackPoint]) -> float | 
     return None
 
 
-def _avg_cadence(report: SportReport | None, points: list[TrackPoint], sport_type: int | None) -> int | None:
+def _avg_cadence(
+    report: SportReport | None, points: list[TrackPoint], sport_type: int | None
+) -> int | None:
     if report is not None and report.avg_cadence is not None:
         raw = report.avg_cadence
     else:
@@ -483,22 +574,23 @@ def _total_descent(report: SportReport | None, points: list[TrackPoint]) -> int 
 
 def _compute_elevation_gain(points: list[TrackPoint]) -> int | None:
     altitudes = [p.altitude_meters for p in points if p.altitude_meters is not None]
-    if len(altitudes) < 2:
+    if len(altitudes) < _MIN_ELEVATION_DELTA_POINTS:
         return None
-    gain = sum(b - a for a, b in zip(altitudes, altitudes[1:]) if b > a)
+    gain = sum(b - a for a, b in itertools.pairwise(altitudes) if b > a)
     return round(gain)
 
 
 def _compute_elevation_loss(points: list[TrackPoint]) -> int | None:
     altitudes = [p.altitude_meters for p in points if p.altitude_meters is not None]
-    if len(altitudes) < 2:
+    if len(altitudes) < _MIN_ELEVATION_DELTA_POINTS:
         return None
-    loss = sum(a - b for a, b in zip(altitudes, altitudes[1:]) if a > b)
+    loss = sum(a - b for a, b in itertools.pairwise(altitudes) if a > b)
     return round(loss)
 
 
 _MIN_POOL_LENGTH_METERS = 10.0
 _MAX_POOL_LENGTH_METERS = 100.0
+_MIN_ELEVATION_DELTA_POINTS = 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -527,7 +619,10 @@ def _plausible_pool_length(value: object) -> float | None:
 
 
 def _swim_summary(
-    raw_report: dict, total_distance: float, fit_sport: object, reported_pool_width: float | None
+    raw_report: dict[str, Any],
+    total_distance: float,
+    fit_sport: Sport,
+    reported_pool_width: float | None,
 ) -> SwimSummary | None:
     """Derive FIT swim summary fields from the Mi Fitness report.
 
@@ -561,7 +656,12 @@ def _swim_summary(
         avg_cadence = _positive_number(raw_report.get("avg_stroke_frequency"))
     max_cadence = _positive_number(raw_report.get("max_stroke_freq"))
 
-    if total_strokes is None and num_lengths is None and avg_cadence is None and max_cadence is None:
+    if (
+        total_strokes is None
+        and num_lengths is None
+        and avg_cadence is None
+        and max_cadence is None
+    ):
         return None
 
     return SwimSummary(
@@ -571,25 +671,29 @@ def _swim_summary(
         pool_length_meters=pool_length,
         avg_strokes_per_length=avg_strokes_per_length,
         avg_stroke_distance_meters=avg_stroke_distance,
-        avg_cadence=(_clamp_cadence(round(avg_cadence)) or None) if avg_cadence is not None else None,
-        max_cadence=(_clamp_cadence(round(max_cadence)) or None) if max_cadence is not None else None,
+        avg_cadence=(_clamp_cadence(round(avg_cadence)) or None)
+        if avg_cadence is not None
+        else None,
+        max_cadence=(_clamp_cadence(round(max_cadence)) or None)
+        if max_cadence is not None
+        else None,
     )
 
 
-def _apply_swim_summary(message: object, summary: SwimSummary) -> None:
+def _apply_swim_summary(message: LapMessage | SessionMessage, summary: SwimSummary) -> None:
     """Set the swim fields shared by FIT lap and session messages."""
     if summary.total_strokes is not None:
-        message.total_cycles = summary.total_strokes  # type: ignore[attr-defined]
+        message.total_cycles = summary.total_strokes
     if summary.num_lengths is not None:
-        message.num_lengths = summary.num_lengths  # type: ignore[attr-defined]
+        message.num_lengths = summary.num_lengths
     if summary.num_active_lengths is not None:
-        message.num_active_lengths = summary.num_active_lengths  # type: ignore[attr-defined]
+        message.num_active_lengths = summary.num_active_lengths
     if summary.avg_stroke_distance_meters is not None:
-        message.avg_stroke_distance = summary.avg_stroke_distance_meters  # type: ignore[attr-defined]
+        message.avg_stroke_distance = summary.avg_stroke_distance_meters
     if summary.avg_cadence is not None:
-        message.avg_cadence = summary.avg_cadence  # type: ignore[attr-defined]
+        message.avg_cadence = summary.avg_cadence
     if summary.max_cadence is not None:
-        message.max_cadence = summary.max_cadence  # type: ignore[attr-defined]
+        message.max_cadence = summary.max_cadence
 
 
 def _cadence_from_strokes(strokes: int | None, seconds: float) -> int | None:
@@ -619,7 +723,7 @@ _SWIM_STROKE_FREQ = "17"
 _SWIM_STYLE = "11"
 
 
-def _fit_swim_stroke(mi_style: object) -> object | None:
+def _fit_swim_stroke(mi_style: object) -> SwimStroke | None:
     """Map a Mi Fitness swim style (record type 11 or report main_posture) to a FIT swim stroke.
 
     The style codes match Gadgetbridge's Mi Fitness swimming record.
@@ -645,7 +749,7 @@ class SwimLength:
     strokes: int | None
     stroke_rate: int | None
     calories: int | None
-    stroke: object | None = None
+    stroke: SwimStroke | None = None
     active: bool = True
 
     @property
@@ -736,8 +840,13 @@ class SwimCadence:
 
 
 def _length_cadence(lengths: Sequence[SwimLength]) -> SwimCadence:
-    """Average and maximum stroke rate of a set of lengths, from the reported rates or from the strokes."""
-    rated = [(length.stroke_rate, length.duration_seconds) for length in lengths if length.stroke_rate]
+    """Average and maximum stroke rate of a set of lengths.
+
+    Uses the reported rates when present, otherwise derives them from the strokes.
+    """
+    rated = [
+        (length.stroke_rate, length.duration_seconds) for length in lengths if length.stroke_rate
+    ]
     if rated:
         rated_seconds = sum(seconds for _, seconds in rated)
         weighted_rate = sum(rate * seconds for rate, seconds in rated)
@@ -830,10 +939,14 @@ def _with_written_lengths(
     cadence = _length_cadence(active_lengths)
     written_pool_lengths = {length.distance_meters for length in active_lengths}
     written_pool_length = (
-        _plausible_pool_length(written_pool_lengths.pop()) if len(written_pool_lengths) == 1 else None
+        _plausible_pool_length(written_pool_lengths.pop())
+        if len(written_pool_lengths) == 1
+        else None
     )
     max_cadences = [
-        rate for rate in (summary.max_cadence if summary is not None else None, cadence.maximum) if rate
+        rate
+        for rate in (summary.max_cadence if summary is not None else None, cadence.maximum)
+        if rate
     ]
     report_pool_length = summary.pool_length_meters if summary is not None else None
     pool_length = reported_pool_width or written_pool_length or report_pool_length
@@ -862,7 +975,13 @@ def _with_written_lengths(
     )
 
 
-def _add_swim_laps(builder: object, laps: list[SwimLap], start_time: int, fit_sport: object, fit_sub_sport: object) -> None:
+def _add_swim_laps(
+    builder: FitFileBuilder,
+    laps: list[SwimLap],
+    start_time: int,
+    fit_sport: Sport,
+    fit_sub_sport: SubSport,
+) -> None:
     """Add the records, lengths and laps of a pool swim."""
     from fit_tool.profile.messages.lap_message import LapMessage
     from fit_tool.profile.messages.length_message import LengthMessage
@@ -872,7 +991,7 @@ def _add_swim_laps(builder: object, laps: list[SwimLap], start_time: int, fit_sp
     first_record = RecordMessage()
     first_record.timestamp = _unix_millis(start_time)
     first_record.distance = 0.0
-    builder.add(first_record)  # type: ignore[attr-defined]
+    builder.add(first_record)
 
     distance = 0.0
     length_index = 0
@@ -899,7 +1018,7 @@ def _add_swim_laps(builder: object, laps: list[SwimLap], start_time: int, fit_sp
                     length.avg_swimming_cadence = _clamp_cadence(swim_length.stroke_rate)
                 if swim_length.calories is not None:
                     length.total_calories = swim_length.calories
-            builder.add(length)  # type: ignore[attr-defined]
+            builder.add(length)
             length_index += 1
 
             record = RecordMessage()
@@ -908,11 +1027,13 @@ def _add_swim_laps(builder: object, laps: list[SwimLap], start_time: int, fit_sp
             record.speed = swim_length.distance_meters / swim_length.duration_seconds
             if swim_length.stroke_rate:
                 record.cadence = _clamp_cadence(swim_length.stroke_rate)
-            builder.add(record)  # type: ignore[attr-defined]
+            builder.add(record)
 
         stroke_totals = _stroke_totals(swim_lap.active_lengths)
         cadence = _length_cadence(swim_lap.active_lengths)
-        calories = [length.calories for length in swim_lap.active_lengths if length.calories is not None]
+        calories = [
+            length.calories for length in swim_lap.active_lengths if length.calories is not None
+        ]
 
         lap = LapMessage()
         lap.message_index = lap_index
@@ -935,121 +1056,123 @@ def _add_swim_laps(builder: object, laps: list[SwimLap], start_time: int, fit_sp
             lap.avg_cadence = cadence.average
         if cadence.maximum is not None:
             lap.max_cadence = cadence.maximum
-        strokes_used = {length.stroke for length in swim_lap.active_lengths if length.stroke is not None}
+        strokes_used = {
+            length.stroke for length in swim_lap.active_lengths if length.stroke is not None
+        }
         if len(strokes_used) == 1:
             lap.swim_stroke = strokes_used.pop()
         elif strokes_used:
             lap.swim_stroke = SwimStroke.MIXED
         if swim_lap.distance_meters > 0:
             lap.avg_speed = swim_lap.distance_meters / swim_lap.duration_seconds
-        builder.add(lap)  # type: ignore[attr-defined]
+        builder.add(lap)
 
 
-def _total_strides(detail: "ActivityDetail") -> int | None:
+def _total_strides(detail: ActivityDetail) -> int | None:
     steps = detail.activity.steps
     if steps is not None and steps > 0:
         return steps // 2
     return None
 
 
-def _fit_sport_mapping(sport_type: int | None, proto_type: int | None = None) -> tuple:
+def _fit_sport_mapping(sport_type: int | None, proto_type: int | None = None) -> tuple[Any, Any]:
     from fit_tool.profile.profile_type import Sport, SubSport
 
-    _SPORT_TYPE_MAP: dict[int, tuple] = {
+    sport_type_map: dict[int, tuple[Any, Any]] = {
         # Core sport types (1-21)
-        1: (Sport.RUNNING, SubSport.STREET),                     # Outdoor Running
-        2: (Sport.WALKING, SubSport.CASUAL_WALKING),             # Outdoor Walking
-        3: (Sport.RUNNING, SubSport.TREADMILL),                  # Indoor Running
-        4: (Sport.HIKING, SubSport.GENERIC),                     # Mountaineering
-        5: (Sport.RUNNING, SubSport.TRAIL),                      # Trail Running
-        6: (Sport.CYCLING, SubSport.ROAD),                       # Outdoor Cycling
-        7: (Sport.CYCLING, SubSport.INDOOR_CYCLING),             # Indoor Cycling
-        8: (Sport.TRAINING, SubSport.GENERIC),                   # Free Training
-        9: (Sport.SWIMMING, SubSport.LAP_SWIMMING),              # Pool Swimming
-        10: (Sport.SWIMMING, SubSport.OPEN_WATER),               # Open Water Swimming
-        11: (Sport.FITNESS_EQUIPMENT, SubSport.ELLIPTICAL),      # Elliptical
-        12: (Sport.TRAINING, SubSport.YOGA),                     # Yoga
-        13: (Sport.ROWING, SubSport.INDOOR_ROWING),              # Rowing Machine
-        14: (Sport.TRAINING, SubSport.CARDIO_TRAINING),          # Jump Rope
-        15: (Sport.HIKING, SubSport.GENERIC),                    # Hiking
-        16: (Sport.TRAINING, SubSport.CARDIO_TRAINING),          # HIIT
-        17: (Sport.MULTISPORT, SubSport.GENERIC),                # Triathlon
-        19: (Sport.BASKETBALL, SubSport.GENERIC),                # Basketball
-        20: (Sport.GOLF, SubSport.GENERIC),                      # Golf
-        21: (Sport.ALPINE_SKIING, SubSport.GENERIC),             # Skiing
+        1: (Sport.RUNNING, SubSport.STREET),  # Outdoor Running
+        2: (Sport.WALKING, SubSport.CASUAL_WALKING),  # Outdoor Walking
+        3: (Sport.RUNNING, SubSport.TREADMILL),  # Indoor Running
+        4: (Sport.HIKING, SubSport.GENERIC),  # Mountaineering
+        5: (Sport.RUNNING, SubSport.TRAIL),  # Trail Running
+        6: (Sport.CYCLING, SubSport.ROAD),  # Outdoor Cycling
+        7: (Sport.CYCLING, SubSport.INDOOR_CYCLING),  # Indoor Cycling
+        8: (Sport.TRAINING, SubSport.GENERIC),  # Free Training
+        9: (Sport.SWIMMING, SubSport.LAP_SWIMMING),  # Pool Swimming
+        10: (Sport.SWIMMING, SubSport.OPEN_WATER),  # Open Water Swimming
+        11: (Sport.FITNESS_EQUIPMENT, SubSport.ELLIPTICAL),  # Elliptical
+        12: (Sport.TRAINING, SubSport.YOGA),  # Yoga
+        13: (Sport.ROWING, SubSport.INDOOR_ROWING),  # Rowing Machine
+        14: (Sport.TRAINING, SubSport.CARDIO_TRAINING),  # Jump Rope
+        15: (Sport.HIKING, SubSport.GENERIC),  # Hiking
+        16: (Sport.TRAINING, SubSport.CARDIO_TRAINING),  # HIIT
+        17: (Sport.MULTISPORT, SubSport.GENERIC),  # Triathlon
+        19: (Sport.BASKETBALL, SubSport.GENERIC),  # Basketball
+        20: (Sport.GOLF, SubSport.GENERIC),  # Golf
+        21: (Sport.ALPINE_SKIING, SubSport.GENERIC),  # Skiing
         # Water sports (100-118)
-        100: (Sport.SAILING, SubSport.GENERIC),                  # Sailing
+        100: (Sport.SAILING, SubSport.GENERIC),  # Sailing
         101: (Sport.STAND_UP_PADDLEBOARDING, SubSport.GENERIC),  # Paddle Board
-        104: (Sport.WATER_SKIING, SubSport.GENERIC),             # Water Skiing
-        105: (Sport.KAYAKING, SubSport.GENERIC),                 # Kayaking
-        106: (Sport.RAFTING, SubSport.GENERIC),                  # Kayak Rafting
-        107: (Sport.BOATING, SubSport.GENERIC),                  # Boating
-        108: (Sport.BOATING, SubSport.GENERIC),                  # Motor Boat
-        109: (Sport.SWIMMING, SubSport.GENERIC),                 # Fin Swimming
-        110: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),         # Diving
-        111: (Sport.SWIMMING, SubSport.GENERIC),                 # Artistic Swimming
-        112: (Sport.DIVING, SubSport.APNEA_DIVING),              # Snorkeling
-        113: (Sport.KITESURFING, SubSport.GENERIC),              # Kite Surfing
-        114: (Sport.SURFING, SubSport.GENERIC),                  # Indoor Surfing
-        115: (Sport.ROWING, SubSport.GENERIC),                   # Dragon Boats
-        116: (Sport.DIVING, SubSport.APNEA_DIVING),              # Freediving
-        117: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),         # Recreational Scuba
-        118: (Sport.DIVING, SubSport.MULTI_GAS_DIVING),          # Instrument Diving
-        # Adventure & outdoor (200-207)
-        200: (Sport.ROCK_CLIMBING, SubSport.GENERIC),            # Rock Climbing
-        202: (Sport.INLINE_SKATING, SubSport.GENERIC),           # Roller Skating
-        205: (Sport.HANG_GLIDING, SubSport.GENERIC),             # Paragliding
-        206: (Sport.CYCLING, SubSport.BMX),                      # BMX
-        207: (Sport.WALKING, SubSport.SPEED_WALKING),            # Nordic Walking
+        104: (Sport.WATER_SKIING, SubSport.GENERIC),  # Water Skiing
+        105: (Sport.KAYAKING, SubSport.GENERIC),  # Kayaking
+        106: (Sport.RAFTING, SubSport.GENERIC),  # Kayak Rafting
+        107: (Sport.BOATING, SubSport.GENERIC),  # Boating
+        108: (Sport.BOATING, SubSport.GENERIC),  # Motor Boat
+        109: (Sport.SWIMMING, SubSport.GENERIC),  # Fin Swimming
+        110: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),  # Diving
+        111: (Sport.SWIMMING, SubSport.GENERIC),  # Artistic Swimming
+        112: (Sport.DIVING, SubSport.APNEA_DIVING),  # Snorkeling
+        113: (Sport.KITESURFING, SubSport.GENERIC),  # Kite Surfing
+        114: (Sport.SURFING, SubSport.GENERIC),  # Indoor Surfing
+        115: (Sport.ROWING, SubSport.GENERIC),  # Dragon Boats
+        116: (Sport.DIVING, SubSport.APNEA_DIVING),  # Freediving
+        117: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),  # Recreational Scuba
+        118: (Sport.DIVING, SubSport.MULTI_GAS_DIVING),  # Instrument Diving
+        # Adventure & outdoor (200-207)  # noqa: ERA001 - a range label, not code
+        200: (Sport.ROCK_CLIMBING, SubSport.GENERIC),  # Rock Climbing
+        202: (Sport.INLINE_SKATING, SubSport.GENERIC),  # Roller Skating
+        205: (Sport.HANG_GLIDING, SubSport.GENERIC),  # Paragliding
+        206: (Sport.CYCLING, SubSport.BMX),  # BMX
+        207: (Sport.WALKING, SubSport.SPEED_WALKING),  # Nordic Walking
         # Indoor fitness (300-334)
-        301: (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING), # Stair Climbing
-        302: (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING), # Stepper
-        303: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Core Training
-        304: (Sport.TRAINING, SubSport.FLEXIBILITY_TRAINING),    # Flexibility Training
-        305: (Sport.TRAINING, SubSport.PILATES),                 # Pilates
-        307: (Sport.TRAINING, SubSport.FLEXIBILITY_TRAINING),    # Stretching
-        308: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Strength Training
-        310: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Aerobics
-        313: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Dumbbell Training
-        314: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Barbell Training
-        315: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Weight Lifting
-        316: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Deadlift
-        317: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Burpee
-        318: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Sit-Ups
-        320: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Upper Limb Training
-        321: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Lower Limb Training
-        322: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Waist & Abdomen
-        323: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Back Training
-        324: (Sport.CYCLING, SubSport.SPIN),                     # Spinning
-        330: (Sport.BOXING, SubSport.GENERIC),                   # Kickboxing
-        331: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Battle Rope
-        332: (Sport.TRAINING, SubSport.CARDIO_TRAINING),         # Mixed Aerobic
-        333: (Sport.WALKING, SubSport.INDOOR_WALKING),           # Indoor Walking
-        334: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),       # Ab Wheel
+        301: (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING),  # Stair Climbing
+        302: (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING),  # Stepper
+        303: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Core Training
+        304: (Sport.TRAINING, SubSport.FLEXIBILITY_TRAINING),  # Flexibility Training
+        305: (Sport.TRAINING, SubSport.PILATES),  # Pilates
+        307: (Sport.TRAINING, SubSport.FLEXIBILITY_TRAINING),  # Stretching
+        308: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Strength Training
+        310: (Sport.TRAINING, SubSport.CARDIO_TRAINING),  # Aerobics
+        313: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Dumbbell Training
+        314: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Barbell Training
+        315: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Weight Lifting
+        316: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Deadlift
+        317: (Sport.TRAINING, SubSport.CARDIO_TRAINING),  # Burpee
+        318: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Sit-Ups
+        320: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Upper Limb Training
+        321: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Lower Limb Training
+        322: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Waist & Abdomen
+        323: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Back Training
+        324: (Sport.CYCLING, SubSport.SPIN),  # Spinning
+        330: (Sport.BOXING, SubSport.GENERIC),  # Kickboxing
+        331: (Sport.TRAINING, SubSport.CARDIO_TRAINING),  # Battle Rope
+        332: (Sport.TRAINING, SubSport.CARDIO_TRAINING),  # Mixed Aerobic
+        333: (Sport.WALKING, SubSport.INDOOR_WALKING),  # Indoor Walking
+        334: (Sport.TRAINING, SubSport.STRENGTH_TRAINING),  # Ab Wheel
         # Martial arts (500-511)
-        500: (Sport.BOXING, SubSport.GENERIC),                   # Boxing
+        500: (Sport.BOXING, SubSport.GENERIC),  # Boxing
         # Ball sports (600-627)
-        600: (Sport.SOCCER, SubSport.GENERIC),                   # Football
-        601: (Sport.BASKETBALL, SubSport.GENERIC),               # Basketball (Alt)
-        609: (Sport.TENNIS, SubSport.GENERIC),                   # Tennis
-        # Snow & ice (700-710)
-        700: (Sport.ICE_SKATING, SubSport.GENERIC),              # Outdoor Skating
-        703: (Sport.SNOWMOBILING, SubSport.GENERIC),             # Snowmobile
-        707: (Sport.ICE_SKATING, SubSport.GENERIC),              # Indoor Skating
-        708: (Sport.SNOWBOARDING, SubSport.GENERIC),             # Snowboarding
-        709: (Sport.CROSS_COUNTRY_SKIING, SubSport.GENERIC),     # Skiing (General)
-        710: (Sport.CROSS_COUNTRY_SKIING, SubSport.GENERIC),     # Cross-Country Skiing
-        # Misc (800-812)
-        802: (Sport.HORSEBACK_RIDING, SubSport.GENERIC),         # Horse Riding
-        806: (Sport.FISHING, SubSport.GENERIC),                  # Fishing
-        # Climbing (1000-1001)
-        1000: (Sport.ROCK_CLIMBING, SubSport.GENERIC),           # Indoor Rock Climbing
-        1001: (Sport.ROCK_CLIMBING, SubSport.GENERIC),           # Outdoor Rock Climbing
+        600: (Sport.SOCCER, SubSport.GENERIC),  # Football
+        601: (Sport.BASKETBALL, SubSport.GENERIC),  # Basketball (Alt)
+        609: (Sport.TENNIS, SubSport.GENERIC),  # Tennis
+        # Snow & ice (700-710)  # noqa: ERA001 - a range label, not code
+        700: (Sport.ICE_SKATING, SubSport.GENERIC),  # Outdoor Skating
+        703: (Sport.SNOWMOBILING, SubSport.GENERIC),  # Snowmobile
+        707: (Sport.ICE_SKATING, SubSport.GENERIC),  # Indoor Skating
+        708: (Sport.SNOWBOARDING, SubSport.GENERIC),  # Snowboarding
+        709: (Sport.CROSS_COUNTRY_SKIING, SubSport.GENERIC),  # Skiing (General)
+        710: (Sport.CROSS_COUNTRY_SKIING, SubSport.GENERIC),  # Cross-Country Skiing
+        # Misc (800-812)  # noqa: ERA001 - a range label, not code
+        802: (Sport.HORSEBACK_RIDING, SubSport.GENERIC),  # Horse Riding
+        806: (Sport.FISHING, SubSport.GENERIC),  # Fishing
+        # Climbing (1000-1001)  # noqa: ERA001 - a range label, not code
+        1000: (Sport.ROCK_CLIMBING, SubSport.GENERIC),  # Indoor Rock Climbing
+        1001: (Sport.ROCK_CLIMBING, SubSport.GENERIC),  # Outdoor Rock Climbing
         # Special (10000+)
-        10000: (Sport.HORSEBACK_RIDING, SubSport.GENERIC),       # Equestrian
+        10000: (Sport.HORSEBACK_RIDING, SubSport.GENERIC),  # Equestrian
     }
 
-    _PROTO_TYPE_MAP: dict[int, tuple] = {
+    proto_type_map: dict[int, tuple[Any, Any]] = {
         1: (Sport.RUNNING, SubSport.STREET),
         2: (Sport.RUNNING, SubSport.TRACK),
         3: (Sport.RUNNING, SubSport.TREADMILL),
@@ -1077,11 +1200,11 @@ def _fit_sport_mapping(sport_type: int | None, proto_type: int | None = None) ->
         25: (Sport.DIVING, SubSport.SINGLE_GAS_DIVING),
     }
 
-    if sport_type is not None and sport_type in _SPORT_TYPE_MAP:
-        return _SPORT_TYPE_MAP[sport_type]
+    if sport_type is not None and sport_type in sport_type_map:
+        return sport_type_map[sport_type]
 
-    if proto_type is not None and proto_type in _PROTO_TYPE_MAP:
-        return _PROTO_TYPE_MAP[proto_type]
+    if proto_type is not None and proto_type in proto_type_map:
+        return proto_type_map[proto_type]
 
     return (Sport.GENERIC, SubSport.GENERIC)
 
@@ -1094,8 +1217,11 @@ def _tcx_sport(sport_type: int | None) -> str:
     return "Other"
 
 
-def _tcx_creator(activity_element: ET.Element, has_elevation: bool) -> None:
-    """Append a Creator element to the Activity. Includes barometer hint when altitude data is present."""
+def _tcx_creator(activity_element: ET.Element, *, has_elevation: bool) -> None:
+    """Append a Creator element to the Activity.
+
+    The creator name carries a barometer hint when altitude data is present.
+    """
     creator_name = "Strava with barometer" if has_elevation else "Strava"
     creator = ET.SubElement(
         activity_element,
@@ -1118,11 +1244,17 @@ def _clamp_calories(value: int) -> int:
 def _xml_bytes(root: ET.Element) -> bytes:
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    payload: bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    return payload
 
 
 def _isoformat_utc(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.fromtimestamp(timestamp, tz=UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _unix_millis(timestamp: int) -> int:
@@ -1134,12 +1266,6 @@ _FIT_EPOCH_OFFSET = 631065600
 
 def _fit_local_timestamp(unix_epoch_seconds: int, zone_offset_seconds: int) -> int:
     return unix_epoch_seconds + zone_offset_seconds - _FIT_EPOCH_OFFSET
-
-
-def _is_valid_coordinate(lat: float | None, lon: float | None) -> bool:
-    if lat is None or lon is None:
-        return False
-    return -90.0 <= lat <= 90.0 and -180.0 <= lon < 180.0
 
 
 def _cadence_spm_to_rpm(spm: int, sport_type: int | None) -> int:

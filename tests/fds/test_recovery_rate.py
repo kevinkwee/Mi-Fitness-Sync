@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 from mi_fitness_sync.fds.common import decrypt_fds_data
-from mi_fitness_sync.fds.recovery_rate import get_recovery_rate_data_valid_len, parse_recovery_rate_record
-from tests.fds.support import b64url_encode_no_pad, build_header, build_recovery_rate_body, encrypt, make_aes_key
+from mi_fitness_sync.fds.recovery_rate import (
+    get_recovery_rate_data_valid_len,
+    parse_recovery_rate_record,
+)
+from tests.fds.support import (
+    b64url_encode_no_pad,
+    build_header,
+    build_recovery_rate_body,
+    encrypt,
+    make_aes_key,
+)
 
 
-def test_recovery_rate_validity_len_v1():
+def test_recovery_rate_validity_len_v1() -> None:
     assert get_recovery_rate_data_valid_len(1) == 1
 
 
-def test_recovery_rate_validity_len_unknown_version():
+def test_recovery_rate_validity_len_unknown_version() -> None:
     assert get_recovery_rate_data_valid_len(99) is None
 
 
-def test_parse_recovery_rate_record_basic():
+def test_parse_recovery_rate_record_basic() -> None:
     rates = [80, 75, 70]
     body = build_recovery_rate_body(3, 1717200100, 120, 85, rates)
     data_valid = bytes([0x80])
@@ -30,7 +39,7 @@ def test_parse_recovery_rate_record_basic():
     assert result.end_rate == 70
 
 
-def test_parse_recovery_rate_record_empty_rates():
+def test_parse_recovery_rate_record_empty_rates() -> None:
     body = build_recovery_rate_body(0, 1717200100, 90, 0, [])
     data_valid = bytes([0x80])
     decrypted = build_header(1717200000, 28, 1, 8, data_valid) + body
@@ -43,21 +52,23 @@ def test_parse_recovery_rate_record_empty_rates():
     assert result.end_rate is None
 
 
-def test_parse_recovery_rate_record_too_short_returns_none():
+def test_parse_recovery_rate_record_too_short_returns_none() -> None:
     assert parse_recovery_rate_record(b"\x00" * 5) is None
 
 
-def test_parse_recovery_rate_record_unsupported_version_returns_none():
-    decrypted = build_header(1717200000, 28, 99, 8, bytes([0x80])) + build_recovery_rate_body(0, 1717200100, 90, 0, [])
+def test_parse_recovery_rate_record_unsupported_version_returns_none() -> None:
+    decrypted = build_header(1717200000, 28, 99, 8, bytes([0x80])) + build_recovery_rate_body(
+        0, 1717200100, 90, 0, []
+    )
     assert parse_recovery_rate_record(decrypted) is None
 
 
-def test_parse_recovery_rate_record_truncated_body_returns_none():
+def test_parse_recovery_rate_record_truncated_body_returns_none() -> None:
     decrypted = build_header(1717200000, 28, 1, 8, bytes([0x80])) + b"\x00\x00\x00\x00"
     assert parse_recovery_rate_record(decrypted) is None
 
 
-def test_parse_recovery_rate_record_truncated_rate_samples():
+def test_parse_recovery_rate_record_truncated_rate_samples() -> None:
     body = build_recovery_rate_body(5, 1717200100, 100, 50, [60, 55])
     data_valid = bytes([0x80])
     decrypted = build_header(1717200000, 28, 1, 8, data_valid) + body
@@ -70,7 +81,7 @@ def test_parse_recovery_rate_record_truncated_rate_samples():
     assert result.end_rate == 55
 
 
-def test_parse_recovery_rate_record_full_decrypt_pipeline():
+def test_parse_recovery_rate_record_full_decrypt_pipeline() -> None:
     rates = [90, 85, 80, 75]
     body = build_recovery_rate_body(4, 1717200200, 130, 42, rates)
     data_valid = bytes([0x80])

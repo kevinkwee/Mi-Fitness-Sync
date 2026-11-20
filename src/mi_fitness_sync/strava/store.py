@@ -1,7 +1,9 @@
+"""Persists Strava OAuth tokens to a JSON file."""
+
 from __future__ import annotations
 
+import contextlib
 import json
-import os
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -34,10 +36,9 @@ def save_tokens(state: StravaTokenState, token_path: str | None = None) -> Path:
     path = resolve_token_path(token_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(state), indent=2, sort_keys=True), encoding="utf-8")
-    try:
+    # Windows ACLs do not support POSIX modes, so restricting the file is best effort.
+    with contextlib.suppress(OSError):
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass  # Best-effort; Windows ACLs don't support POSIX modes
     return path
 
 

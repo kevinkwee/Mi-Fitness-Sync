@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from pathlib import Path
+from typing import TYPE_CHECKING, Never
 
-from mi_fitness_sync.activity.models import Activity
+from mi_fitness_sync.activity.models import Activity, ActivityDetail
 from mi_fitness_sync.export import bulk as bulk_mod
-from mi_fitness_sync.export.bulk import BulkExportOptions, BulkExportRecord, BulkExporter
+from mi_fitness_sync.export.bulk import BulkExporter, BulkExportOptions, BulkExportRecord
 from mi_fitness_sync.export.files import default_export_path
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
+
+    from mi_fitness_sync.auth.state import AuthState
 
 
 def _make_activity(*, sid: str, key: str, start_time: int, title: str) -> Activity:
@@ -50,7 +57,12 @@ def _make_options(tmp_path: Path) -> BulkExportOptions:
     )
 
 
-def test_bulk_exporter_writes_unique_files_and_manifest(monkeypatch, tmp_path, auth_state, sample_activity_detail):
+def test_bulk_exporter_writes_unique_files_and_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    auth_state: AuthState,
+    sample_activity_detail: ActivityDetail,
+) -> None:
     activities = [
         _make_activity(sid="sid-a", key="key", start_time=1717200000, title="Morning Run"),
         _make_activity(sid="sid-b", key="key", start_time=1717200000, title="Morning Run"),
@@ -58,10 +70,16 @@ def test_bulk_exporter_writes_unique_files_and_manifest(monkeypatch, tmp_path, a
     options = _make_options(tmp_path)
 
     class DummyClient:
-        def __init__(self, state, **kwargs):
+        def __init__(self, state: AuthState, **kwargs: object) -> None:
             pass
 
-        def get_activity_detail(self, activity, *, include_sport_report=True, include_recovery_rate=True):
+        def get_activity_detail(
+            self,
+            activity: Activity,
+            *,
+            include_sport_report: bool = True,
+            include_recovery_rate: bool = True,
+        ) -> ActivityDetail:
             assert include_sport_report is False
             assert include_recovery_rate is False
             return replace(
@@ -80,7 +98,11 @@ def test_bulk_exporter_writes_unique_files_and_manifest(monkeypatch, tmp_path, a
         lambda detail, file_format, compress=False, **kwargs: type(
             "Export",
             (),
-            {"payload": detail.activity.activity_id.encode("utf-8"), "file_format": file_format, "compressed": compress},
+            {
+                "payload": detail.activity.activity_id.encode("utf-8"),
+                "file_format": file_format,
+                "compressed": compress,
+            },
         )(),
     )
 
@@ -97,7 +119,9 @@ def test_bulk_exporter_writes_unique_files_and_manifest(monkeypatch, tmp_path, a
     assert {record.status for record in progress} == {"completed"}
 
 
-def test_bulk_exporter_skips_completed_manifest_entries(monkeypatch, tmp_path, auth_state):
+def test_bulk_exporter_skips_completed_manifest_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_state: AuthState
+) -> None:
     activity = _make_activity(sid="sid-a", key="key", start_time=1717200000, title="Morning Run")
     options = _make_options(tmp_path)
     output_path = default_export_path(
@@ -133,7 +157,7 @@ def test_bulk_exporter_skips_completed_manifest_entries(monkeypatch, tmp_path, a
     )
 
     class DummyClient:
-        def __init__(self, state, **kwargs):
+        def __init__(self, state: AuthState, **kwargs: object) -> None:
             raise AssertionError("worker client should not be created for resumed entries")
 
     monkeypatch.setattr(bulk_mod, "MiFitnessActivitiesClient", DummyClient)
@@ -145,7 +169,9 @@ def test_bulk_exporter_skips_completed_manifest_entries(monkeypatch, tmp_path, a
     assert progress[0].status == "skipped_manifest"
 
 
-def test_bulk_exporter_records_existing_files_without_reexport(monkeypatch, tmp_path, auth_state):
+def test_bulk_exporter_records_existing_files_without_reexport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_state: AuthState
+) -> None:
     activity = _make_activity(sid="sid-a", key="key", start_time=1717200000, title="Morning Run")
     options = _make_options(tmp_path)
     output_path = default_export_path(
@@ -159,7 +185,7 @@ def test_bulk_exporter_records_existing_files_without_reexport(monkeypatch, tmp_
     output_path.write_bytes(b"existing")
 
     class DummyClient:
-        def __init__(self, state, **kwargs):
+        def __init__(self, state: AuthState, **kwargs: object) -> None:
             raise AssertionError("worker client should not be created for existing files")
 
     monkeypatch.setattr(bulk_mod, "MiFitnessActivitiesClient", DummyClient)
@@ -173,15 +199,23 @@ def test_bulk_exporter_records_existing_files_without_reexport(monkeypatch, tmp_
     assert payload["status"] == "skipped_existing"
 
 
-def test_bulk_exporter_failed_records_do_not_store_output_path(monkeypatch, tmp_path, auth_state):
+def test_bulk_exporter_failed_records_do_not_store_output_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_state: AuthState
+) -> None:
     activity = _make_activity(sid="sid-a", key="key", start_time=1717200000, title="Morning Run")
     options = _make_options(tmp_path)
 
     class DummyClient:
-        def __init__(self, state, **kwargs):
+        def __init__(self, state: AuthState, **kwargs: object) -> None:
             pass
 
-        def get_activity_detail(self, activity, *, include_sport_report=True, include_recovery_rate=True):
+        def get_activity_detail(
+            self,
+            activity: Activity,
+            *,
+            include_sport_report: bool = True,
+            include_recovery_rate: bool = True,
+        ) -> Never:
             raise RuntimeError("boom")
 
     monkeypatch.setattr(bulk_mod, "MiFitnessActivitiesClient", DummyClient)

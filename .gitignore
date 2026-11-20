@@ -209,5 +209,9 @@ __marimo__/
 # Decompiled files
 /mifitness_android/
 
+# Captured HTTP traffic holds live session tokens
+*.har
+*.har.json
+
 # Agent review reports, never committed
 /.github/temp_reports/

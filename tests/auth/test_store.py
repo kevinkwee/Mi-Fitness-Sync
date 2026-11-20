@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import os
 import stat
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mi_fitness_sync.auth import store as auth_store
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def test_save_and_load_state_round_trip(tmp_path: Path, auth_state):
+    from mi_fitness_sync.auth.state import AuthState
+
+
+def test_save_and_load_state_round_trip(tmp_path: Path, auth_state: AuthState) -> None:
     state_path = tmp_path / "auth.json"
 
     saved_path = auth_store.save_state(auth_state, str(state_path))
@@ -17,7 +22,7 @@ def test_save_and_load_state_round_trip(tmp_path: Path, auth_state):
     assert loaded_state == auth_state
 
 
-def test_delete_state_removes_file(tmp_path: Path, auth_state):
+def test_delete_state_removes_file(tmp_path: Path, auth_state: AuthState) -> None:
     state_path = tmp_path / "auth.json"
     auth_store.save_state(auth_state, str(state_path))
 
@@ -27,7 +32,7 @@ def test_delete_state_removes_file(tmp_path: Path, auth_state):
     assert not state_path.exists()
 
 
-def test_save_state_sets_restrictive_permissions(tmp_path: Path, auth_state):
+def test_save_state_sets_restrictive_permissions(tmp_path: Path, auth_state: AuthState) -> None:
     state_path = tmp_path / "auth.json"
 
     auth_store.save_state(auth_state, str(state_path))

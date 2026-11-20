@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import stat
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from mi_fitness_sync.strava.store import StravaTokenState, save_tokens, load_tokens, delete_tokens
+from mi_fitness_sync.strava.store import StravaTokenState, delete_tokens, load_tokens, save_tokens
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_token_state() -> StravaTokenState:
@@ -20,7 +23,7 @@ def _make_token_state() -> StravaTokenState:
     )
 
 
-def test_save_and_load_round_trip(tmp_path: Path):
+def test_save_and_load_round_trip(tmp_path: Path) -> None:
     state = _make_token_state()
     token_path = tmp_path / "tokens.json"
 
@@ -31,11 +34,11 @@ def test_save_and_load_round_trip(tmp_path: Path):
     assert loaded == state
 
 
-def test_load_returns_none_when_missing(tmp_path: Path):
+def test_load_returns_none_when_missing(tmp_path: Path) -> None:
     assert load_tokens(str(tmp_path / "nonexistent.json")) is None
 
 
-def test_delete_removes_file(tmp_path: Path):
+def test_delete_removes_file(tmp_path: Path) -> None:
     state = _make_token_state()
     token_path = tmp_path / "tokens.json"
     save_tokens(state, str(token_path))
@@ -46,13 +49,13 @@ def test_delete_removes_file(tmp_path: Path):
     assert not token_path.exists()
 
 
-def test_delete_no_op_when_missing(tmp_path: Path):
+def test_delete_no_op_when_missing(tmp_path: Path) -> None:
     token_path = tmp_path / "nonexistent.json"
     deleted_path = delete_tokens(str(token_path))
     assert deleted_path == token_path.resolve()
 
 
-def test_save_tokens_sets_restrictive_permissions(tmp_path: Path):
+def test_save_tokens_sets_restrictive_permissions(tmp_path: Path) -> None:
     state = _make_token_state()
     token_path = tmp_path / "tokens.json"
 

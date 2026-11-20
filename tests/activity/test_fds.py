@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from mi_fitness_sync.activity.fds import ActivityFdsService
 from mi_fitness_sync.activity.models import Activity
 from mi_fitness_sync.activity.utils import build_fds_suffix
 from mi_fitness_sync.fds.sport_records import SportSample
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _make_activity(
@@ -53,7 +57,7 @@ def _make_service() -> ActivityFdsService:
 class TestBuildContext:
     """Verify _build_context uses the report-level timestamp, not the record-level one."""
 
-    def test_uses_report_time_when_record_and_report_differ(self):
+    def test_uses_report_time_when_record_and_report_differ(self) -> None:
         activity = _make_activity(record_time=1700000100, report_time=1700000000)
         service = _make_service()
 
@@ -64,7 +68,7 @@ class TestBuildContext:
             "Expected report-level timestamp, got record-level timestamp"
         )
 
-    def test_falls_back_to_start_time_when_report_time_missing(self):
+    def test_falls_back_to_start_time_when_report_time_missing(self) -> None:
         activity = _make_activity(record_time=1700000100, report_time=1700000000)
         activity.raw_report.pop("time")
         service = _make_service()
@@ -74,7 +78,7 @@ class TestBuildContext:
         assert context is not None
         assert context.timestamp == activity.start_time
 
-    def test_context_fields_populated_from_report(self):
+    def test_context_fields_populated_from_report(self) -> None:
         activity = _make_activity(proto_type=22, timezone_offset=28)
         service = _make_service()
 
@@ -89,7 +93,7 @@ class TestBuildContext:
 class TestRequestItemUsesReportTimestamp:
     """End-to-end: divergent timestamps produce FDS suffix from report time."""
 
-    def test_request_item_suffix_uses_report_timestamp(self):
+    def test_request_item_suffix_uses_report_timestamp(self) -> None:
         record_time = 1700000100
         report_time = 1700000000
         activity = _make_activity(record_time=record_time, report_time=report_time)
@@ -117,15 +121,15 @@ class TestRequestItemUsesReportTimestamp:
 
         assert item["suffix"] == expected_suffix
         assert item["timestamp"] == report_time
-        assert item["suffix"] != wrong_suffix, (
-            "Suffix must NOT match the record-level timestamp"
-        )
+        assert item["suffix"] != wrong_suffix, "Suffix must NOT match the record-level timestamp"
 
 
 class TestSportSamplesKeepSwimData:
     """Per-length swim data survives the FDS hand-off with string extras keys and the pace."""
 
-    def test_sport_samples_keep_pace_and_per_length_values(self, monkeypatch):
+    def test_sport_samples_keep_pace_and_per_length_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         activity = _make_activity(proto_type=9)
         suffix = build_fds_suffix(
             sid=activity.sid,
@@ -134,8 +138,15 @@ class TestSportSamplesKeepSwimData:
             sport_type=9,
             file_type=0,
         )
-        parsed = [SportSample(timestamp=1700000060, distance=25, pace=240, extras={17: 23, 1: 1700000060, 16: 23})]
-        monkeypatch.setattr("mi_fitness_sync.activity.fds.download_and_parse_sport_record", lambda *args, **kwargs: parsed)
+        parsed = [
+            SportSample(
+                timestamp=1700000060, distance=25, pace=240, extras={17: 23, 1: 1700000060, 16: 23}
+            )
+        ]
+        monkeypatch.setattr(
+            "mi_fitness_sync.activity.fds.download_and_parse_sport_record",
+            lambda *args, **kwargs: parsed,
+        )
 
         samples = _make_service().try_download_sport_samples(activity, {f"{suffix}_1700000000": {}})
 

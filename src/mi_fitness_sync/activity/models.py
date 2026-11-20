@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mi_fitness_sync.activity.formatting import format_duration, format_terminal_time
-from mi_fitness_sync.fds.recovery_rate import RecoveryRateData
-from mi_fitness_sync.fds.sport_reports import SportReport
+
+if TYPE_CHECKING:
+    from mi_fitness_sync.fds.recovery_rate import RecoveryRateData
+    from mi_fitness_sync.fds.sport_reports import SportReport
 
 
 @dataclass(slots=True)
 class ActivityPage:
-    activities: list["Activity"]
+    activities: list[Activity]
     has_more: bool
     next_key: str | None
 
@@ -46,7 +48,9 @@ class Activity:
         payload["start_time_local"] = format_terminal_time(self.start_time)
         payload["end_time_local"] = format_terminal_time(self.end_time)
         payload["duration"] = format_duration(self.duration_seconds)
-        payload["distance_km"] = None if self.distance_meters is None else round(self.distance_meters / 1000, 3)
+        payload["distance_km"] = (
+            None if self.distance_meters is None else round(self.distance_meters / 1000, 3)
+        )
         return payload
 
 
@@ -149,10 +153,16 @@ class ActivityDetail:
     def total_distance_meters(self) -> float:
         if self.activity.distance_meters is not None:
             return float(self.activity.distance_meters)
-        distances = [point.distance_meters for point in self.track_points if point.distance_meters is not None]
+        distances = [
+            point.distance_meters
+            for point in self.track_points
+            if point.distance_meters is not None
+        ]
         if distances:
             return max(distances)
-        sample_distances = [sample.distance_meters for sample in self.samples if sample.distance_meters is not None]
+        sample_distances = [
+            sample.distance_meters for sample in self.samples if sample.distance_meters is not None
+        ]
         if sample_distances:
             return max(sample_distances)
         return 0.0
@@ -161,7 +171,9 @@ class ActivityDetail:
     def total_calories(self) -> int | None:
         if self.activity.calories is not None:
             return self.activity.calories
-        sample_calories = [sample.calories for sample in self.samples if sample.calories is not None]
+        sample_calories = [
+            sample.calories for sample in self.samples if sample.calories is not None
+        ]
         if sample_calories:
             return max(sample_calories)
         return None

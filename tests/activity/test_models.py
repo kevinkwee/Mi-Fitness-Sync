@@ -3,7 +3,7 @@ from __future__ import annotations
 from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample
 
 
-def test_summary_calories_preferred_over_sample_calories():
+def test_summary_calories_preferred_over_sample_calories() -> None:
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
         sid="sid-1",
@@ -69,7 +69,7 @@ def test_summary_calories_preferred_over_sample_calories():
     assert detail.total_calories == 321
 
 
-def test_detail_still_prefers_activity_summary_calories():
+def test_detail_still_prefers_activity_summary_calories() -> None:
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
         sid="sid-1",
@@ -121,7 +121,7 @@ def test_detail_still_prefers_activity_summary_calories():
     assert detail.total_calories == 42
 
 
-def test_sample_distance_used_when_summary_missing():
+def test_sample_distance_used_when_summary_missing() -> None:
     activity = Activity(
         activity_id="sid-1:key-1:1717200000",
         sid="sid-1",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import replace
+from http import HTTPStatus
+from typing import Any
 
 import requests
 
@@ -20,8 +22,17 @@ _POLL_INTERVAL_SECONDS = 2
 _MAX_POLL_ATTEMPTS = 30
 
 
+def _parse_json_body(response: requests.Response, label: str) -> object:
+    try:
+        body: object = response.json()
+    except ValueError:
+        msg = f"{label} returned a body that was not JSON."
+        raise StravaError(msg) from None
+    return body
+
+
 class StravaClient:
-    def __init__(self, token_state: StravaTokenState, *, token_path: str | None = None):
+    def __init__(self, token_state: StravaTokenState, *, token_path: str | None = None) -> None:
         self._state = token_state
         self._token_path = token_path
 
@@ -48,7 +59,9 @@ class StravaClient:
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._state.access_token}"}
 
-    def list_activities(self, *, after: int, before: int, per_page: int = 30, page: int = 1) -> list[dict]:
+    def list_activities(
+        self, *, after: int, before: int, per_page: int = 30, page: int = 1
+    ) -> list[dict[str, Any]]:
         """Return athlete activities with start dates in the given epoch range."""
         self._ensure_valid_token()
         response = requests.get(
@@ -57,11 +70,14 @@ class StravaClient:
             params={"after": after, "before": before, "per_page": per_page, "page": page},
             timeout=30,
         )
-        if response.status_code != 200:
-            raise StravaError(
-                f"Failed to list Strava activities (HTTP {response.status_code}): {response.text}"
-            )
-        return response.json()
+        if response.status_code != HTTPStatus.OK:
+            msg = f"Failed to list Strava activities (HTTP {response.status_code}): {response.text}"
+            raise StravaError(msg)
+        payload = _parse_json_body(response, "Strava activity list")
+        if not isinstance(payload, list):
+            msg = "Strava activity list response was not a JSON array."
+            raise StravaError(msg)
+        return payload
 
     def upload_activity(
         self,
@@ -69,7 +85,7 @@ class StravaClient:
         *,
         sport_type: str | None = None,
         external_id: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Upload a FIT file to Strava and poll until processing completes.
 
         Returns the final upload status dict which includes ``activity_id``
@@ -91,17 +107,22 @@ class StravaClient:
             data=data,
             timeout=60,
         )
-        if response.status_code not in (200, 201):
-            raise StravaError(f"Upload failed (HTTP {response.status_code}): {response.text}")
+        if response.status_code not in (HTTPStatus.OK, HTTPStatus.CREATED):
+            msg = f"Upload failed (HTTP {response.status_code}): {response.text}"
+            raise StravaError(msg)
 
-        upload = response.json()
+        upload = _parse_json_body(response, "Strava upload")
+        if not isinstance(upload, dict):
+            msg = "Strava upload response was not a JSON object."
+            raise StravaError(msg)
         upload_id = upload.get("id_str") or str(upload.get("id", ""))
         if not upload_id:
-            raise StravaError("Upload response did not contain an upload ID.")
+            msg = "Upload response did not contain an upload ID."
+            raise StravaError(msg)
 
         return self._poll_upload(upload_id)
 
-    def _poll_upload(self, upload_id: str) -> dict:
+    def _poll_upload(self, upload_id: str) -> dict[str, Any]:
         for _ in range(_MAX_POLL_ATTEMPTS):
             time.sleep(_POLL_INTERVAL_SECONDS)
             self._ensure_valid_token()
@@ -111,16 +132,22 @@ class StravaClient:
                 headers=self._auth_headers(),
                 timeout=30,
             )
-            if response.status_code != 200:
-                raise StravaError(f"Upload status check failed (HTTP {response.status_code}).")
+            if response.status_code != HTTPStatus.OK:
+                msg = f"Upload status check failed (HTTP {response.status_code})."
+                raise StravaError(msg)
 
-            status = response.json()
+            status = _parse_json_body(response, "Strava upload status")
+            if not isinstance(status, dict):
+                msg = "Strava upload status response was not a JSON object."
+                raise StravaError(msg)
             error = status.get("error")
             activity_id = status.get("activity_id")
 
             if error:
-                raise StravaError(f"Strava processing error: {error}")
+                msg = f"Strava processing error: {error}"
+                raise StravaError(msg)
             if activity_id is not None:
                 return status
 
-        raise StravaError("Upload processing timed out — activity may still be processing on Strava.")
+        msg = "Upload processing timed out. The activity may still be processing on Strava."
+        raise StravaError(msg)

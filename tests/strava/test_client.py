@@ -25,7 +25,7 @@ def _make_token_state(*, expires_at: int | None = None) -> StravaTokenState:
 
 @patch("mi_fitness_sync.strava.client.time.sleep")
 @patch("mi_fitness_sync.strava.client.requests")
-def test_upload_activity_success(mock_requests, mock_sleep):
+def test_upload_activity_success(mock_requests: MagicMock, mock_sleep: MagicMock) -> None:
     upload_response = MagicMock()
     upload_response.status_code = 201
     upload_response.json.return_value = {"id": 123, "id_str": "123"}
@@ -54,7 +54,7 @@ def test_upload_activity_success(mock_requests, mock_sleep):
 
 @patch("mi_fitness_sync.strava.client.time.sleep")
 @patch("mi_fitness_sync.strava.client.requests")
-def test_upload_activity_processing_error(mock_requests, mock_sleep):
+def test_upload_activity_processing_error(mock_requests: MagicMock, mock_sleep: MagicMock) -> None:
     upload_response = MagicMock()
     upload_response.status_code = 201
     upload_response.json.return_value = {"id": 123, "id_str": "123"}
@@ -77,7 +77,7 @@ def test_upload_activity_processing_error(mock_requests, mock_sleep):
 
 
 @patch("mi_fitness_sync.strava.client.requests")
-def test_upload_http_error_raises(mock_requests):
+def test_upload_http_error_raises(mock_requests: MagicMock) -> None:
     upload_response = MagicMock()
     upload_response.status_code = 401
     upload_response.text = "Unauthorized"
@@ -92,7 +92,9 @@ def test_upload_http_error_raises(mock_requests):
 @patch("mi_fitness_sync.strava.client.refresh_access_token")
 @patch("mi_fitness_sync.strava.client.time.sleep")
 @patch("mi_fitness_sync.strava.client.requests")
-def test_auto_refresh_on_expired_token(mock_requests, mock_sleep, mock_refresh, mock_save):
+def test_auto_refresh_on_expired_token(
+    mock_requests: MagicMock, mock_sleep: MagicMock, mock_refresh: MagicMock, mock_save: MagicMock
+) -> None:
     mock_refresh.return_value = {
         "access_token": "new-access",
         "refresh_token": "new-refresh",
@@ -120,7 +122,7 @@ def test_auto_refresh_on_expired_token(mock_requests, mock_sleep, mock_refresh, 
 
 
 @patch("mi_fitness_sync.strava.client.requests")
-def test_upload_no_sport_type(mock_requests):
+def test_upload_no_sport_type(mock_requests: MagicMock) -> None:
     upload_response = MagicMock()
     upload_response.status_code = 201
     upload_response.json.return_value = {"id": 1, "id_str": "1"}
@@ -140,10 +142,15 @@ def test_upload_no_sport_type(mock_requests):
 
 
 @patch("mi_fitness_sync.strava.client.requests")
-def test_list_activities_returns_results(mock_requests):
+def test_list_activities_returns_results(mock_requests: MagicMock) -> None:
     activities = [
         {"id": 1, "name": "Morning Run", "start_date": "2026-06-01T00:00:00Z", "sport_type": "Run"},
-        {"id": 2, "name": "Afternoon Ride", "start_date": "2026-06-01T00:10:00Z", "sport_type": "Ride"},
+        {
+            "id": 2,
+            "name": "Afternoon Ride",
+            "start_date": "2026-06-01T00:10:00Z",
+            "sport_type": "Ride",
+        },
     ]
     response = MagicMock()
     response.status_code = 200
@@ -160,7 +167,7 @@ def test_list_activities_returns_results(mock_requests):
 
 
 @patch("mi_fitness_sync.strava.client.requests")
-def test_list_activities_http_error_raises(mock_requests):
+def test_list_activities_http_error_raises(mock_requests: MagicMock) -> None:
     response = MagicMock()
     response.status_code = 401
     response.text = "Unauthorized"
@@ -172,7 +179,7 @@ def test_list_activities_http_error_raises(mock_requests):
 
 
 @patch("mi_fitness_sync.strava.client.requests")
-def test_list_activities_empty_list(mock_requests):
+def test_list_activities_empty_list(mock_requests: MagicMock) -> None:
     response = MagicMock()
     response.status_code = 200
     response.json.return_value = []
@@ -182,3 +189,60 @@ def test_list_activities_empty_list(mock_requests):
     result = client.list_activities(after=1000, before=2000)
 
     assert result == []
+
+
+@patch("mi_fitness_sync.strava.client.requests")
+def test_list_activities_non_json_body_raises(mock_requests: MagicMock) -> None:
+    response = MagicMock()
+    response.status_code = 200
+    response.json.side_effect = ValueError("no json")
+    mock_requests.get.return_value = response
+
+    client = StravaClient(_make_token_state())
+    with pytest.raises(StravaError, match="not JSON"):
+        client.list_activities(after=1000, before=2000)
+
+
+@patch("mi_fitness_sync.strava.client.requests")
+def test_list_activities_non_array_payload_raises(mock_requests: MagicMock) -> None:
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"message": "Authorization Error"}
+    mock_requests.get.return_value = response
+
+    client = StravaClient(_make_token_state())
+    with pytest.raises(StravaError, match="not a JSON array"):
+        client.list_activities(after=1000, before=2000)
+
+
+@patch("mi_fitness_sync.strava.client.requests")
+def test_upload_activity_non_object_response_raises(mock_requests: MagicMock) -> None:
+    upload_response = MagicMock()
+    upload_response.status_code = 201
+    upload_response.json.return_value = ["not", "an", "object"]
+    mock_requests.post.return_value = upload_response
+
+    client = StravaClient(_make_token_state())
+    with pytest.raises(StravaError, match="not a JSON object"):
+        client.upload_activity(b"fake-fit-data")
+
+
+@patch("mi_fitness_sync.strava.client.time.sleep")
+@patch("mi_fitness_sync.strava.client.requests")
+def test_upload_status_non_object_response_raises(
+    mock_requests: MagicMock, mock_sleep: MagicMock
+) -> None:
+    upload_response = MagicMock()
+    upload_response.status_code = 201
+    upload_response.json.return_value = {"id": 1, "id_str": "1"}
+
+    status_response = MagicMock()
+    status_response.status_code = 200
+    status_response.json.return_value = "processing"
+
+    mock_requests.post.return_value = upload_response
+    mock_requests.get.return_value = status_response
+
+    client = StravaClient(_make_token_state())
+    with pytest.raises(StravaError, match="not a JSON object"):
+        client.upload_activity(b"fake-fit-data")

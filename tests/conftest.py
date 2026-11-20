@@ -10,8 +10,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from mi_fitness_sync.activity.models import Activity, ActivityDetail, ActivitySample, TrackPoint
-from mi_fitness_sync.auth.state import AuthState
+from mi_fitness_sync.activity.models import (  # noqa: E402 - imported once src is on sys.path
+    Activity,
+    ActivityDetail,
+    ActivitySample,
+    TrackPoint,
+)
+from mi_fitness_sync.auth.state import AuthState  # noqa: E402 - imported once src is on sys.path
 
 
 @pytest.fixture

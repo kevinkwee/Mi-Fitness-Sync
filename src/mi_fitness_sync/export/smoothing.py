@@ -8,22 +8,32 @@ heart rate, cadence, etc.) are never modified.
 from __future__ import annotations
 
 import math
+from typing import Literal, TypedDict
 
 from mi_fitness_sync.activity.models import TrackPoint
+from mi_fitness_sync.export.geo import gps_position
+
+SmoothMode = Literal["match", "full"]
+
+
+class SmoothTrackOptions(TypedDict, total=False):
+    """Keyword options accepted by :func:`smooth_track`."""
+
+    max_speed_mps: float
+    match_target: bool
+
 
 _EARTH_RADIUS_M = 6_371_000
 _TOLERANCE_FLOOR_M = 20.0
-_TOLERANCE_RATE = 0.003  # 0.3 %
+_TOLERANCE_RATE = 0.003  # 0.3%
 _TOLERANCE_CAP_M = 80.0
-_MAX_SPEED_MPS = 50.0  # ~180 km/h – anything faster is treated as an outlier
+_MAX_SPEED_MPS = 50.0  # ~180 km/h, anything faster is treated as an outlier
 _MIN_WINDOW = 5
 _MAX_WINDOW = 31
 _POLYORDER = 3
-
-
-# ---------------------------------------------------------------------------
-# Coordinate helpers
-# ---------------------------------------------------------------------------
+_MIN_POINTS_FOR_DISTANCE = 2
+_MIN_POINTS_FOR_SMOOTHING = 3
+_MATRIX_PIVOT_EPSILON = 1e-15
 
 
 def _distance_tolerance(target_distance_meters: float) -> float:
@@ -31,16 +41,9 @@ def _distance_tolerance(target_distance_meters: float) -> float:
     return max(_TOLERANCE_FLOOR_M, min(_TOLERANCE_RATE * target_distance_meters, _TOLERANCE_CAP_M))
 
 
-def _has_valid_gps(p: TrackPoint) -> bool:
+def _has_valid_gps(point: TrackPoint) -> bool:
     """True when lat/lon are present and within WGS-84 bounds."""
-    if p.latitude is None or p.longitude is None:
-        return False
-    return -90.0 <= p.latitude <= 90.0 and -180.0 <= p.longitude < 180.0
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+    return gps_position(point) is not None
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -55,8 +58,8 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def total_haversine_distance(points: list[TrackPoint]) -> float:
     """Sum of consecutive haversine distances for points with valid coordinates."""
-    valid = [(p.latitude, p.longitude) for p in points if _has_valid_gps(p)]
-    if len(valid) < 2:
+    valid = [position for point in points if (position := gps_position(point)) is not None]
+    if len(valid) < _MIN_POINTS_FOR_DISTANCE:
         return 0.0
     return sum(
         haversine(valid[i][0], valid[i][1], valid[i + 1][0], valid[i + 1][1])
@@ -89,39 +92,48 @@ def smooth_track(
     - the track distance already matches the target within tolerance (match mode only)
     """
     gps_points = [p for p in track_points if _has_valid_gps(p)]
-    if len(gps_points) < 2 or target_distance_meters <= 0:
+    if len(gps_points) < _MIN_POINTS_FOR_DISTANCE or target_distance_meters <= 0:
         return track_points
 
     original_distance = total_haversine_distance(gps_points)
     if original_distance <= 0:
         return track_points
 
-    if match_target and abs(original_distance - target_distance_meters) <= _distance_tolerance(target_distance_meters):
+    if match_target and abs(original_distance - target_distance_meters) <= _distance_tolerance(
+        target_distance_meters
+    ):
         return track_points
 
-    # Step 1: interpolate outlier positions
+    # Replace implausible jumps before any smoothing, so they cannot distort the fit.
     fixed = _fix_outliers(track_points, max_speed_mps)
 
     valid_fixed = [p for p in fixed if _has_valid_gps(p)]
     fixed_distance = total_haversine_distance(valid_fixed)
 
     if match_target:
-        if fixed_distance <= 0 or abs(fixed_distance - target_distance_meters) <= _distance_tolerance(target_distance_meters):
+        if fixed_distance <= 0 or abs(
+            fixed_distance - target_distance_meters
+        ) <= _distance_tolerance(target_distance_meters):
             return fixed
 
-        # Step 2: Savitzky-Golay – only useful when GPS distance > target
+        # Smoothing can only shorten the track, so it is skipped once the target is met.
         if fixed_distance <= target_distance_meters:
             return fixed
 
-    gps_indices = [i for i, p in enumerate(fixed) if _has_valid_gps(p)]
-    if len(gps_indices) < _MIN_WINDOW:
+    gps_positions = [
+        (index, position)
+        for index, point in enumerate(fixed)
+        if (position := gps_position(point)) is not None
+    ]
+    if len(gps_positions) < _MIN_WINDOW:
         return fixed
 
-    lats = [fixed[i].latitude for i in gps_indices]
-    lons = [fixed[i].longitude for i in gps_indices]
+    gps_indices = [index for index, _ in gps_positions]
+    lats = [position[0] for _, position in gps_positions]
+    lons = [position[1] for _, position in gps_positions]
 
     if match_target:
-        # --- match mode: pick the window that best converges on target ---
+        # Pick the window whose smoothed distance lands closest to the target.
         best_result = fixed
         best_diff = abs(fixed_distance - target_distance_meters)
 
@@ -155,53 +167,47 @@ def smooth_track(
                 best_result = candidate
 
         return best_result
-    else:
-        # --- full mode: apply the largest valid SG window ---
-        max_window = min(_MAX_WINDOW, len(gps_indices))
-        if max_window % 2 == 0:
-            max_window -= 1
-        if max_window <= _POLYORDER:
-            return fixed
+    # Full mode applies the largest window the track can support, without fitting the target.
+    max_window = min(_MAX_WINDOW, len(gps_indices))
+    if max_window % 2 == 0:
+        max_window -= 1
+    if max_window <= _POLYORDER:
+        return fixed
 
-        smoothed_lats = _apply_savgol(lats, max_window, _POLYORDER)
-        smoothed_lons = _apply_savgol(lons, max_window, _POLYORDER)
+    smoothed_lats = _apply_savgol(lats, max_window, _POLYORDER)
+    smoothed_lons = _apply_savgol(lons, max_window, _POLYORDER)
 
-        result = list(fixed)
-        for j, idx in enumerate(gps_indices):
-            p = fixed[idx]
-            result[idx] = TrackPoint(
-                timestamp=p.timestamp,
-                latitude=smoothed_lats[j],
-                longitude=smoothed_lons[j],
-                altitude_meters=p.altitude_meters,
-                speed_mps=p.speed_mps,
-                distance_meters=p.distance_meters,
-                heart_rate=p.heart_rate,
-                cadence=p.cadence,
-                raw_point=p.raw_point,
-            )
+    result = list(fixed)
+    for j, idx in enumerate(gps_indices):
+        p = fixed[idx]
+        result[idx] = TrackPoint(
+            timestamp=p.timestamp,
+            latitude=smoothed_lats[j],
+            longitude=smoothed_lons[j],
+            altitude_meters=p.altitude_meters,
+            speed_mps=p.speed_mps,
+            distance_meters=p.distance_meters,
+            heart_rate=p.heart_rate,
+            cadence=p.cadence,
+            raw_point=p.raw_point,
+        )
 
-        return result
-
-
-# ---------------------------------------------------------------------------
-# Outlier handling
-# ---------------------------------------------------------------------------
+    return result
 
 
 def _fix_outliers(points: list[TrackPoint], max_speed_mps: float) -> list[TrackPoint]:
     """Replace outlier GPS coordinates with linearly interpolated positions.
 
-    All non-GPS fields are preserved.  First and last points are never
-    treated as outliers.
+    Every non-GPS field is preserved, and the first and last points are never treated as
+    outliers.
     """
     n = len(points)
     gps_mask = [_has_valid_gps(p) for p in points]
 
-    if n < 3 or sum(gps_mask) < 3:
+    if n < _MIN_POINTS_FOR_SMOOTHING or sum(gps_mask) < _MIN_POINTS_FOR_SMOOTHING:
         return points[:]
 
-    # --- identify outliers ---
+    # A step faster than the plausible speed is treated as a jump to be corrected.
     is_outlier = [False] * n
     for i in range(1, n):
         if not gps_mask[i]:
@@ -214,7 +220,11 @@ def _fix_outliers(points: list[TrackPoint], max_speed_mps: float) -> list[TrackP
         dt = points[i].timestamp - points[prev_idx].timestamp
         if dt <= 0:
             continue
-        dist = haversine(points[prev_idx].latitude, points[prev_idx].longitude, points[i].latitude, points[i].longitude)
+        previous = gps_position(points[prev_idx])
+        current = gps_position(points[i])
+        if previous is None or current is None:
+            continue
+        dist = haversine(previous[0], previous[1], current[0], current[1])
         if dist / dt > max_speed_mps:
             is_outlier[i] = True
 
@@ -224,7 +234,7 @@ def _fix_outliers(points: list[TrackPoint], max_speed_mps: float) -> list[TrackP
     if not any(is_outlier):
         return points[:]
 
-    # --- interpolate outlier coordinates ---
+    # Interpolating between the nearest sound neighbours keeps the track continuous.
     result = list(points)
     for i in range(n):
         if not is_outlier[i]:
@@ -241,7 +251,9 @@ def _fix_outliers(points: list[TrackPoint], max_speed_mps: float) -> list[TrackP
             continue
 
         prev_p, next_p = points[prev_idx], points[next_idx]
-        if prev_p.latitude is None or next_p.latitude is None:
+        start = gps_position(prev_p)
+        end = gps_position(next_p)
+        if start is None or end is None:
             continue
 
         total_dt = next_p.timestamp - prev_p.timestamp
@@ -251,8 +263,8 @@ def _fix_outliers(points: list[TrackPoint], max_speed_mps: float) -> list[TrackP
 
         result[i] = TrackPoint(
             timestamp=points[i].timestamp,
-            latitude=prev_p.latitude + t * (next_p.latitude - prev_p.latitude),
-            longitude=prev_p.longitude + t * (next_p.longitude - prev_p.longitude),
+            latitude=start[0] + t * (end[0] - start[0]),
+            longitude=start[1] + t * (end[1] - start[1]),
             altitude_meters=points[i].altitude_meters,
             speed_mps=points[i].speed_mps,
             distance_meters=points[i].distance_meters,
@@ -262,11 +274,6 @@ def _fix_outliers(points: list[TrackPoint], max_speed_mps: float) -> list[TrackP
         )
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# Lightweight Savitzky-Golay filter (pure Python, no scipy/numpy needed)
-# ---------------------------------------------------------------------------
 
 
 def _apply_savgol(data: list[float], window_length: int, polyorder: int) -> list[float]:
@@ -291,43 +298,48 @@ def _savgol_coeffs(window_length: int, polyorder: int) -> list[float]:
     half = window_length // 2
     order = polyorder + 1
 
-    # Vandermonde matrix J[k][j] = k^j, k ∈ [-half … half]
-    J = [[float(k ** j) for j in range(order)] for k in range(-half, half + 1)]
+    # Vandermonde matrix: vandermonde[k][j] = k^j for k in [-half, half].
+    vandermonde = [[float(k**j) for j in range(order)] for k in range(-half, half + 1)]
 
-    # Normal matrix JᵀJ
-    JtJ = [
-        [sum(J[r][i] * J[r][j] for r in range(window_length)) for j in range(order)]
+    normal = [
+        [
+            sum(vandermonde[r][i] * vandermonde[r][j] for r in range(window_length))
+            for j in range(order)
+        ]
         for i in range(order)
     ]
 
-    # Solve JᵀJ · c = e₀  where e₀ = [1, 0, …, 0]
+    # Solve the normal equations for the coefficient vector whose first entry is one.
     e0 = [1.0] + [0.0] * (order - 1)
-    c = _solve_linear(JtJ, e0)
+    coefficients = _solve_linear(normal, e0)
 
-    # Filter coefficients: coeffs[k] = Σ c[j]·J[k][j]
-    return [sum(c[j] * J[k][j] for j in range(order)) for k in range(window_length)]
+    return [
+        sum(coefficients[j] * vandermonde[k][j] for j in range(order)) for k in range(window_length)
+    ]
 
 
-def _solve_linear(A: list[list[float]], b: list[float]) -> list[float]:
-    """Solve Ax = b via Gaussian elimination with partial pivoting."""
-    n = len(A)
-    M = [A[i][:] + [b[i]] for i in range(n)]
+def _solve_linear(matrix: list[list[float]], rhs: list[float]) -> list[float]:
+    """Solve a square linear system via Gaussian elimination with partial pivoting."""
+    n = len(matrix)
+    augmented = [[*matrix[i][:], rhs[i]] for i in range(n)]
 
     for col in range(n):
-        max_row = max(range(col, n), key=lambda r: abs(M[r][col]))
-        M[col], M[max_row] = M[max_row], M[col]
+        max_row = max(range(col, n), key=lambda r: abs(augmented[r][col]))
+        augmented[col], augmented[max_row] = augmented[max_row], augmented[col]
 
-        pivot = M[col][col]
-        if abs(pivot) < 1e-15:
+        pivot = augmented[col][col]
+        if abs(pivot) < _MATRIX_PIVOT_EPSILON:
             continue
 
         for row in range(col + 1, n):
-            factor = M[row][col] / pivot
+            factor = augmented[row][col] / pivot
             for j in range(col, n + 1):
-                M[row][j] -= factor * M[col][j]
+                augmented[row][j] -= factor * augmented[col][j]
 
-    x = [0.0] * n
+    solution = [0.0] * n
     for i in range(n - 1, -1, -1):
-        s = M[i][n] - sum(M[i][j] * x[j] for j in range(i + 1, n))
-        x[i] = s / M[i][i] if abs(M[i][i]) > 1e-15 else 0.0
-    return x
+        remainder = augmented[i][n] - sum(augmented[i][j] * solution[j] for j in range(i + 1, n))
+        solution[i] = (
+            remainder / augmented[i][i] if abs(augmented[i][i]) > _MATRIX_PIVOT_EPSILON else 0.0
+        )
+    return solution

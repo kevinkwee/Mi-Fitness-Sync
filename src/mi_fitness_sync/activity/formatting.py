@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -20,7 +20,7 @@ def parse_cli_time(value: str) -> int:
 def format_terminal_time(timestamp: int | None) -> str:
     if not timestamp:
         return "-"
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(timestamp, tz=UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_duration(seconds: int | None) -> str:
@@ -31,7 +31,7 @@ def format_duration(seconds: int | None) -> str:
     return f"{hours:02d}:{minute:02d}:{sec:02d}"
 
 
-def format_distance_km(distance_meters: int | float | None) -> str:
+def format_distance_km(distance_meters: float | None) -> str:
     if distance_meters is None:
         return "-"
     return f"{distance_meters / 1000:.2f}"

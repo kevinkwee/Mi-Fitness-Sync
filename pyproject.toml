@@ -1,30 +1,73 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
 
 [project]
 name = "mi-fitness-sync"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Unofficial Python CLI for accessing Mi Fitness workout data and manually syncing activities that failed to reach Strava"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "kevinkwee" }]
+keywords = ["xiaomi", "mi-fitness", "strava", "gpx", "tcx", "fit", "cli", "fitness"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Utilities",
+  "Typing :: Typed",
+]
 dependencies = [
   "fit-tool>=0.9.15,<1",
   "pycryptodome>=3.20,<4",
   "requests>=2.32,<3",
 ]
 
-[project.optional-dependencies]
-test = [
-  "pytest>=8.3,<9",
-  "pytest-cov>=6,<7",
-]
-
 [project.scripts]
 mi-fitness-sync = "mi_fitness_sync.cli.app:main"
 
+[project.urls]
+Homepage = "https://github.com/kevinkwee/Mi-Fitness-Sync"
+Repository = "https://github.com/kevinkwee/Mi-Fitness-Sync"
+Issues = "https://github.com/kevinkwee/Mi-Fitness-Sync/issues"
+Funding = "https://ko-fi.com/kevinkwee27"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.13,<2",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.15,<1",
+  "twine>=7,<8",
+  "types-requests>=2.32,<3",
+]
+
+[tool.hatch.version]
+path = "src/mi_fitness_sync/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mi_fitness_sync"]
+
+# An allowlist keeps local captures, editor state, and agent scratch files out of the sdist.
+[tool.hatch.build.targets.sdist]
+include = [
+  "/LICENSE",
+  "/README.md",
+  "/pyproject.toml",
+  "/src",
+  "/tests",
+  "/uv.lock",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
 
 [tool.coverage.run]
 branch = true
@@ -34,8 +77,63 @@ source = ["mi_fitness_sync"]
 show_missing = true
 skip_covered = false
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+files = ["src", "tests"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[[tool.mypy.overrides]]
+module = ["fit_tool.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+pydocstyle.convention = "google"
+select = ["ALL"]
+ignore = [
+  "C90", # Protocol tables branch once per field, which a complexity limit models poorly
+  "COM812", # The formatter owns comma spacing
+  "CPY", # The project is MIT licensed and carries no per-file copyright headers
+  "D10", # Docstrings are added where the unit name alone does not explain the unit
+  "D203", # Conflicts with the google docstring convention
+  "D213", # Conflicts with the google docstring convention
+  "PLR09", # Dispatch tables and CLI handlers read better without an argument-count limit
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Printing is how a CLI talks to its user, and the OAuth flow prints the URL the
+# user must visit when the browser does not open.
+"src/mi_fitness_sync/cli/**" = ["T201"]
+"src/mi_fitness_sync/strava/auth.py" = ["T201"]
+# MD5 and SHA-1 are what the Xiaomi Passport and Mi Fitness protocols sign with,
+# and the raw payloads those APIs return are genuinely dynamically shaped.
+"src/mi_fitness_sync/activity/crypto.py" = ["S324"]
+"src/mi_fitness_sync/activity/utils.py" = ["ANN401", "S324"]
+"src/mi_fitness_sync/auth/client.py" = ["ANN401", "S324"]
+# fit-tool is imported at call time so building a GPX or TCX file never pays for it.
+"src/mi_fitness_sync/export/render.py" = ["PLC0415"]
+# Strava modules are imported where they are used so the Mi Fitness commands never load them.
+"src/mi_fitness_sync/cli/app.py" = ["PLC0415"]
+"tests/**/*.py" = [
+  "ARG", # Fake collaborators must accept the signature they stand in for
+  "EM101", # Fakes raise short inline error messages
+  "FBT001", # Fakes mirror the boolean parameters of the code they stand in for
+  "FBT002", # Fakes mirror the boolean parameters of the code they stand in for
+  "PLR2004", # Tests compare against literal values by design
+  "S101", # pytest requires bare assert
+  "S105", # Fake credentials in fixtures
+  "S106", # Fake credentials passed to fakes
+  "S314", # Tests parse the GPX, TCX, and XML that the exporter just produced
+  "PLC0415", # Tests import where they patch, after the module under test is created
+  "SLF001", # Tests probe internal collaborators
+  "TRY003", # Fakes raise short inline error messages
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
