@@ -1,8 +1,8 @@
 name: Publish
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build distribution
+    name: Build and verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,15 +33,15 @@ jobs:
       - name: Check the metadata
         run: uv run --locked twine check dist/*
 
-      - name: Fail when the release tag and the package version disagree
-        if: github.event_name == 'release'
+      - name: Fail when the tag and the package version disagree
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           wheel=$(basename dist/*.whl)
           built_version=${wheel#mi_fitness_sync-}
           built_version=${built_version%-py3-none-any.whl}
-          if [ "v${built_version}" != "${GITHUB_REF_NAME}" ] && [ "${built_version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "Release tag ${GITHUB_REF_NAME} does not match the built version ${built_version}." >&2
+          if [ "v${built_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match the built version ${built_version}." >&2
             exit 1
           fi
 
@@ -51,10 +51,10 @@ jobs:
           path: dist/
 
   publish:
-    name: Publish to PyPI
+    name: Upload to PyPI
     needs: build
-    # A manual run only verifies the build; PyPI is written only for a published release.
-    if: github.event_name == 'release'
+    # Only a pushed tag publishes, so a manual run cannot reach PyPI even when it targets a tag.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -68,3 +68,38 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create the GitHub release
+    needs: publish
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the notes from the changelog
+        run: python .github/scripts/release_notes.py "$GITHUB_REF_NAME" > release-notes.md
+
+      - name: Fetch the built distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -s release-notes.md ]; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag dist/*
+          fi

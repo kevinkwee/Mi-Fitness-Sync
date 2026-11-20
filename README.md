@@ -5,8 +5,6 @@
   <a href="https://pypi.org/project/mi-fitness-sync/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/mi-fitness-sync"></a>
   <a href="https://github.com/kevinkwee/Mi-Fitness-Sync/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/kevinkwee/Mi-Fitness-Sync/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/kevinkwee/Mi-Fitness-Sync"></a>
-  <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
-  <a href="https://mypy.readthedocs.io/"><img alt="Checked with mypy" src="https://img.shields.io/badge/mypy-strict-2a6db2"></a>
   <a href="https://ko-fi.com/kevinkwee27"><img alt="Ko-fi" src="https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5f5f?logo=ko-fi&logoColor=white"></a>
 </p>
 
@@ -406,7 +404,7 @@ src/mi_fitness_sync/
   export/      GPX, TCX, and FIT rendering
   fds/         Mi Fitness FDS binary parsing and caching
   strava/      Strava OAuth2 auth and upload
-tests/         Per-module test files mirroring the package structure
+tests/         Per-module test files mirroring the package structure, plus the release tooling test
 ```
 
 Example:
@@ -443,7 +441,26 @@ Releases publish to PyPI through GitHub Actions trusted publishing, so no API to
 1. On PyPI, add a pending publisher for the project `mi-fitness-sync` with owner `kevinkwee`, repository `Mi-Fitness-Sync`, workflow `publish.yml`, and environment `pypi`.
 2. In the GitHub repository settings, create an environment named `pypi` and, optionally, add a deployment protection rule such as a required reviewer.
 
-After that, bump `__version__` in `src/mi_fitness_sync/__init__.py`, publish a GitHub release whose tag matches that version (`v0.1.0` or `0.1.0`), and the `Publish` workflow runs the tests, builds the sdist and wheel, and uploads them. A tag that does not match the version fails the workflow before anything is uploaded. The PyPI badges and the `pip install mi-fitness-sync` command only resolve once the first release is published.
+After that, the `Publish` workflow triggers on any tag matching `v*` and does the rest in order:
+
+1. Runs the test suite and builds the sdist and wheel.
+2. Stops if the tag does not match `__version__` in `src/mi_fitness_sync/__init__.py`, so a mistyped tag cannot claim a version on PyPI.
+3. Uploads both files to PyPI through trusted publishing.
+4. Creates the GitHub release for the tag, using that version's section of [`CHANGELOG.md`](https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/CHANGELOG.md) as the notes, and falls back to generated notes when the changelog has no section for it.
+
+To cut a release:
+
+1. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`, and put a fresh empty `## [Unreleased]` heading above it.
+2. At the bottom of that file, point the `[Unreleased]` link at `compare/v<x.y.z>...HEAD` and add `[x.y.z]: .../releases/tag/v<x.y.z>`.
+3. Set `__version__` in `src/mi_fitness_sync/__init__.py` to that version, commit both files, and push the commit.
+4. Push a tag that matches that version exactly:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+A manual `Publish` run stops after the build and never writes to PyPI. The PyPI badges and the `pip install mi-fitness-sync` command only resolve once the first release is published.
 
 ## Support
 

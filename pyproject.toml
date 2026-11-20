@@ -57,6 +57,7 @@ packages = ["src/mi_fitness_sync"]
 # An allowlist keeps local captures, editor state, and agent scratch files out of the sdist.
 [tool.hatch.build.targets.sdist]
 include = [
+  "/CHANGELOG.md",
   "/LICENSE",
   "/README.md",
   "/pyproject.toml",
@@ -64,6 +65,8 @@ include = [
   "/tests",
   "/uv.lock",
 ]
+# The release script is repository tooling and is not published, so its test cannot ship either.
+exclude = ["/tests/test_release_notes.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -81,7 +84,7 @@ skip_covered = false
 python_version = "3.12"
 strict = true
 pretty = true
-files = ["src", "tests"]
+files = ["src", "tests", ".github/scripts"]
 
 [[tool.mypy.overrides]]
 module = ["fit_tool.*"]
@@ -114,6 +117,9 @@ ignore = [
 "src/mi_fitness_sync/activity/crypto.py" = ["S324"]
 "src/mi_fitness_sync/activity/utils.py" = ["ANN401", "S324"]
 "src/mi_fitness_sync/auth/client.py" = ["ANN401", "S324"]
+# Release tooling is a standalone script directory: it prints the changelog section that
+# becomes the release notes, and nothing imports it as a package.
+".github/scripts/*.py" = ["INP001", "T201"]
 # fit-tool is imported at call time so building a GPX or TCX file never pays for it.
 "src/mi_fitness_sync/export/render.py" = ["PLC0415"]
 # Strava modules are imported where they are used so the Mi Fitness commands never load them.
