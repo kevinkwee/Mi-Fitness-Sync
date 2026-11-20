@@ -36,6 +36,7 @@ mi-fitness-sync = "mi_fitness_sync.cli.app:main"
 Homepage = "https://github.com/kevinkwee/Mi-Fitness-Sync"
 Repository = "https://github.com/kevinkwee/Mi-Fitness-Sync"
 Issues = "https://github.com/kevinkwee/Mi-Fitness-Sync/issues"
+Changelog = "https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/CHANGELOG.md"
 Funding = "https://ko-fi.com/kevinkwee27"
 
 [dependency-groups]

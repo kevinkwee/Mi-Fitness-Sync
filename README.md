@@ -407,12 +407,6 @@ src/mi_fitness_sync/
 tests/         Per-module test files mirroring the package structure, plus the release tooling test
 ```
 
-Example:
-
-```bash
-python -m mi_fitness_sync logout
-```
-
 ## Development
 
 The project is managed with [uv](https://docs.astral.sh/uv/) and checked with [ruff](https://docs.astral.sh/ruff/) and [mypy](https://mypy-lang.org/) in strict mode.
@@ -476,4 +470,4 @@ If `mi-fitness-sync` saves you time, you can [support its development on Ko-fi](
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/LICENSE).
