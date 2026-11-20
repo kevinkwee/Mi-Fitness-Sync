@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
-authors = [{ name = "kevinkwee" }]
+authors = [{ name = "Michael Elian Kevin", email = "contact@kevinkwee.dev" }]
 keywords = ["xiaomi", "mi-fitness", "strava", "gpx", "tcx", "fit", "cli", "fitness"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -37,6 +37,7 @@ Homepage = "https://github.com/kevinkwee/Mi-Fitness-Sync"
 Repository = "https://github.com/kevinkwee/Mi-Fitness-Sync"
 Issues = "https://github.com/kevinkwee/Mi-Fitness-Sync/issues"
 Changelog = "https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/CHANGELOG.md"
+Releases = "https://github.com/kevinkwee/Mi-Fitness-Sync/releases"
 Funding = "https://ko-fi.com/kevinkwee27"
 
 [dependency-groups]
