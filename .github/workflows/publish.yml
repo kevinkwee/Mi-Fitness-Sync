@@ -17,7 +17,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv publishes no floating major tag past v7, so pin the current release.
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
 
