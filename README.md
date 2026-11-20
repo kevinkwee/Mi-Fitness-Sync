@@ -434,6 +434,10 @@ uv run mypy
 
 CI runs formatting, lint, and type checks on pushes to `main` and on every pull request, together with a build whose packaging metadata is validated. The test suite runs on Ubuntu and Windows for Python 3.12 and 3.13.
 
+## Changelog
+
+Release notes live in [CHANGELOG.md](https://github.com/kevinkwee/Mi-Fitness-Sync/blob/main/CHANGELOG.md), and every published version has a [GitHub release](https://github.com/kevinkwee/Mi-Fitness-Sync/releases).
+
 ## Local Auth Storage
 
 By default, Mi Fitness auth state is stored in the user profile under `~/.mi_fitness_sync/auth/auth.json`.
