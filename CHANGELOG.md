@@ -7,14 +7,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- A `Releases` link on the PyPI project page, pointing at the GitHub releases page.
-
-### Changed
-
-- The PyPI project page shows the author as Michael Elian Kevin, linked to a contact email address.
-
 ## [0.1.0] - 2026-11-20
 
 ### Added
