@@ -77,7 +77,7 @@ mi-fitness-sync auth-status
 # 3. List recent workouts
 mi-fitness-sync list-activities --limit 10
 
-# 4. List activities and show which ones are already on Strava
+# 4. List activities and show which ones are already on Strava (requires strava-login)
 mi-fitness-sync list-activities --limit 10 --strava
 
 # 5. View normalized detail for one activity
@@ -326,7 +326,7 @@ The flow:
 4. Exchanges the code for access and refresh tokens
 5. Saves tokens to `~/.mi_fitness_sync/strava/tokens.json`
 
-The CLI refreshes Strava access tokens automatically using the stored refresh token whenever the saved access token is near expiry.
+When the saved access token has expired or is about to expire, the CLI refreshes it with the stored refresh token before filling the `--strava` column or uploading an activity.
 
 ### `strava-status`
 
@@ -390,7 +390,7 @@ Upload behavior:
 2. Renders to FIT format with the same optional smoothing controls as `export-activity`, then saves the file locally
 3. Checks Strava for existing activities within 5 minutes either side of the start time (unless `--skip-duplicate-check` is set)
 4. If potential duplicates are found, prompts for confirmation before uploading
-5. Uploads the FIT file to Strava and polls until processing completes
+5. Uploads the FIT file to Strava and polls until Strava finishes processing it, giving up after about a minute
 6. Prints the Strava activity URL on success
 7. The sport type is mapped from Mi Fitness to the closest Strava equivalent; unmapped types let Strava auto-detect
 
