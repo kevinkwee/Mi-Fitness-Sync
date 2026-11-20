@@ -74,7 +74,7 @@ SMOOTH_MODE_HELP = (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Mi Fitness Sync CLI")
+    parser = argparse.ArgumentParser(prog="mi-fitness-sync", description="Mi Fitness Sync CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     login_parser = subparsers.add_parser(

@@ -1702,6 +1702,24 @@ def test_fetch_strava_status_paginates(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert result["s:k:1"] is True
 
 
+class TestParserUsageName:
+    def test_help_names_the_console_script(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["--help"])
+
+        assert capsys.readouterr().out.split()[:2] == ["usage:", "mi-fitness-sync"]
+
+    def test_usage_error_names_the_console_script(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["export-activity"])
+
+        assert capsys.readouterr().err.split()[:3] == [
+            "usage:",
+            "mi-fitness-sync",
+            "export-activity",
+        ]
+
+
 class TestSmoothingFlagParsing:
     def test_export_activity_accepts_no_smooth(self) -> None:
         parser = cli.build_parser()
